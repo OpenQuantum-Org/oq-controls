@@ -1,0 +1,124 @@
+# OpenQuantum Controls
+
+This is the control UI for the rubidium MOT hardware. It reuses the EIT
+control app's Linien spectroscopy widget and Koheron setpoint worker, then adds
+the MOT supplies and repump tune/gate controls.
+
+## Hardware covered
+
+- One Koheron CTL200-0 laser controller for the MOT laser current, thermistor
+  setpoint, and laser on/off state
+- One Linien/Red Pitaya (STEMlab 125-14) spectroscopy lock; the error signal
+  locks this one laser
+- Repump VCO tune voltage (V_tune) through the MikroE DAC Click (MCP4921) on
+  the Red Pitaya Click Shield, socket 1 — driven via the patched
+  linien-server's `dac_click_voltage` parameter (see below). The UI shows the
+  resulting VCO output frequency from the datasheet tuning curve (@25 C,
+  linear interpolation; 0–5 V spans ~1790–2382 MHz)
+- Repump RF gate through a Linien Red Pitaya GPIO bit — fixed at `DIO1_N`
+  (bank `n`, bit 1), **active-low** (the RF amp enable on Click Shield
+  socket 2, the empirically verified mapping)
+- MOT coil DPS5005 voltage/current/output control
+- Dispenser DPS5020 with a fixed, timed fire: **7.5 A constant-current**
+  (5 V headroom setpoint, never reached) for **30 s**, then the output is
+  forced off automatically and a **15 min cooldown** blocks re-firing (the
+  lockout persists across app restarts). The operating point is fixed in
+  code — no UI controls — to protect the dispenser and the pump
+- Optional USB camera pane that can be toggled on below the live spectroscopy
+  plot, with a no-camera fallback if no camera is present
+
+## USB auto-detection at startup
+
+On every launch the app probes the USB serial devices before starting any
+hardware workers, using read-only identification commands only:
+
+- Koheron CTL200: an `ilaser` query (reads the current setpoint; a numeric
+  reply identifies the device)
+- DPS supplies: a Modbus read of the model register, which distinguishes the
+  DPS5005 (coils) from the DPS5020 (dispenser)
+
+The remembered port for each device is re-verified first — so rearranged USB
+cables are detected and corrected automatically — and any device that fails
+verification is searched for across the remaining ports. Verified assignments
+are saved in `QSettings` and auto-load next time. The device configuration
+pop-up only appears if a device cannot be found; when everything verifies,
+the app starts without interruption.
+
+The "Device Connections" card is collapsible and collapsed by default; its
+header shows a summary (e.g. `3/3 verified`), and it expands automatically
+when something is missing. Per-device connection status lives on each port
+row inside this card. `Devices -> Auto Discover USB Devices` (or the card's
+Auto Discover button) re-runs the probe at any time.
+
+## Red Pitaya prerequisite: patched linien-server
+
+V_tune goes through the Linien server on the Red Pitaya, which must be patched
+to expose the `dac_click_voltage` parameter (the patch adds an MCP4921 SPI
+driver to `write_registers()`, using `DIO3_N` as chip select). The patch and
+its full walkthrough live in the `qmot-linien-controls` repo. Notes that
+matter on the client side (already handled by this app):
+
+- The DAC full scale is **0–5 V**, set in hardware by the Click board's Vref;
+  the software range must match it (`--vtune-max`).
+- The linien parameter cache must be **off** for these writes
+  (`use_parameter_cache=False`) or they are silently swallowed.
+- Each DAC update costs ~0.3 s on the server (deliberate chip-select retry
+  loop), so the app only pushes the most recent slider value.
+- `DIO3_N` (bank `n`, bit 3) is reserved as the DAC chip select; the repump
+  gate is fixed on `DIO1_N` and never touches it.
+
+## Dispenser fire behavior
+
+The dispenser button fires the DPS5020 at the fixed operating point — the
+worker programs 7.5 A / 5.0 V before every enable, so the dispenser (a
+near-short) runs in constant-current mode — for 30 s, then the app turns the
+output off; clicking again during a fire aborts it. Either way a 15 min
+cooldown starts, shown as a countdown, and the fire button is locked out
+until it expires. The cooldown end time is saved in `QSettings`, so
+restarting the app does not reset it. The setpoints are re-enforced during a
+fire and applied to any output enabled from the DPS front panel while the
+app is connected, which also gets the same 30 s limit. The operating point
+is only changeable in code (`DispenserWorker.DISPENSE_CURRENT_A` /
+`DISPENSE_VOLTAGE_V` / `FIRE_SECONDS` in `mot_workers.py`). The auto-off
+runs in the app — if the app or the serial link dies mid-fire, the supply
+does not shut off on its own.
+
+## DPS register scaling
+
+The two supplies use different Modbus current/power resolutions: DPS5005 is
+0.001 A and 0.01 W per LSB, DPS5020 is 0.01 A and 0.1 W per LSB. On first
+connect, sanity-check the app's readback against each supply's front panel.
+
+## Run
+
+The `eit-controls` checkout must sit next to this repo — the UI imports its
+Linien spectroscopy widget, styles, and Koheron worker from `../eit-controls`.
+
+```bash
+# layout: <parent>/oq-controls (this repo) and <parent>/eit-controls
+cd oq-controls
+uv venv --python 3.12 .venv
+uv pip install -r requirements.txt
+uv run python mot_control.py \
+  --rp-host rp-f0f2b5.local \
+  --laser-port /dev/ttyUSB0 \
+  --mot-coil-port /dev/ttyUSB1 \
+  --dispenser-port /dev/ttyUSB2
+```
+
+The app persists connection settings in `QSettings` and re-verifies them at
+startup, so command-line arguments are mostly needed for first launch or
+scripted startup.
+
+Use `Devices -> Configure Devices...` to inspect discovered USB serial devices,
+apply best guesses, or enter ports manually (the same dialog pops up
+automatically at startup when auto-detection fails).
+
+## Linien GPIO mapping
+
+Linien exposes GPIO outputs as bitfields (`gpio_n_out`: `DIO0_N` through
+`DIO7_N`). The repump gate is fixed in code at `DIO1_N` (bank `n`, bit 1,
+Click Shield socket 2), active-low; `DIO3_N` (bit 3) is the DAC Click chip
+select and is never touched by the gate. Both mappings were verified
+empirically in `qmot-linien-controls` — change `_start_repump_workers()` in
+`mot_control.py` if the wiring ever changes.
