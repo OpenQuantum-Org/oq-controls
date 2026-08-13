@@ -17,8 +17,10 @@ from datetime import datetime
 
 
 class EventLog:
-    def __init__(self, directory):
+    def __init__(self, directory, on_record=None):
         self.directory = directory
+        # Optional UI hook: called with each record dict (GUI thread only).
+        self.on_record = on_record
 
     def path_for_today(self):
         return os.path.join(
@@ -31,6 +33,11 @@ class EventLog:
             "event": event,
         }
         record.update(fields)
+        if self.on_record is not None:
+            try:
+                self.on_record(record)
+            except Exception as e:
+                print(f"! event log UI hook failed: {e}")
         try:
             os.makedirs(self.directory, exist_ok=True)
             with open(self.path_for_today(), "a", encoding="utf-8") as f:

@@ -299,8 +299,15 @@ class RidenDPSWorker(QtCore.QThread):
         self.set_voltage(volts)
         self.set_current(amps)
 
+    # Setpoint-style commands are coalesced to the latest value so a slider
+    # drag results in one write, not a replayed burst. fire/abort keep
+    # their ordering.
+    COALESCE_KINDS = ("voltage", "current", "output", "params")
+
     def _queue(self, item):
         with QtCore.QMutexLocker(self._mutex):
+            if item[0] in self.COALESCE_KINDS:
+                self._pending = [p for p in self._pending if p[0] != item[0]]
             self._pending.append(item)
 
     def _pop_pending(self):

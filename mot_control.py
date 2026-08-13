@@ -104,8 +104,57 @@ def add_slider_row(*args, **kwargs):
     # The shared helper sizes its value edit for the old monospace font;
     # the proportional body font is wider, so give values like "1000 mV"
     # room (the smoke test checks every edit fits its extreme values).
-    edit.setFixedWidth(100)
+    edit.setFixedWidth(112)
+
+    # Make the value box actually editable: type a number (suffix
+    # optional), press Enter or click away, and the slider follows —
+    # clamped to the slider's range.
+    def commit():
+        import re
+
+        match = re.search(r"[-+]?\d*\.?\d+", edit.text())
+        if match is None:
+            slider.valueChanged.emit(slider.value())  # restore display
+            return
+        raw = int(round(float(match.group(0)) * edit.scale))
+        raw = max(edit.min_val, min(edit.max_val, raw))
+        if raw == slider.value():
+            slider.valueChanged.emit(raw)  # normalize/clamp the text
+        else:
+            slider.setValue(raw)
+
+    edit.editingFinished.connect(commit)
     return slider, edit
+
+
+class WheelGuard(QtCore.QObject):
+    """Stop the mouse wheel from changing unfocused controls.
+
+    The control column scrolls; without this, scrolling with the cursor
+    over a slider silently changes a hardware setpoint. Wheel events on
+    an unfocused control are redirected to the enclosing scroll area
+    (click a control first if you do want wheel adjustment).
+    """
+
+    def eventFilter(self, obj, event):
+        if isinstance(obj, QtWidgets.QScrollBar):
+            # Scrollbars must keep native wheel behavior — and forwarding
+            # them would recurse (viewport wheel is delivered via the bar).
+            return False
+        if (
+            event.type() == QtCore.QEvent.Wheel
+            and isinstance(obj, QtWidgets.QWidget)
+            and not obj.hasFocus()
+        ):
+            parent = obj.parentWidget()
+            while parent is not None and not isinstance(
+                parent, QtWidgets.QScrollArea
+            ):
+                parent = parent.parentWidget()
+            if parent is not None:
+                QtWidgets.QApplication.sendEvent(parent.viewport(), event)
+            return True
+        return False
 
 
 # Voltage to frequency conversion for Koheron drivers + 780 nm laser diodes.
@@ -774,6 +823,26 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._build_spectroscopy_column(root)
         self._build_control_column(root)
 
+        # Route event-log records into the log pane (GUI thread only).
+        self._event_log.on_record = self._on_log_record
+
+        # Wheel events must never change an unfocused control (this covers
+        # every slider/combo/spinbox, including the Linien sweep slider).
+        self._wheel_guard = WheelGuard(self)
+        for widget in self.findChildren(
+            (
+                QtWidgets.QAbstractSlider,
+                QtWidgets.QComboBox,
+                QtWidgets.QAbstractSpinBox,
+            )
+        ):
+            if isinstance(widget, QtWidgets.QScrollBar):
+                continue  # scrollbars keep native wheel scrolling
+            widget.setFocusPolicy(QtCore.Qt.StrongFocus)
+            widget.installEventFilter(self._wheel_guard)
+
+        self._restore_ui_state()
+
         QtCore.QTimer.singleShot(0, self._deferred_start)
 
     # ------------------------------------------------------------------
@@ -796,6 +865,86 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return float(self._settings.value(key, default))
         except (TypeError, ValueError):
             return float(default)
+
+    def _bool_setting(self, key, default):
+        value = self._settings.value(key, default)
+        return str(value).lower() not in ("false", "0", "no", "none")
+
+    # ------------------------------------------------------------------
+    # Small UI helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tip(text, *widgets, help_cursor=False):
+        """Attach a hover tooltip; help_cursor shows a (?) cursor on hover."""
+        for widget in widgets:
+            widget.setToolTip(text)
+            if help_cursor:
+                widget.setCursor(QtCore.Qt.WhatsThisCursor)
+
+    def _set_chip(self, key, text, color):
+        chip = self.health_chips[key]
+        chip.setText(text)
+        chip.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: 700;"
+            "border: 1px solid #1e1e2a; border-radius: 6px;"
+            "padding: 5px 10px; background: #0e0e16;"
+            f'font-family: "{TITLE_FONT_FAMILY}";'
+        )
+
+    def _restore_ui_state(self):
+        geometry = self._settings.value("ui/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        splitter_sizes = self._settings.value("ui/splitter_sizes")
+        if splitter_sizes:
+            try:
+                self.main_splitter.setSizes([int(s) for s in splitter_sizes])
+            except (TypeError, ValueError):
+                pass
+        if self._bool_setting("ui/camera_visible", False):
+            self.camera_toggle.setChecked(True)
+        self.usb_card.set_expanded(
+            self._bool_setting("ui/usb_card_expanded", False)
+        )
+        self.log_card.set_expanded(
+            self._bool_setting("ui/log_card_expanded", False)
+        )
+        # Persist expansion choices as they happen.
+        self.usb_card.toggle_btn.toggled.connect(
+            lambda expanded: self._settings.setValue(
+                "ui/usb_card_expanded", bool(expanded)
+            )
+        )
+        self.log_card.toggle_btn.toggled.connect(
+            lambda expanded: self._settings.setValue(
+                "ui/log_card_expanded", bool(expanded)
+            )
+        )
+
+    def _save_ui_state(self):
+        self._settings.setValue("ui/geometry", self.saveGeometry())
+        self._settings.setValue("ui/splitter_sizes", self.main_splitter.sizes())
+        self._settings.setValue(
+            "ui/camera_visible", self.camera_toggle.isChecked()
+        )
+
+    def _on_log_record(self, record):
+        """Mirror an event-log record into the collapsible log pane."""
+        if not hasattr(self, "log_view"):
+            return
+        timestamp = record.get("t", "")[11:19]
+        extras = " ".join(
+            f"{k}={v}" for k, v in record.items() if k not in ("t", "event")
+        )
+        line = f"{timestamp}  {record.get('event', '?')}"
+        if extras:
+            line += f"  {extras}"
+        self.log_view.appendPlainText(line[:300])
+        summary = f"{timestamp} {record.get('event', '?')}"
+        if len(summary) > 28:
+            summary = summary[:27] + "\N{HORIZONTAL ELLIPSIS}"
+        self.log_card.set_status(summary)
 
     # ------------------------------------------------------------------
     # Event logging helpers
@@ -913,13 +1062,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         title_row.addWidget(self.title_label)
         title_row.addStretch()
-        self.master_state_label = QtWidgets.QLabel("IDLE")
-        self.master_state_label.setStyleSheet(
-            "color: #8888a0; font-size: 14px; font-weight: 700;"
-            "border: 1px solid #1e1e2a; border-radius: 6px;"
-            "padding: 6px 12px; background: #0e0e16;"
+
+        # Health strip: one glance from across the lab tells you the state
+        # of the lock, the USB devices, the coils, and the dispenser.
+        self.health_chips = {}
+        for key in ("lock", "usb", "coils", "disp"):
+            chip = QtWidgets.QLabel("--")
+            title_row.addWidget(chip)
+            self.health_chips[key] = chip
+        self._set_chip("lock", "LOCK --", "#8888a0")
+        self._set_chip("usb", "USB --", "#8888a0")
+        self._set_chip("coils", "COILS OFF", "#8888a0")
+        self._set_chip("disp", "DISP IDLE", "#8888a0")
+        self._tip(
+            "System health: laser lock, USB devices, MOT coils, dispenser.",
+            *self.health_chips.values(),
+            help_cursor=True,
         )
-        title_row.addWidget(self.master_state_label)
         left.addLayout(title_row)
 
         view_bar = QtWidgets.QHBoxLayout()
@@ -942,6 +1101,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
         self.camera_toggle.toggled.connect(self._toggle_camera_view)
+        self._tip(
+            "Show the USB camera pane below the spectroscopy plot.",
+            self.camera_toggle,
+        )
         view_bar.addWidget(self.camera_toggle)
         left.addLayout(view_bar)
 
@@ -971,6 +1134,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_camera_view(self, visible):
         self.camera_widget.setVisible(visible)
+        self._settings.setValue("ui/camera_visible", bool(visible))
         if visible:
             self.main_splitter.setSizes([650, 300])
             self.camera_widget.activate()
@@ -998,6 +1162,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._add_laser_card(layout)
         self._add_repump_card(layout)
         self._add_dps_card(layout)
+        self._add_log_card(layout)
         layout.addStretch()
 
         root.addWidget(scroll, stretch=1)
@@ -1007,18 +1172,32 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.usb_card = card
         layout = card.content_layout
 
+        self._tip(
+            "USB device assignments. Verified automatically at startup with\n"
+            "read-only probes; the pop-up only appears if something is\n"
+            "missing.",
+            card.toggle_btn,
+        )
         self.rp_edit = self._add_line_edit(
             layout, "Linien RP:", self._rp_host, "rp-XXXXXX.local"
+        )
+        self._tip(
+            "Red Pitaya hostname or IP running linien-server (also carries\n"
+            "the DAC Click V_tune and the repump gate).",
+            self.rp_edit,
         )
         self.laser_edit, self.laser_usb_status = self._add_port_row(
             layout, "Koheron:", self._laser_port, "/dev/ttyUSB0"
         )
+        self._tip("Koheron CTL200 serial port.", self.laser_edit)
         self.mot_coil_port_edit, self.coil_usb_status = self._add_port_row(
             layout, "Coil DPS5005:", self._mot_coil_port, "/dev/ttyUSB1"
         )
+        self._tip("MOT coil DPS5005 serial port.", self.mot_coil_port_edit)
         self.dispenser_port_edit, self.dispenser_usb_status = self._add_port_row(
             layout, "Disp DPS5020:", self._dispenser_port, "/dev/ttyUSB2"
         )
+        self._tip("Dispenser DPS5020 serial port.", self.dispenser_port_edit)
 
         addr_row = QtWidgets.QHBoxLayout()
         addr_row.setSpacing(8)
@@ -1034,16 +1213,33 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         addr_row.addWidget(self._tiny_label("Disp"))
         addr_row.addWidget(self.dispenser_addr_spin)
         layout.addLayout(addr_row)
+        self._tip(
+            "Modbus slave addresses of the DPS supplies (front panel\n"
+            "setting; usually 1).",
+            self.mot_coil_addr_spin,
+            self.dispenser_addr_spin,
+        )
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.setSpacing(6)
         self.device_dialog_btn = QtWidgets.QPushButton("Devices...")
         self.device_dialog_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.device_dialog_btn.clicked.connect(self._open_device_config_dialog)
+        self._tip(
+            "Open the device configuration dialog (discovered ports,\n"
+            "manual entry).",
+            self.device_dialog_btn,
+        )
         self.auto_discover_btn = QtWidgets.QPushButton("Auto Discover")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.auto_discover_btn.clicked.connect(
             lambda: self._run_usb_probe(startup=False)
+        )
+        self._tip(
+            "Re-run the USB probe: identify each device with read-only\n"
+            "commands and reassign ports (briefly disconnects the serial\n"
+            "workers).",
+            self.auto_discover_btn,
         )
         button_row.addWidget(self.device_dialog_btn)
         button_row.addWidget(self.auto_discover_btn)
@@ -1052,7 +1248,32 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.connect_btn = QtWidgets.QPushButton("Connect / Reconnect")
         self.connect_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.connect_btn.clicked.connect(self._connect_all)
+        self._tip(
+            "Restart every connection (Linien, DAC, gate, and all serial\n"
+            "workers) using the fields above.",
+            self.connect_btn,
+        )
         layout.addWidget(self.connect_btn)
+        parent.addWidget(card)
+
+    def _add_log_card(self, parent):
+        card = CollapsibleCard("Event Log", collapsed=True)
+        self.log_card = card
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        self.log_view.setFixedHeight(150)
+        self.log_view.setStyleSheet(
+            "QPlainTextEdit { background: #0a0a0f; color: #9a9ab0;"
+            "border: 1px solid #1e1e2a; border-radius: 6px;"
+            "font-size: 11px; padding: 4px; }"
+        )
+        self._tip(
+            "Recent events (fires, faults, protection trips, lock changes).\n"
+            "The full history is in logs/mot-YYYYMMDD.jsonl.",
+            self.log_view,
+        )
+        card.content_layout.addWidget(self.log_view)
         parent.addWidget(card)
 
     def _add_port_row(self, layout, label_text, value, placeholder):
@@ -1087,8 +1308,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             page=1000,
             decimals=3,
             scale=1000.0,
+            suffix=" MHz",
         )
         self.mod_freq_slider.valueChanged.connect(self._on_mod_freq)
+        self._tip(
+            "Lock-in modulation frequency (MHz). Type a value or drag;\n"
+            "applied to the Linien server immediately.",
+            self.mod_freq_slider,
+            self.mod_freq_edit,
+        )
 
         self.mod_phase_slider, self.mod_phase_edit = add_slider_row(
             layout,
@@ -1098,8 +1326,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._int_setting("linien/mod_phase_deg", 0, 0, 360),
             single=1,
             page=10,
+            suffix="\N{DEGREE SIGN}",
         )
         self.mod_phase_slider.valueChanged.connect(self._on_mod_phase)
+        self._tip(
+            "Demodulation phase (degrees). Rotates the error signal shape.",
+            self.mod_phase_slider,
+            self.mod_phase_edit,
+        )
 
         self.mod_strength_slider, self.mod_strength_edit = add_slider_row(
             layout,
@@ -1112,6 +1346,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             suffix=" mV",
         )
         self.mod_strength_slider.valueChanged.connect(self._on_mod_strength)
+        self._tip(
+            "Modulation amplitude (mV) driving the current dither.\n"
+            "0 mV disables the dither (no error signal).",
+            self.mod_strength_slider,
+            self.mod_strength_edit,
+        )
 
         speed_row = QtWidgets.QHBoxLayout()
         speed_row.setSpacing(8)
@@ -1143,8 +1383,19 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.sweep_speed_combo.currentIndexChanged.connect(self._on_sweep_speed)
         speed_row.addWidget(self.sweep_speed_combo, stretch=1)
         layout.addLayout(speed_row)
+        self._tip(
+            "Linien sweep repetition rate. Slower sweeps show narrower\n"
+            "features; faster sweeps update the trace more often.",
+            self.sweep_speed_combo,
+        )
 
         self.lock_readout = add_readout_row(layout, "Laser:", "Unlocked")
+        self._tip(
+            "Lock state reported by Linien. Use the plot's Lock Laser\n"
+            "button after selecting a lock region on the trace.",
+            self.lock_readout,
+            help_cursor=True,
+        )
         parent.addWidget(card)
 
     def _add_laser_card(self, parent):
@@ -1153,11 +1404,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout.addWidget(make_section_title("Koheron Laser Setpoints"))
 
         self.laser_status = add_readout_row(layout, "Koheron:", "No port set")
+        self._tip(
+            "Koheron CTL200 connection state.",
+            self.laser_status,
+            help_cursor=True,
+        )
         self.laser_btn = QtWidgets.QPushButton("Laser Off")
         self.laser_btn.setCheckable(True)
         self.laser_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.laser_btn.toggled.connect(self._toggle_laser)
         layout.addWidget(self.laser_btn)
+        self._tip("Toggle the laser diode output (lason).", self.laser_btn)
 
         self.current_slider, self.current_edit = add_slider_row(
             layout,
@@ -1170,6 +1427,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             suffix=" mA",
         )
         self.current_slider.valueChanged.connect(self._on_current)
+        self._tip(
+            "Laser diode current setpoint (mA). Type a value or drag.",
+            self.current_slider,
+            self.current_edit,
+        )
         self.therm_slider, self.therm_edit = add_slider_row(
             layout,
             "Thermistor:",
@@ -1178,10 +1440,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._int_setting("laser/thermistor_ohm", 6215, 5000, 10000),
             single=1,
             page=50,
+            suffix=" \N{OHM SIGN}",
         )
         self.therm_slider.valueChanged.connect(self._on_thermistor)
+        self._tip(
+            "TEC thermistor setpoint (ohms). Lower resistance = warmer\n"
+            "diode; see the estimated temperature below.",
+            self.therm_slider,
+            self.therm_edit,
+        )
         self.therm_temp_readback = add_readout_row(layout, "Temp (est):", "--")
         self._update_therm_temp(self.therm_slider.value())
+        self._tip(
+            "Setpoint converted with the 10 k NTC Steinhart-Hart curve\n"
+            "(estimate, not a measurement).",
+            self.therm_temp_readback,
+            help_cursor=True,
+        )
         parent.addWidget(card)
 
     def _add_dps_card(self, parent):
@@ -1192,11 +1467,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(make_section_title("MOT Coils — DPS5005"))
         self.mot_coil_readback = add_readout_row(layout, "Readback:", "--")
+        self._tip(
+            "Measured coil supply output (V / A / W). Turns red if the\n"
+            "supply trips a protection (OVP/OCP/OPP).",
+            self.mot_coil_readback,
+            help_cursor=True,
+        )
         self.mot_coil_output_btn = QtWidgets.QPushButton("Coils Off")
         self.mot_coil_output_btn.setCheckable(True)
         self.mot_coil_output_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.mot_coil_output_btn.toggled.connect(self._toggle_mot_coils)
         layout.addWidget(self.mot_coil_output_btn)
+        self._tip("Toggle the MOT coil supply output.", self.mot_coil_output_btn)
         self.mot_coil_voltage_slider, self.mot_coil_voltage_edit = add_slider_row(
             layout,
             "Voltage:",
@@ -1210,6 +1492,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             scale=1000.0,
         )
         self.mot_coil_voltage_slider.valueChanged.connect(self._on_mot_coil_voltage)
+        self._tip(
+            "Coil supply voltage limit (V). With the coils' low resistance\n"
+            "the supply usually runs current-limited; this is headroom.",
+            self.mot_coil_voltage_slider,
+            self.mot_coil_voltage_edit,
+        )
         self.mot_coil_current_slider, self.mot_coil_current_edit = add_slider_row(
             layout,
             "Current:",
@@ -1223,6 +1511,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             scale=1000.0,
         )
         self.mot_coil_current_slider.valueChanged.connect(self._on_mot_coil_current)
+        self._tip(
+            "Coil current setpoint (A) — sets the MOT magnetic field\n"
+            "gradient. Type a value or drag.",
+            self.mot_coil_current_slider,
+            self.mot_coil_current_edit,
+        )
 
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
@@ -1231,13 +1525,36 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(make_section_title("Dispenser — DPS5020"))
         self.dispenser_readback = add_readout_row(layout, "Readback:", "--")
+        self._tip(
+            "Measured dispenser supply output (V / A / W) and CV/CC mode.\n"
+            "Turns red if the supply trips a protection.",
+            self.dispenser_readback,
+            help_cursor=True,
+        )
         # The dispense operating point defaults to 7.5 A constant-current
         # for 30 s and is only changeable through the confirmed Override
         # dialog; there are no free-form controls.
         self.dispenser_setpoint_label = add_readout_row(layout, "Setpoint:", "--")
+        self._tip(
+            "Fixed dispense operating point. Change it only through\n"
+            "Override... (confirmation required).",
+            self.dispenser_setpoint_label,
+            help_cursor=True,
+        )
         self.dispenser_history_label = add_readout_row(layout, "Fires:", "--")
         self._update_dispenser_history_label()
+        self._tip(
+            "Lifetime fire count and total seconds — tracks dispenser wear.",
+            self.dispenser_history_label,
+            help_cursor=True,
+        )
         self.dispenser_fire_label = add_readout_row(layout, "Fire:", "Idle")
+        self._tip(
+            "Fire phase. After each fire a 15 min cooldown blocks re-firing\n"
+            "(it survives an app restart).",
+            self.dispenser_fire_label,
+            help_cursor=True,
+        )
 
         fire_row = QtWidgets.QHBoxLayout()
         fire_row.setSpacing(6)
@@ -1247,13 +1564,36 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.dispenser_fire_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.dispenser_fire_btn.clicked.connect(self._fire_dispenser_clicked)
         fire_row.addWidget(self.dispenser_fire_btn, stretch=1)
+        self._tip(
+            "Run the dispenser at the fixed operating point, then auto-off.\n"
+            "Click again mid-fire to abort (cooldown still applies).",
+            self.dispenser_fire_btn,
+        )
         self.dispenser_override_btn = QtWidgets.QPushButton("Override...")
         self.dispenser_override_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.dispenser_override_btn.clicked.connect(
             self._open_dispenser_override_dialog
         )
         fire_row.addWidget(self.dispenser_override_btn)
+        self._tip(
+            "Change the fire current/duration (confirmation required;\n"
+            "locked while firing).",
+            self.dispenser_override_btn,
+        )
         layout.addLayout(fire_row)
+
+        # Time-remaining bar: drains during a fire (orange) and during the
+        # cooldown (blue); hidden when idle.
+        self.dispenser_progress = QtWidgets.QProgressBar()
+        self.dispenser_progress.setRange(0, 1000)
+        self.dispenser_progress.setTextVisible(False)
+        self.dispenser_progress.setFixedHeight(6)
+        self.dispenser_progress.setVisible(False)
+        layout.addWidget(self.dispenser_progress)
+        self._tip(
+            "Time remaining in the current fire or cooldown.",
+            self.dispenser_progress,
+        )
 
         self._update_dispenser_setpoint_text()
         parent.addWidget(card)
@@ -1265,7 +1605,19 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout.addWidget(make_section_title("Repump Frequency Tuning"))
 
         self.vtune_readback = add_readout_row(layout, "V_tune:", "--")
+        self._tip(
+            "Actual DAC Click output voltage read back from the Linien\n"
+            "server (each write takes ~0.3 s).",
+            self.vtune_readback,
+            help_cursor=True,
+        )
         self.vtune_freq_readback = add_readout_row(layout, "VCO Freq:", "--")
+        self._tip(
+            "Repump VCO output frequency from the datasheet tuning curve\n"
+            "(V_tune -> MHz, 25 \N{DEGREE SIGN}C).",
+            self.vtune_freq_readback,
+            help_cursor=True,
+        )
         vtune_min_mv = int(round(self._vtune_min * 1000))
         vtune_max_mv = int(round(self._vtune_max * 1000))
         vtune_initial_mv = self._int_setting(
@@ -1284,12 +1636,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             scale=1000.0,
         )
         self.vtune_slider.valueChanged.connect(self._on_vtune)
+        self._tip(
+            "Repump VCO tune voltage via the DAC Click (0-5 V full scale).\n"
+            "Type a value or drag; the slider adopts the hardware value on\n"
+            "connect.",
+            self.vtune_slider,
+            self.vtune_edit,
+        )
 
         self.repump_gpio_btn = QtWidgets.QPushButton("Repump Gate Off")
         self.repump_gpio_btn.setCheckable(True)
         self.repump_gpio_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.repump_gpio_btn.toggled.connect(self._toggle_repump_gpio)
         layout.addWidget(self.repump_gpio_btn)
+        self._tip(
+            "Repump RF amplifier enable — Linien GPIO DIO1_N, active-low\n"
+            "(fixed mapping).",
+            self.repump_gpio_btn,
+        )
         parent.addWidget(card)
 
     def _add_line_edit(self, layout, label_text, value, placeholder):
@@ -1371,7 +1735,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Serial workers hold their ports open; release them for probing.
         self._stop_serial_workers()
 
-        self.master_state_label.setText("PROBING USB")
+        self._set_chip("usb", "USB ...", "#8888a0")
         self.usb_card.set_status("Probing…")
         for attr in self._USB_STATUS_ROWS:
             self._set_colored_text(getattr(self, attr), "Probing…", "#8888a0")
@@ -1418,7 +1782,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 self._set_colored_text(getattr(self, attr), "Not found", "#dd5050")
 
         if res.get("ok"):
-            self.master_state_label.setText("USB 3/3")
+            self._set_chip("usb", "USB 3/3", "#40dd80")
             self.usb_card.set_status("3/3 verified", "#40dd80")
         else:
             n_ok = sum(
@@ -1426,7 +1790,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 for key in ("laser", "mot_coil", "dispenser")
                 if status.get(key) == "verified"
             )
-            self.master_state_label.setText("CHECK USB DEVICES")
+            self._set_chip("usb", f"USB {n_ok}/3", "#dd5050")
             # Compact summary: the auto-expanded card's per-row statuses
             # show which device is missing.
             self.usb_card.set_status(f"{n_ok}/3 verified", "#dd5050")
@@ -1598,7 +1962,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         return getattr(self.linien_widget, "linien_thread", None)
 
     def _on_mod_freq(self, value):
-        self.mod_freq_edit.setText(f"{value / 1000.0:.3f}")
+        self.mod_freq_edit.setText(f"{value / 1000.0:.3f} MHz")
         self._settings.setValue("linien/mod_freq_khz", value)
         self._debounced_log(
             "mod_freq",
@@ -1610,7 +1974,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_modulation_frequency(value)
 
     def _on_mod_phase(self, value):
-        self.mod_phase_edit.setText(str(value))
+        self.mod_phase_edit.setText(f"{value}\N{DEGREE SIGN}")
         self._settings.setValue("linien/mod_phase_deg", value)
         self._debounced_log(
             "mod_phase",
@@ -1648,6 +2012,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_lock_state(self, locked):
         self._set_lock_label(self.lock_readout, locked)
+        if locked:
+            self._set_chip("lock", "LOCKED", "#40dd80")
+        else:
+            self._set_chip("lock", "UNLOCKED", "#dd5050")
         self._event_log.log("lock", locked=bool(locked))
 
     # ------------------------------------------------------------------
@@ -1663,7 +2031,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.therm_slider.blockSignals(True)
         self.therm_slider.setValue(int(values["thermistor"]))
         self.therm_slider.blockSignals(False)
-        self.therm_edit.setText(str(int(values["thermistor"])))
+        self.therm_edit.setText(f"{int(values['thermistor'])} \N{OHM SIGN}")
         self._update_therm_temp(int(values["thermistor"]))
         self._event_log.log(
             "laser_init",
@@ -1691,7 +2059,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_current(value)
 
     def _on_thermistor(self, value):
-        self.therm_edit.setText(str(value))
+        self.therm_edit.setText(f"{value} \N{OHM SIGN}")
         self._settings.setValue("laser/thermistor_ohm", value)
         self._update_therm_temp(value)
         self._debounced_log(
@@ -1830,6 +2198,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mot_coil_output_btn, state, "Coils On", "Coils Off"
         )
         self._set_readback_text(self.mot_coil_readback, state)
+        if int(state.get("protection", 0) or 0):
+            self._set_chip("coils", "COILS TRIP", "#dd5050")
+        elif state.get("output_enabled"):
+            self._set_chip("coils", f"COILS {state['i_out']:.1f} A", "#40dd80")
+        else:
+            self._set_chip("coils", "COILS OFF", "#8888a0")
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
@@ -1881,6 +2255,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 self._event_log.log("dispenser_ready")
         self._dispenser_phase = phase
         self.dispenser_override_btn.setEnabled(phase != "firing")
+        self._update_dispenser_progress(phase, remaining)
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
@@ -1889,6 +2264,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 f"FIRING — {remaining:.0f} s left",
                 "#ff9f40",
             )
+            self._set_chip("disp", "DISP FIRING", "#ff9f40")
         elif phase == "cooldown":
             minutes, seconds = divmod(int(round(remaining)), 60)
             self.dispenser_fire_btn.setEnabled(False)
@@ -1898,12 +2274,34 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 f"Cooldown {minutes:d}:{seconds:02d}",
                 "#00d4ff",
             )
+            self._set_chip("disp", f"DISP {minutes:d}:{seconds:02d}", "#00d4ff")
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
             self._set_colored_text(self.dispenser_fire_label, "Idle", "#8888a0")
+            self._set_chip("disp", "DISP IDLE", "#8888a0")
+
+    def _update_dispenser_progress(self, phase, remaining):
+        if phase == "firing":
+            total = max(1.0, self._dispenser_fire_seconds)
+            color = "#ff9f40"
+        elif phase == "cooldown":
+            total = DispenserWorker.COOLDOWN_SECONDS
+            color = "#00d4ff"
+        else:
+            self.dispenser_progress.setVisible(False)
+            return
+        fraction = max(0.0, min(1.0, remaining / total))
+        self.dispenser_progress.setValue(int(round(1000 * fraction)))
+        self.dispenser_progress.setStyleSheet(
+            "QProgressBar { background: #0e0e16; border: none;"
+            "border-radius: 3px; }"
+            f"QProgressBar::chunk {{ background: {color};"
+            "border-radius: 3px; }"
+        )
+        self.dispenser_progress.setVisible(True)
 
     def _on_dispenser_cooldown_started(self, until_epoch):
         self._dispenser_cooldown_until = float(until_epoch)
@@ -2058,6 +2456,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         print("Shutting down OpenQuantum Controls...")
+        self._save_ui_state()
         self._event_log.log("app_stop")
         if self._dispenser_phase == "firing":
             # Closing mid-fire skips the worker's cooldown transition; the

@@ -90,6 +90,29 @@ restored via the dialog's Defaults button (the safe operating point remains
 `DispenserWorker.DISPENSE_CURRENT_A` / `FIRE_SECONDS` in `mot_workers.py`).
 The override is locked out while a fire is running.
 
+## UI behavior
+
+- **Health strip** (title row): color-coded chips for the laser lock, USB
+  verification, coil supply (with live current), and dispenser phase —
+  readable from across the lab.
+- **Typed entry**: every slider's value box is editable — type a number
+  (suffix optional), press Enter or click away, and the value is clamped
+  and applied.
+- **Wheel guard**: the mouse wheel never changes an unfocused control, so
+  scrolling the column can't silently move a hardware setpoint. Click a
+  control first if you want wheel adjustment.
+- **Event log pane**: a collapsible card at the bottom of the column
+  mirrors the JSONL log; its header always shows the latest event.
+- **Dispenser progress bar**: time remaining in the current fire (orange)
+  or cooldown (blue).
+- **Tooltips**: every control has hover help; informational readouts show
+  a (?) cursor.
+- **Persistent UI state**: window geometry, splitter position, camera
+  pane visibility, and card expansion are restored on the next launch
+  (alongside all control parameters).
+- Slider drags are coalesced into single hardware writes (latest value
+  wins) instead of replaying every intermediate step.
+
 ## Event log
 
 Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` (one JSON object
