@@ -454,7 +454,7 @@ class CollapsibleCard(QtWidgets.QFrame):
             QtCore.Qt.RightArrow if collapsed else QtCore.Qt.DownArrow
         )
         self.toggle_btn.setStyleSheet(
-            f"QToolButton {{ color: {NEON_BLUE}; font-size: 11px;"
+            f"QToolButton {{ color: {NEON_BLUE}; font-size: 13px;"
             "font-weight: 600; letter-spacing: 1px; border: none;"
             "background: transparent; padding: 2px 4px;"
             f' font-family: "{TITLE_FONT_FAMILY}"; }}'
@@ -464,7 +464,7 @@ class CollapsibleCard(QtWidgets.QFrame):
         header.addStretch()
         self.header_status = QtWidgets.QLabel("")
         self.header_status.setStyleSheet(
-            "color: #ababab; font-size: 11px; font-weight: 600; border: none;"
+            "color: #ababab; font-size: 13px; font-weight: 600; border: none;"
         )
         header.addWidget(self.header_status)
         outer.addLayout(header)
@@ -491,7 +491,7 @@ class CollapsibleCard(QtWidgets.QFrame):
     def set_status(self, text, color="#ababab"):
         self.header_status.setText(text)
         self.header_status.setStyleSheet(
-            f"color: {color}; font-size: 11px; font-weight: 600; border: none;"
+            f"color: {color}; font-size: 13px; font-weight: 600; border: none;"
         )
 
 
@@ -1496,7 +1496,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.discovery_hint = QtWidgets.QLabel("")
         self.discovery_hint.setWordWrap(True)
         self.discovery_hint.setStyleSheet(
-            "color: #969696; font-size: 11px; border: none;"
+            "color: #969696; font-size: 13px; border: none;"
         )
         manual_layout.addWidget(self.discovery_hint)
 
@@ -1706,7 +1706,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.log_view.setStyleSheet(
             "QPlainTextEdit { background: #0b0b0b; color: #b2b2b2;"
             "border: 1px solid #282828; border-radius: 0px;"
-            "font-size: 11px; padding: 4px; }"
+            "font-size: 13px; padding: 4px; }"
         )
         self._tip(
             "Recent events (fires, faults, protection trips, lock changes).\n"
@@ -2147,7 +2147,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _tiny_label(text):
         label = QtWidgets.QLabel(text)
         label.setStyleSheet(
-            "color: #969696; font-size: 11px; font-weight: 600; border: none;"
+            "color: #969696; font-size: 13px; font-weight: 600; border: none;"
         )
         return label
 

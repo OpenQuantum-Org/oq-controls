@@ -27,7 +27,7 @@ APP_STYLESHEET = """
     /* --- Section titles --- */
     QLabel.section-title {
         color: #ababab;
-        font-size: 11px;
+        font-size: 13px;
         font-weight: 600;
         letter-spacing: 1px;
         text-transform: uppercase;
@@ -201,7 +201,7 @@ def make_section_title(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text.upper())
     label.setAlignment(QtCore.Qt.AlignLeft)
     label.setStyleSheet(
-        f"color: {ACCENT}; font-size: 11px; font-weight: 600;"
+        f"color: {ACCENT}; font-size: 13px; font-weight: 600;"
         "letter-spacing: 1px; padding: 2px 4px; border: none;"
     )
     return label
