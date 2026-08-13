@@ -10,6 +10,8 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 from superqt import QRangeSlider
 
+from styles import UI_FONT_PX, plot_label_style, style_plot_axes
+
 
 class LinienWidget(QtWidgets.QWidget):
     """Linien plot + lock controls for a Red Pitaya.
@@ -84,16 +86,17 @@ class LinienWidget(QtWidgets.QWidget):
         self.pg_widget.nextRow()
         self.plot = self.pg_widget.addPlot(row=1, col=0)
         self.plot.showGrid(x=True, y=True, alpha=0.15)
+        style_plot_axes(self.plot)
 
         if self._v_to_mhz is not None:
             self.plot.setLabel("bottom", "VCO Frequency (MHz)",
-                               **{"font-size": "10pt", "color": "#969696"})
+                               **plot_label_style())
         elif self._v_to_freq is not None:
             self.plot.setLabel("bottom", "Detuning (MHz)",
-                               **{"font-size": "10pt", "color": "#969696"})
+                               **plot_label_style())
         else:
             self.plot.setLabel("bottom", "Sweep Voltage (V)",
-                               **{"font-size": "10pt", "color": "#969696"})
+                               **plot_label_style())
 
         # pyqtgraph's own auto-range button: a small "A" that appears over
         # the plot on hover. Autozoom replaces it.
@@ -109,7 +112,9 @@ class LinienWidget(QtWidgets.QWidget):
         self.original_xrange = self.plot.viewRange()[0]
         self.original_yrange = self.plot.viewRange()[1]
 
-        legend = self.plot.addLegend(offset=(-10, 10), labelTextSize="13pt")
+        legend = self.plot.addLegend(
+            offset=(-10, 10), labelTextSize=f"{UI_FONT_PX}px"
+        )
         legend.setLabelTextColor("#ababab")
         legend.setBrush(pg.mkBrush(11, 11, 11, 200))
         legend.setPen(pg.mkPen("#282828"))
@@ -147,18 +152,8 @@ class LinienWidget(QtWidgets.QWidget):
         proxy.setZValue(1000)
         proxy.setPos(150, 10)
 
-        overlay_btn_style = """
-            QPushButton {
-                background-color: rgba(20,20,30,200); color: #c4c4c4;
-                border: 1px solid #2e2e2e; border-radius: 0px;
-                font-size: 13px; padding: 3px 8px;
-            }
-            QPushButton:hover { background-color: rgba(40,40,60,220); color: white; }
-        """
-
-        # Nothing but labels sits over the traces. The lock controls are
-        # handed to the host window (see lock_controls) so they can live in
-        # the Linien Lock card, and autozoom sits under the plot.
+        # Nothing but labels sits over the traces: the lock controls and
+        # the autozoom checkbox are handed to the host window.
         # Unparented: the host window places this with its other view
         # controls (see autozoom_check).
         self.autozoom_check = QtWidgets.QCheckBox("Autozoom")

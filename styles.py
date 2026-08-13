@@ -1,4 +1,9 @@
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+# One family and one body size for the whole UI, plots included.
+UI_FONT_FAMILY = "Space Grotesk"
+UI_FONT_PX = 13
+PLOT_AXIS_COLOR = "#969696"
 
 # ---------------------------------------------------------------------------
 # Global application stylesheet — applied once at startup
@@ -272,3 +277,28 @@ def add_readout_row(parent_layout, label_text, initial_text="--", unit=""):
     parent_layout.addLayout(row)
     value_label.unit = unit
     return value_label
+
+
+def plot_label_style():
+    """Axis-label kwargs for setLabel(), matching the UI's type."""
+    return {
+        "font-size": f"{UI_FONT_PX}px",
+        "font-family": UI_FONT_FAMILY,
+        "color": PLOT_AXIS_COLOR,
+    }
+
+
+def style_plot_axes(plot):
+    """Put a pyqtgraph plot's tick labels on the UI's font and size.
+
+    pyqtgraph draws ticks with its own default font, which is neither the
+    app family nor the app size, so plots otherwise read as a foreign
+    element pasted into the window.
+    """
+    font = QtGui.QFont(UI_FONT_FAMILY)
+    font.setPixelSize(UI_FONT_PX)
+    for side in ("left", "bottom"):
+        axis = plot.getAxis(side)
+        axis.setTickFont(font)
+        axis.setTextPen(PLOT_AXIS_COLOR)
+    return plot

@@ -30,11 +30,14 @@ from linien_widget import LinienWidget
 from styles import (
     ACCENT,
     APP_STYLESHEET,
+    UI_FONT_PX,
     NEON_BLUE,
     add_readout_row,
     add_slider_row as _eit_add_slider_row,
     make_card,
     make_section_title as _eit_make_section_title,
+    plot_label_style,
+    style_plot_axes,
 )
 
 from mot_logging import EventLog
