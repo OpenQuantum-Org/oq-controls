@@ -1842,6 +1842,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.laser_btn)
         self._tip("Toggle the laser diode output (lason).", self.laser_btn)
 
+        # The laser runs at a fixed operating point. Both setpoints start
+        # locked every session so neither can be moved by a stray drag;
+        # unlocking is deliberate and is never persisted.
+        lock_row = QtWidgets.QHBoxLayout()
+        lock_row.setSpacing(8)
+        self.laser_unlock_box = QtWidgets.QCheckBox("Unlock setpoints")
+        self.laser_unlock_box.setCursor(QtCore.Qt.PointingHandCursor)
+        self.laser_unlock_box.toggled.connect(self._on_laser_unlock)
+        lock_row.addWidget(self.laser_unlock_box)
+        lock_row.addStretch()
+        self.laser_lock_label = QtWidgets.QLabel()
+        lock_row.addWidget(self.laser_lock_label)
+        layout.addLayout(lock_row)
+        self._tip(
+            "Laser current and thermistor are locked at the operating point.\n"
+            "Tick to enable the sliders for this session only.",
+            self.laser_unlock_box,
+        )
+
         self.current_slider, self.current_edit = add_slider_row(
             layout,
             "Current:",
@@ -1863,7 +1882,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Thermistor:",
             5000,
             15000,
-            self._int_setting("laser/thermistor_ohm", 6215, 5000, 15000),
+            # 10 k on the 10 k NTC curve is 25 C, the intended operating point.
+            # The previous 6215 default sat at 36 C.
+            self._int_setting("laser/thermistor_ohm", 10000, 5000, 15000),
             single=1,
             page=50,
             suffix=" \N{OHM SIGN}",
@@ -1877,6 +1898,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.therm_temp_readback = add_readout_row(layout, "Temp (est):", "--")
         self._update_therm_temp(self.therm_slider.value())
+        self._apply_laser_lock(False)
         self._tip(
             "Setpoint converted with the 10 k NTC Steinhart-Hart curve\n"
             "(estimate, not a measurement).",
@@ -2501,6 +2523,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
             worker.set_thermistor(value)
+
+    def _apply_laser_lock(self, unlocked):
+        """Enable or disable the laser setpoint controls and update the badge."""
+        for slider in (self.current_slider, self.therm_slider):
+            slider.setEnabled(unlocked)
+        # Read-only rather than disabled: the value must stay legible when
+        # locked, and disabling these edits segfaults Qt on teardown.
+        for edit in (self.current_edit, self.therm_edit):
+            edit.setReadOnly(not unlocked)
+        self._set_colored_text(
+            self.laser_lock_label,
+            "UNLOCKED" if unlocked else "LOCKED",
+            "#ff9f40" if unlocked else "#8a8aa0",
+        )
+
+    def _on_laser_unlock(self, unlocked):
+        self._apply_laser_lock(unlocked)
+        self._event_log.log("laser_setpoints_unlocked", unlocked=bool(unlocked))
 
     def _update_therm_temp(self, ohms):
         self.therm_temp_readback.setText(
