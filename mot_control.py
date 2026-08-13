@@ -860,7 +860,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("OpenQuantum Controls")
         self.resize(1540, 960)
-        self._build_menu()
 
         central = QtWidgets.QWidget()
         central.setObjectName("central")
@@ -1061,43 +1060,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
-
-    def _build_menu(self):
-        self.menuBar().setStyleSheet("""
-            QMenuBar {
-                background: #0b0b0b;
-                color: #e6e6e6;
-                border-bottom: 1px solid #282828;
-            }
-            QMenuBar::item {
-                background: transparent;
-                padding: 4px 10px;
-            }
-            QMenuBar::item:selected {
-                background: #1d1d1d;
-                color: white;
-            }
-            QMenu {
-                background: #171717;
-                color: #e6e6e6;
-                border: 1px solid #282828;
-            }
-            QMenu::item:selected {
-                background: #383838;
-                color: white;
-            }
-        """)
-        devices_menu = self.menuBar().addMenu("Devices")
-
-        show_devices_action = QtGui.QAction("Show Device Connections", self)
-        show_devices_action.triggered.connect(
-            lambda: self.usb_card.set_expanded(True)
-        )
-        devices_menu.addAction(show_devices_action)
-
-        discover_action = QtGui.QAction("Auto Discover USB Devices", self)
-        discover_action.triggered.connect(lambda: self._run_usb_probe(startup=False))
-        devices_menu.addAction(discover_action)
 
     def _build_spectroscopy_column(self, root):
         left = QtWidgets.QVBoxLayout()
@@ -1812,6 +1774,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "button after selecting a lock region on the trace.",
             self.lock_readout,
             help_cursor=True,
+        )
+
+        # Lock/Unlock are built by the Linien widget (they carry its lock
+        # wiring) but belong here, not floating over the traces.
+        layout.addWidget(self.linien_widget.lock_controls)
+        self._tip(
+            "Engage or release the laser lock. Locking uses the two\n"
+            "positions picked on the error signal.",
+            self.linien_widget.lock_controls,
         )
 
         lock_button_row = QtWidgets.QHBoxLayout()

@@ -147,45 +147,47 @@ class LinienWidget(QtWidgets.QWidget):
             QPushButton:hover { background-color: rgba(40,40,60,220); color: white; }
         """
 
-        self.reset_view_btn = QtWidgets.QPushButton("Reset Zoom")
-        self.reset_view_btn.setFixedSize(100, 26)
-        self.reset_view_btn.setStyleSheet(overlay_btn_style)
-        self.reset_view_btn.clicked.connect(self._reset_view)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.reset_view_btn)
-        proxy.setZValue(1000)
-        proxy.setPos(20, 45)
+        # Nothing but labels sits over the traces. The lock controls are
+        # handed to the host window (see lock_controls) so they can live in
+        # the Linien Lock card, and autozoom sits under the plot.
+        foot = QtWidgets.QHBoxLayout()
+        foot.setContentsMargins(20, 2, 8, 2)
+        foot.setSpacing(8)
+        self.autozoom_check = QtWidgets.QCheckBox("Autozoom")
+        self.autozoom_check.setChecked(True)
+        self.autozoom_check.setCursor(QtCore.Qt.PointingHandCursor)
+        self.autozoom_check.setStyleSheet(
+            "QCheckBox { color: #ababab; font-size: 13px; border: none; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+        self.autozoom_check.toggled.connect(self._set_autozoom)
+        foot.addWidget(self.autozoom_check)
+        foot.addStretch()
+        layout.addLayout(foot)
+        self._set_autozoom(True)
 
+        self.lock_controls = QtWidgets.QWidget()
+        lock_row = QtWidgets.QHBoxLayout(self.lock_controls)
+        lock_row.setContentsMargins(0, 0, 0, 0)
+        lock_row.setSpacing(6)
         if self._show_lock_buttons:
             self.lock_button = QtWidgets.QPushButton("Lock Laser")
-            self.lock_button.setFixedSize(100, 26)
-            self.lock_button.setStyleSheet(overlay_btn_style)
+            self.lock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.lock_button.clicked.connect(self._run_lock)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.lock_button)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 85)
+            lock_row.addWidget(self.lock_button)
 
             self.unlock_button = QtWidgets.QPushButton("Unlock")
-            self.unlock_button.setFixedSize(100, 26)
-            self.unlock_button.setStyleSheet(overlay_btn_style)
+            self.unlock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.unlock_button.clicked.connect(self._run_unlock)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.unlock_button)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 120)
+            lock_row.addWidget(self.unlock_button)
 
             self._set_locked_ui(False)
 
         if self._show_stop_button:
             self.stop_sweep_btn = QtWidgets.QPushButton("Stop Sweep")
-            self.stop_sweep_btn.setFixedSize(100, 26)
-            self.stop_sweep_btn.setStyleSheet(overlay_btn_style)
+            self.stop_sweep_btn.setCursor(QtCore.Qt.PointingHandCursor)
             self.stop_sweep_btn.clicked.connect(self._stop_sweep)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.stop_sweep_btn)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 85)
+            lock_row.addWidget(self.stop_sweep_btn)
 
         # Populate the overlay labels with calibrated units immediately,
         # so they don't sit at "0 V / 2 V" while waiting for the Linien
@@ -311,11 +313,15 @@ class LinienWidget(QtWidgets.QWidget):
         if current_xrange[0] < d_min or current_xrange[1] > d_max:
             vb.setXRange(d_min, d_max, padding=0)
 
-    def _reset_view(self):
-        slider_min, slider_max = self.xrange_slider.value()
-        d_min, d_max = self._v_range_to_display(slider_min / 1000, slider_max / 1000)
-        self.plot.setXRange(d_min, d_max, padding=0)
-        self.plot.setYRange(*self.original_yrange)
+    def _set_autozoom(self, on):
+        """Track the signal on Y, or hold whatever range is showing.
+
+        X stays under the sweep slider's control either way -- autozooming
+        it would fight _limit_xrange.
+        """
+        self.plot.enableAutoRange(axis="y", enable=bool(on))
+        if not on:
+            self.plot.setYRange(*self.plot.viewRange()[1], padding=0)
 
     def _run_lock(self):
         if self.linien_thread is None:
