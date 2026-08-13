@@ -313,12 +313,90 @@ def _serial_port_label(port):
     return " | ".join(str(bit) for bit in bits if bit)
 
 
+def _short_port_label(port):
+    """Device path plus just enough to tell two ports apart in a dropdown.
+
+    The full description goes in the tooltip -- see PortSelect.set_available.
+    """
+    detail = str(port.manufacturer or port.description or "").strip()
+    if detail in ("", "n/a"):
+        return str(port.device)
+    return f"{port.device} \N{EN DASH} {detail}"
+
+
 def discover_serial_ports():
     try:
         from serial.tools import list_ports
     except Exception:
         return []
     return list(list_ports.comports())
+
+
+class PortSelect(QtWidgets.QComboBox):
+    """Serial port chooser with a QLineEdit-compatible API.
+
+    The ports are enumerable, so picking one from a list beats typing a
+    device path. ``text()``/``setText()``/``textChanged`` are kept so every
+    existing consumer -- workers, config snapshots, saved settings -- works
+    against this unchanged.
+
+    A port that is saved but not currently present stays selectable rather
+    than being silently dropped: the device may just be unplugged.
+    """
+
+    NOT_SET = "\N{EM DASH} not set \N{EM DASH}"
+
+    textChanged = QtCore.pyqtSignal(str)
+
+    def __init__(self, value="", parent=None):
+        super().__init__(parent)
+        _style_combo(self)
+        # A port description can be far wider than the sidebar. Without
+        # these the combo demands its longest item's width and drags the
+        # whole control column into horizontal scrolling.
+        self.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.setMinimumContentsLength(12)
+        self.addItem(self.NOT_SET, "")
+        self.setText(value)
+        self.currentIndexChanged.connect(
+            lambda _index: self.textChanged.emit(self.text())
+        )
+
+    def text(self):
+        return str(self.currentData() or "")
+
+    def setText(self, value):
+        value = str(value or "").strip()
+        if not value:
+            self.setCurrentIndex(0)
+            return
+        index = self.findData(value)
+        if index < 0:
+            self.addItem(value, value)
+            index = self.count() - 1
+        self.setCurrentIndex(index)
+
+    def set_available(self, ports):
+        """Replace the offered ports, preserving the current selection.
+
+        ``ports`` is a sequence of (device, label, detail) triples. The
+        device path is the stored value, the short label tells two
+        otherwise identical COM ports apart, and the full detail goes in
+        the item tooltip rather than into the widget's width.
+        """
+        current = self.text()
+        self.blockSignals(True)
+        self.clear()
+        self.addItem(self.NOT_SET, "")
+        for device, label, detail in ports:
+            self.addItem(label, device)
+            self.setItemData(
+                self.count() - 1, detail, QtCore.Qt.ToolTipRole
+            )
+        self.blockSignals(False)
+        self.setText(current)
 
 
 class CollapsibleCard(QtWidgets.QFrame):
@@ -1326,16 +1404,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "the DAC Click V_tune and the repump gate).",
             self.rp_edit,
         )
-        self.laser_edit = self._add_line_edit(
-            manual_layout, "Koheron:", self._laser_port, "/dev/ttyUSB0"
+        self.laser_edit = self._add_port_select_row(
+            manual_layout, "Koheron:", self._laser_port
         )
         self._tip("Koheron CTL200 serial port.", self.laser_edit)
-        self.mot_coil_port_edit = self._add_line_edit(
-            manual_layout, "Coil DPS5005:", self._mot_coil_port, "/dev/ttyUSB1"
+        self.mot_coil_port_edit = self._add_port_select_row(
+            manual_layout, "Coil DPS5005:", self._mot_coil_port
         )
         self._tip("MOT coil DPS5005 serial port.", self.mot_coil_port_edit)
-        self.dispenser_port_edit = self._add_line_edit(
-            manual_layout, "Disp DPS5020:", self._dispenser_port, "/dev/ttyUSB2"
+        self.dispenser_port_edit = self._add_port_select_row(
+            manual_layout, "Disp DPS5020:", self._dispenser_port
         )
         self._tip("Dispenser DPS5020 serial port.", self.dispenser_port_edit)
 
@@ -1380,16 +1458,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_addr_spin,
         )
 
-        # Discovery informs the port fields, so it sits with them.
-        manual_layout.addWidget(make_section_title("Discovered USB Devices"))
-        self.discovered_list = QtWidgets.QListWidget()
-        self.discovered_list.setFixedHeight(96)
-        self.discovered_list.setStyleSheet(
-            "QListWidget { background: #101012; color: #e4e4e7;"
-            "border: 1px solid #26262a; border-radius: 0px; }"
-            "QListWidget::item { padding: 4px; }"
-        )
-        manual_layout.addWidget(self.discovered_list)
+        # No separate discovered-devices list: the dropdowns above are the
+        # list. This line only reports how many were found.
         self.discovery_hint = QtWidgets.QLabel("")
         self.discovery_hint.setWordWrap(True)
         self.discovery_hint.setStyleSheet(
@@ -1424,6 +1494,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         parent.addWidget(card)
 
+    def _add_port_select_row(self, layout, label_text, value):
+        """Labelled port dropdown. Options are filled by _refresh_discovery."""
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._small_label(label_text))
+        select = PortSelect(value)
+        row.addWidget(select, stretch=1)
+        layout.addLayout(row)
+        return select
+
     def _add_device_status_row(self, layout, label_text, edit):
         """One status line: device name, its current port, verified state.
 
@@ -1453,19 +1533,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         return value, status
 
     def _refresh_discovery(self):
-        """Repopulate the discovered-port list. Read-only: enumeration
-        only, no port is opened."""
+        """Refill the port dropdowns. Read-only: enumeration only, no port
+        is opened."""
         self._serial_ports = discover_serial_ports()
-        self.discovered_list.clear()
-        for port in self._serial_ports:
-            self.discovered_list.addItem(_serial_port_label(port))
-        if not self._serial_ports:
-            self.discovered_list.addItem("No USB serial devices found")
+        ports = [
+            (port.device, _short_port_label(port), _serial_port_label(port))
+            for port in self._serial_ports
+        ]
+        for select in (
+            self.laser_edit,
+            self.mot_coil_port_edit,
+            self.dispenser_port_edit,
+        ):
+            select.set_available(ports)
         likely = len(
             [p for p in self._serial_ports if _is_likely_usb_serial(p)]
         )
         self.discovery_hint.setText(
-            f"{likely} likely USB serial device(s). "
+            f"{len(ports)} serial port(s), {likely} likely USB. "
             "Auto Discover identifies each one by probing it."
         )
 

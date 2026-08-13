@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import types
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -32,9 +33,31 @@ import mot_logging
 # real saved QSettings ports/hosts on this machine), log to a temp dir,
 # and use an isolated settings file for EVERY QSettings in the app.
 mot_control.OpenQuantumControlsWindow._deferred_start = lambda self: None
+
+
+def _fake_port(device, description, manufacturer, serial_number):
+    return types.SimpleNamespace(
+        device=device,
+        description=description,
+        manufacturer=manufacturer,
+        serial_number=serial_number,
+        product=None,
+        interface=None,
+    )
+
+
 # Port enumeration is read-only, but it still reads this machine -- stub it
 # so the test and its screenshot do not depend on what is plugged in.
-mot_control.discover_serial_ports = lambda: []
+# Descriptions are deliberately long: a port dropdown that sizes itself to
+# its longest entry drags the whole control column into horizontal
+# scrolling, and the width assertion at the end of this file is what
+# catches it.
+mot_control.discover_serial_ports = lambda: [
+    _fake_port("COM3", "USB Serial Port (COM3)", "FTDI", "DK0HOJF9A"),
+    _fake_port("COM5", "USB-SERIAL CH340 (COM5)", "wch.cn", None),
+    _fake_port("COM7", "Silicon Labs CP210x USB to UART Bridge (COM7)",
+               "Silicon Laboratories", "0001EF12"),
+]
 mot_control.EventLog = lambda _directory: mot_logging.EventLog(LOG_DIR)
 _orig_qsettings = QtCore.QSettings
 
@@ -151,6 +174,25 @@ try:
         window.manual_setup_card
     )
     window.manual_setup_card.set_expanded(False)
+
+    # A port dropdown must not size itself to its contents: a long
+    # description would demand its own width and drag the whole control
+    # column into horizontal scrolling. Tested as a property rather than a
+    # pixel threshold so it holds whatever the font is.
+    probe = mot_control.PortSelect("")
+    unloaded = probe.sizeHint().width()
+    probe.set_available(
+        [("COM9", "COM9 " + "x" * 200, "pathological description")]
+    )
+    assert probe.sizeHint().width() <= unloaded + 40, (
+        unloaded,
+        probe.sizeHint().width(),
+    )
+    # Long detail belongs in the tooltip, not the visible label.
+    assert len(window.laser_edit.currentText()) < 40, (
+        window.laser_edit.currentText()
+    )
+
     window.usb_card.set_expanded(True)
     app.processEvents()
     assert window.usb_card.content.isVisibleTo(window.usb_card)
@@ -590,6 +632,11 @@ try:
     window._apply_dispenser_override(10.0, 45.0)
     window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
     window.log_card.set_expanded(True)
+    # Manual setup expanded too: the port dropdowns carry the longest
+    # strings in the column, so they must be laid out for this to mean
+    # anything.
+    window.usb_card.set_expanded(True)
+    window.manual_setup_card.set_expanded(True)
     app.processEvents()
     scroll = window.findChild(QtWidgets.QScrollArea)
     inner = scroll.widget()
