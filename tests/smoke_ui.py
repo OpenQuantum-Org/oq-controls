@@ -141,6 +141,16 @@ try:
 
     # USB card is collapsible and collapsed by default.
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
+    # Manual setup is nested inside and starts collapsed: the common case
+    # is four status rows and one button, not a form.
+    assert not window.manual_setup_card.content.isVisibleTo(
+        window.manual_setup_card
+    )
+    window.manual_setup_card.set_expanded(True)
+    assert window.manual_setup_card.content.isVisibleTo(
+        window.manual_setup_card
+    )
+    window.manual_setup_card.set_expanded(False)
     window.usb_card.set_expanded(True)
     app.processEvents()
     assert window.usb_card.content.isVisibleTo(window.usb_card)
@@ -538,6 +548,9 @@ try:
     )
     assert window.laser_edit.text() == "/dev/cu.fakeA"
     assert window.mot_coil_port_edit.text() == "/dev/cu.fakeB"
+    # Status rows mirror the edits, which remain the source of truth.
+    assert window.laser_status_value.text() == "/dev/cu.fakeA"
+    assert window.coil_status_value.text() == "/dev/cu.fakeB"
     assert window.usb_card.header_status.text() == "3/3 verified"
     assert window.health_chips["usb"].text() == "USB 3/3"
     assert window.laser_usb_status.text() == "Verified"

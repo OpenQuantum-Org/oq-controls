@@ -313,31 +313,6 @@ def _serial_port_label(port):
     return " | ".join(str(bit) for bit in bits if bit)
 
 
-def _score_port(port, purpose):
-    haystack = " ".join(
-        str(x or "")
-        for x in (
-            port.device,
-            port.description,
-            port.manufacturer,
-            port.product,
-            port.interface,
-        )
-    ).lower()
-    score = 0
-    if _is_likely_usb_serial(port):
-        score += 10
-    if purpose == "laser":
-        for token in ("koheron", "ctl", "laser"):
-            if token in haystack:
-                score += 30
-    else:
-        for token in ("dps", "riden", "rd60", "ch340", "wch", "cp210", "ftdi"):
-            if token in haystack:
-                score += 20
-    return score
-
-
 def discover_serial_ports():
     try:
         from serial.tools import list_ports
@@ -424,39 +399,6 @@ class CollapsibleCard(QtWidgets.QFrame):
         self.header_status.setStyleSheet(
             f"color: {color}; font-size: 11px; font-weight: 600; border: none;"
         )
-
-
-def infer_serial_assignments(ports, current):
-    assignments = {}
-    used = set()
-    candidates = sorted(
-        [port for port in ports if _is_likely_usb_serial(port)],
-        key=lambda port: port.device,
-    )
-
-    for key in ("laser", "mot_coil", "dispenser"):
-        if current.get(key):
-            used.add(current[key])
-
-    for key, purpose in (
-        ("laser", "laser"),
-        ("mot_coil", "dps"),
-        ("dispenser", "dps"),
-    ):
-        if current.get(key):
-            assignments[key] = current[key]
-            continue
-        available = [port for port in candidates if port.device not in used]
-        if not available:
-            assignments[key] = ""
-            continue
-        best = max(available, key=lambda port: (_score_port(port, purpose), port.device))
-        if _score_port(best, purpose) <= 0:
-            assignments[key] = ""
-            continue
-        assignments[key] = best.device
-        used.add(best.device)
-    return assignments
 
 
 class CameraViewWidget(QtWidgets.QWidget):
@@ -1364,31 +1306,55 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout = card.content_layout
 
         self._tip(
-            "USB device assignments. Verified automatically at startup with\n"
-            "read-only probes; the pop-up only appears if something is\n"
-            "missing.",
+            "Device assignments and connection status. Ports are verified\n"
+            "automatically at startup with read-only probes.",
             card.toggle_btn,
         )
+
+        # The edits stay the source of truth for every consumer (workers,
+        # config snapshots, settings) but live in Manual setup below. What
+        # shows here is status: name, current port, verified state.
+        manual = CollapsibleCard("Manual setup", collapsed=True, framed=False)
+        self.manual_setup_card = manual
+        manual_layout = manual.content_layout
+
         self.rp_edit = self._add_line_edit(
-            layout, "Linien RP:", self._rp_host, "rp-XXXXXX.local"
+            manual_layout, "Linien RP:", self._rp_host, "rp-XXXXXX.local"
         )
         self._tip(
             "Red Pitaya hostname or IP running linien-server (also carries\n"
             "the DAC Click V_tune and the repump gate).",
             self.rp_edit,
         )
-        self.laser_edit, self.laser_usb_status = self._add_port_row(
-            layout, "Koheron:", self._laser_port, "/dev/ttyUSB0"
+        self.laser_edit = self._add_line_edit(
+            manual_layout, "Koheron:", self._laser_port, "/dev/ttyUSB0"
         )
         self._tip("Koheron CTL200 serial port.", self.laser_edit)
-        self.mot_coil_port_edit, self.coil_usb_status = self._add_port_row(
-            layout, "Coil DPS5005:", self._mot_coil_port, "/dev/ttyUSB1"
+        self.mot_coil_port_edit = self._add_line_edit(
+            manual_layout, "Coil DPS5005:", self._mot_coil_port, "/dev/ttyUSB1"
         )
         self._tip("MOT coil DPS5005 serial port.", self.mot_coil_port_edit)
-        self.dispenser_port_edit, self.dispenser_usb_status = self._add_port_row(
-            layout, "Disp DPS5020:", self._dispenser_port, "/dev/ttyUSB2"
+        self.dispenser_port_edit = self._add_line_edit(
+            manual_layout, "Disp DPS5020:", self._dispenser_port, "/dev/ttyUSB2"
         )
         self._tip("Dispenser DPS5020 serial port.", self.dispenser_port_edit)
+
+        self.rp_status_value, self.rp_usb_status = self._add_device_status_row(
+            layout, "Linien RP:", self.rp_edit
+        )
+        self.laser_status_value, self.laser_usb_status = (
+            self._add_device_status_row(layout, "Koheron:", self.laser_edit)
+        )
+        self.coil_status_value, self.coil_usb_status = (
+            self._add_device_status_row(
+                layout, "Coil DPS5005:", self.mot_coil_port_edit
+            )
+        )
+        self.dispenser_status_value, self.dispenser_usb_status = (
+            self._add_device_status_row(
+                layout, "Disp DPS5020:", self.dispenser_port_edit
+            )
+        )
 
         addr_row = QtWidgets.QHBoxLayout()
         addr_row.setSpacing(8)
@@ -1406,7 +1372,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         addr_row.addWidget(self._tiny_label("Disp"))
         addr_row.addWidget(self.dispenser_addr_spin)
         addr_row.addStretch()
-        layout.addLayout(addr_row)
+        manual_layout.addLayout(addr_row)
         self._tip(
             "Modbus slave addresses of the DPS supplies (front panel\n"
             "setting; usually 1).",
@@ -1414,16 +1380,33 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_addr_spin,
         )
 
-        button_row = QtWidgets.QHBoxLayout()
-        button_row.setSpacing(6)
-        self.best_guess_btn = QtWidgets.QPushButton("Apply Best Guess")
-        self.best_guess_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.best_guess_btn.clicked.connect(self._apply_best_guess)
-        self._tip(
-            "Assign the discovered ports to devices by name. Overwrites the\n"
-            "fields above; Auto Discover verifies by probing instead.",
-            self.best_guess_btn,
+        # Discovery informs the port fields, so it sits with them.
+        manual_layout.addWidget(make_section_title("Discovered USB Devices"))
+        self.discovered_list = QtWidgets.QListWidget()
+        self.discovered_list.setFixedHeight(96)
+        self.discovered_list.setStyleSheet(
+            "QListWidget { background: #101012; color: #e4e4e7;"
+            "border: 1px solid #26262a; border-radius: 0px; }"
+            "QListWidget::item { padding: 4px; }"
         )
+        manual_layout.addWidget(self.discovered_list)
+        self.discovery_hint = QtWidgets.QLabel("")
+        self.discovery_hint.setWordWrap(True)
+        self.discovery_hint.setStyleSheet(
+            "color: #93939a; font-size: 11px; border: none;"
+        )
+        manual_layout.addWidget(self.discovery_hint)
+
+        self.connect_btn = QtWidgets.QPushButton("Connect / Reconnect")
+        self.connect_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.connect_btn.clicked.connect(self._connect_all)
+        self._tip(
+            "Restart every connection (Linien, DAC, gate, and all serial\n"
+            "workers) using the fields above.",
+            self.connect_btn,
+        )
+        manual_layout.addWidget(self.connect_btn)
+
         self.auto_discover_btn = QtWidgets.QPushButton("Auto Discover")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.auto_discover_btn.clicked.connect(
@@ -1435,40 +1418,39 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "workers).",
             self.auto_discover_btn,
         )
-        button_row.addWidget(self.best_guess_btn)
-        button_row.addWidget(self.auto_discover_btn)
-        layout.addLayout(button_row)
-
-        self.connect_btn = QtWidgets.QPushButton("Connect / Reconnect")
-        self.connect_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.connect_btn.clicked.connect(self._connect_all)
-        self._tip(
-            "Restart every connection (Linien, DAC, gate, and all serial\n"
-            "workers) using the fields above.",
-            self.connect_btn,
-        )
-        layout.addWidget(self.connect_btn)
-
-        # Discovery lives here rather than in a pop-up: the ports it
-        # informs are the fields directly above it.
-        layout.addWidget(make_section_title("Discovered USB Devices"))
-        self.discovered_list = QtWidgets.QListWidget()
-        self.discovered_list.setFixedHeight(96)
-        self.discovered_list.setStyleSheet(
-            "QListWidget { background: #101012; color: #e4e4e7;"
-            "border: 1px solid #26262a; border-radius: 0px; }"
-            "QListWidget::item { padding: 4px; }"
-        )
-        layout.addWidget(self.discovered_list)
-        self.discovery_hint = QtWidgets.QLabel("")
-        self.discovery_hint.setWordWrap(True)
-        self.discovery_hint.setStyleSheet(
-            "color: #93939a; font-size: 11px; border: none;"
-        )
-        layout.addWidget(self.discovery_hint)
+        layout.addWidget(self.auto_discover_btn)
+        layout.addWidget(manual)
         self._refresh_discovery()
 
         parent.addWidget(card)
+
+    def _add_device_status_row(self, layout, label_text, edit):
+        """One status line: device name, its current port, verified state.
+
+        The port is shown as text mirroring ``edit`` -- the edit itself is
+        the source of truth and lives in Manual setup, so the common case
+        reads as status rather than as a form to fill in.
+        """
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._small_label(label_text))
+        value = QtWidgets.QLabel(edit.text())
+        value.setStyleSheet(
+            "color: #e4e4e7; font-size: 12px; border: none;"
+        )
+        value.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        edit.textChanged.connect(value.setText)
+        row.addWidget(value, stretch=1)
+        status = QtWidgets.QLabel("--")
+        status.setStyleSheet(
+            "color: #a8a8ae; font-size: 12px; font-weight: 700; border: none;"
+        )
+        # _set_usb_status_label abbreviates to fit this column.
+        status.setFixedWidth(84)
+        status.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        row.addWidget(status)
+        layout.addLayout(row)
+        return value, status
 
     def _refresh_discovery(self):
         """Repopulate the discovered-port list. Read-only: enumeration
@@ -1484,21 +1466,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.discovery_hint.setText(
             f"{likely} likely USB serial device(s). "
-            "Apply Best Guess assigns by name; Auto Discover verifies by probing."
+            "Auto Discover identifies each one by probing it."
         )
-
-    def _apply_best_guess(self):
-        self._refresh_discovery()
-        guesses = infer_serial_assignments(self._serial_ports, {})
-        for key, edit in (
-            ("laser", self.laser_edit),
-            ("mot_coil", self.mot_coil_port_edit),
-            ("dispenser", self.dispenser_port_edit),
-        ):
-            if guesses.get(key):
-                edit.setText(guesses[key])
-        self._save_connection_settings()
-        self._event_log.log("device_ports_guessed", **guesses)
 
     def _add_filter_section(self, parent):
         """Error-signal filters, nested as a collapsible section of the
@@ -1628,23 +1597,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         card.content_layout.addWidget(self.log_view)
         parent.addWidget(card)
-
-    def _add_port_row(self, layout, label_text, value, placeholder):
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(self._small_label(label_text))
-        edit = QtWidgets.QLineEdit(str(value or ""))
-        edit.setPlaceholderText(placeholder)
-        row.addWidget(edit, stretch=1)
-        status = QtWidgets.QLabel("--")
-        status.setStyleSheet(
-            "color: #a8a8ae; font-size: 12px; font-weight: 700; border: none;"
-        )
-        status.setFixedWidth(84)
-        status.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        row.addWidget(status)
-        layout.addLayout(row)
-        return edit, status
 
     def _add_lock_card(self, parent):
         card = make_card()
@@ -2876,6 +2828,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_filters_ui(filters)
 
     def _on_linien_connection(self, status):
+        self._set_usb_status_label(self.rp_usb_status, status)
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
