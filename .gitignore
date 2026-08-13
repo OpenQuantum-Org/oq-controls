@@ -9,6 +9,10 @@ __pycache__/
 # App event logs
 logs/
 
+# PyInstaller
+build/
+dist/
+
 # Licensed fonts stay local (bundled OFL fonts are committed)
 fonts/PP*
 fonts/Aptos*

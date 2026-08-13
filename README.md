@@ -154,6 +154,35 @@ path-based Qt API silently fails on Qt 6.11/macOS. The smoke test
 asserts the *resolved* families on real widgets, so a regression here
 fails CI rather than just looking wrong.
 
+## Packaged builds (Mac / Linux / Windows)
+
+GitHub Actions (`.github/workflows/build.yml`) runs the test suite on
+every push, and builds standalone executables for all three platforms on
+a version tag (`v*`) or a manual workflow run. Artifacts:
+`OpenQuantumControls-macos.zip` (an .app bundle),
+`OpenQuantumControls-linux.tar.gz`, and
+`OpenQuantumControls-windows.zip`; a tag also attaches them to a GitHub
+release.
+
+Local build (any platform):
+
+```bash
+pip install pyinstaller
+pyinstaller OpenQuantumControls.spec --noconfirm   # -> dist/
+```
+
+Notes:
+
+- The binaries are unsigned. First launch on macOS needs
+  right-click → Open (or `xattr -dr com.apple.quarantine <app>`);
+  Windows SmartScreen needs "More info → Run anyway".
+- Packaged builds write logs and data to the OS per-user app-data
+  directory (macOS:
+  `~/Library/Application Support/OQ-Controls/OpenQuantumControls/logs`)
+  instead of a `logs/` folder next to the executable.
+- On Linux, serial access usually requires
+  `sudo usermod -a -G dialout $USER` (log out/in afterwards).
+
 ## Tests
 
 `tests/` contains three hardware-free suites, run directly:
