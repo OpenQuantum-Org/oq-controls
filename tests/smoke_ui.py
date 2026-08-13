@@ -9,6 +9,7 @@ QSettings.
 import glob
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -57,11 +58,17 @@ assert "Space Grotesk" in QtGui.QFontDatabase.families()
 assert "IBM Plex Sans" in QtGui.QFontDatabase.families()
 
 # Inputs are explicitly themed: spinboxes must not fall back to the
-# platform palette (black-on-dark), and all inputs get white outlines.
+# platform palette (black-on-dark). The outline is a muted grey rather
+# than the old near-white, which read as glare against the dark panel.
+INPUT_BORDER = "border: 1px solid #3d3d44"
 stylesheet = mot_control.build_app_stylesheet()
 assert "QAbstractSpinBox {" in stylesheet
-assert stylesheet.count("border: 1px solid #e8e8f0") >= 3  # edit/spin/combo
-assert "border: 1px solid #e8e8f0" in mot_control.COMBO_STYLE
+assert stylesheet.count(INPUT_BORDER) >= 3  # edit/spin/combo
+assert INPUT_BORDER in mot_control.COMBO_STYLE
+
+# Corners are square everywhere -- no rounded panels or controls.
+assert "border-radius: 0px" in stylesheet
+assert not re.search(r"border-radius:\s*[1-9]", stylesheet)
 
 
 def resolved_family(widget):

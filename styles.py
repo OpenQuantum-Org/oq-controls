@@ -9,7 +9,7 @@ APP_STYLESHEET = """
     }
 
     QMainWindow, QWidget#central {
-        background-color: #0a0a0f;
+        background-color: #0b0b0c;
     }
 
     QScrollArea {
@@ -19,14 +19,14 @@ APP_STYLESHEET = """
 
     /* --- Card panels --- */
     QFrame.card {
-        background-color: #14141c;
-        border: 1px solid #1e1e2a;
-        border-radius: 10px;
+        background-color: #141416;
+        border: 1px solid #26262a;
+        border-radius: 0px;
     }
 
     /* --- Section titles --- */
     QLabel.section-title {
-        color: #c0c0d4;
+        color: #a8a8ae;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 1px;
@@ -37,84 +37,84 @@ APP_STYLESHEET = """
 
     /* --- Buttons --- */
     QPushButton {
-        background-color: #1e1e2e;
-        color: #ececf4;
-        border: 1px solid #2a2a3a;
-        border-radius: 6px;
+        background-color: #1c1c1f;
+        color: #e4e4e7;
+        border: 1px solid #2c2c31;
+        border-radius: 0px;
         font-weight: 600;
         font-size: 13px;
         padding: 6px 16px;
     }
     QPushButton:hover {
-        background-color: #282840;
-        border-color: #3a3a55;
+        background-color: #2f2f35;
+        border-color: #3d3d44;
     }
     QPushButton:pressed {
-        background-color: #1a1a28;
+        background-color: #171719;
     }
     QPushButton:checked {
-        background-color: #1a3a6a;
-        color: #70b0ff;
-        border-color: #2855a0;
+        background-color: #26262c;
+        color: #8e8e98;
+        border-color: #3a3a43;
     }
 
     /* --- Sliders --- */
     QSlider::groove:horizontal {
         height: 4px;
-        background: #1e1e2e;
-        border-radius: 2px;
+        background: #1c1c1f;
+        border-radius: 0px;
     }
     QSlider::handle:horizontal {
-        background: #5080cc;
+        background: #5a5a64;
         width: 12px;
         height: 12px;
-        border-radius: 6px;
+        border-radius: 0px;
         margin: -4px 0;
     }
     QSlider::handle:horizontal:hover {
-        background: #6090dd;
+        background: #6c6c77;
     }
     QSlider::sub-page:horizontal {
-        background: #2a4a80;
-        border-radius: 2px;
+        background: #35353d;
+        border-radius: 0px;
     }
 
     /* --- Line edits --- */
     QLineEdit {
-        background: #12121a;
-        color: #ececf4;
-        border: 1px solid #1e1e2e;
-        border-radius: 4px;
+        background: #161618;
+        color: #e4e4e7;
+        border: 1px solid #1c1c1f;
+        border-radius: 0px;
         padding: 2px 6px;
-        selection-background-color: #2a4a80;
+        selection-background-color: #35353d;
     }
     QLineEdit:focus {
         color: white;
-        border-color: #4070b0;
+        border-color: #5a5a64;
     }
 
     /* --- Readout labels --- */
     QLabel.readout-label {
-        color: #a0a0b4;
+        color: #93939a;
         font-weight: 600;
         font-size: 12px;
         border: none;
     }
     QLabel.readout-value {
-        color: #ececf4;
+        color: #e4e4e7;
         font-size: 13px;
         border: none;
     }
 
     /* --- Scroll bar --- */
     QScrollBar:vertical {
-        background: #0a0a0f;
+        background: #0b0b0c;
         width: 6px;
         border: none;
     }
     QScrollBar::handle:vertical {
-        background: #2a2a3a;
-        border-radius: 3px;
+        background: #2c2c31;
+        border-radius: 0px;
         min-height: 30px;
     }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -129,18 +129,18 @@ LOCK_INDICATOR_LOCKED = """
     QFrame {
         background-color: rgba(30, 200, 100, 15);
         border: 1px solid rgba(30, 200, 100, 60);
-        border-radius: 10px;
+        border-radius: 0px;
     }
 """
 LOCK_INDICATOR_UNLOCKED = """
     QFrame {
         background-color: rgba(200, 60, 60, 12);
         border: 1px solid rgba(200, 60, 60, 40);
-        border-radius: 10px;
+        border-radius: 0px;
     }
 """
-LOCK_LABEL_LOCKED = "color: #40dd80; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
-LOCK_LABEL_UNLOCKED = "color: #dd5050; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
+LOCK_LABEL_LOCKED = "color: #6f9e7c; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
+LOCK_LABEL_UNLOCKED = "color: #b56a6a; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
 
 PD_READOUT_STYLE = "color: white; font-size: 22px; font-weight: 700; border: none;"
 
@@ -149,18 +149,18 @@ PD_READOUT_STYLE = "color: white; font-size: 22px; font-weight: 700; border: non
 # ---------------------------------------------------------------------------
 BIG_READOUT_STYLE = """
     QLineEdit {
-        background: #0e0e16;
+        background: #101012;
         color: white;
-        border: 1px solid #2a2a3a;
-        border-radius: 8px;
+        border: 1px solid #2c2c31;
+        border-radius: 0px;
         font-size: 20px;
         font-weight: 700;
         font-family: "Share Tech Mono", "Menlo", "Consolas", monospace;
         padding: 4px 8px;
     }
     QLineEdit:focus {
-        border-color: #4070b0;
-        background: #111119;
+        border-color: #5a5a64;
+        background: #131315;
     }
 """
 
@@ -174,9 +174,9 @@ def make_card() -> QtWidgets.QFrame:
     frame.setProperty("class", "card")
     frame.setStyleSheet("""
         QFrame {
-            background-color: #14141c;
-            border: 1px solid #1e1e2a;
-            border-radius: 10px;
+            background-color: #141416;
+            border: 1px solid #26262a;
+            border-radius: 0px;
         }
     """)
     layout = QtWidgets.QVBoxLayout(frame)
@@ -188,10 +188,10 @@ def make_card() -> QtWidgets.QFrame:
 # Accents are deliberately desaturated. On a near-black panel a saturated
 # hue reads as decoration; a muted one reads as an instrument, and status
 # colours still separate cleanly at a glance.
-ACCENT = "#7f9dbd"  # section titles, headings, neutral emphasis
-STATUS_OK = "#5f9e78"
-STATUS_WARN = "#bf9152"
-STATUS_BAD = "#b56464"
+ACCENT = "#b4b4bb"  # section titles, headings, neutral emphasis
+STATUS_OK = "#6f9e7c"
+STATUS_WARN = "#b9924f"
+STATUS_BAD = "#b56a6a"
 
 # Retained so older imports keep working; prefer ACCENT in new code.
 NEON_BLUE = ACCENT
@@ -215,7 +215,7 @@ def add_slider_row(parent_layout, label_text, min_val, max_val, init_val,
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #c0c0d4; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #a8a8ae; font-size: 12px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)
@@ -256,13 +256,13 @@ def add_readout_row(parent_layout, label_text, initial_text="--", unit=""):
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #a0a0b4; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #93939a; font-size: 12px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)
 
     value_label = QtWidgets.QLabel(f"{initial_text} {unit}".strip())
-    value_label.setStyleSheet("color: #ececf4; font-size: 13px; border: none;")
+    value_label.setStyleSheet("color: #e4e4e7; font-size: 13px; border: none;")
     value_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
     row.addWidget(value_label, stretch=1)
 

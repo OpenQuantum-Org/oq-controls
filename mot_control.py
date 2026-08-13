@@ -50,8 +50,8 @@ from mot_workers import (
 
 # Colors cycled through for successive PSD measurement runs.
 PSD_RUN_COLORS = (
-    "#00d4ff", "#ff9f40", "#40dd80", "#dd50dd",
-    "#f0e060", "#7080ff", "#dd5050", "#50dddd",
+    "#b4b4bb", "#b9924f", "#6f9e7c", "#9a7ba8",
+    "#b8ab63", "#7a80b0", "#b56a6a", "#7ba8a8",
 )
 
 # Riden DPS protection register (reg 7) values.
@@ -130,13 +130,13 @@ def load_app_fonts():
 # guard list: the smoke test asserts no widget stylesheet ever carries
 # one of the dim colors again.
 CONTRAST_REMAP = {
-    "#6a6a80": "#a0a0b4",  # tiny/de-emphasized labels
-    "#7a7a90": "#c0c0d4",  # section-title class
-    "#8888a0": "#c0c0d4",  # row labels / idle statuses
-    "#9a9ab0": "#c8c8da",  # log text
-    "#a0a0b8": "#d0d0e0",  # linien overlay labels
-    "#b0b0c8": "#ececf4",  # readout values
-    "#c0c0d0": "#ececf4",  # button/combo/edit text
+    "#6a6a80": "#93939a",  # tiny/de-emphasized labels
+    "#7a7a90": "#a8a8ae",  # section-title class
+    "#8888a0": "#a8a8ae",  # row labels / idle statuses
+    "#9a9ab0": "#b0b0b6",  # log text
+    "#a0a0b8": "#c2c2c8",  # linien overlay labels
+    "#b0b0c8": "#e4e4e7",  # readout values
+    "#c0c0d0": "#e4e4e7",  # button/combo/edit text
 }
 
 
@@ -148,21 +148,21 @@ def build_app_stylesheet():
         # Input affordance: white outlines + bright text on every text /
         # number / dropdown input. QSpinBox in particular otherwise
         # inherits the platform palette (black on dark = unreadable).
-        "QLineEdit { border: 1px solid #e8e8f0; color: #f0f0f8; }\n"
-        "QLineEdit:focus { border-color: #70b0ff; }\n"
+        "QLineEdit { border: 1px solid #3d3d44; color: #ededf0; }\n"
+        "QLineEdit:focus { border-color: #8e8e98; }\n"
         "QAbstractSpinBox {"
-        " background: #12121a; color: #f0f0f8;"
-        " border: 1px solid #e8e8f0; border-radius: 4px;"
+        " background: #161618; color: #ededf0;"
+        " border: 1px solid #3d3d44; border-radius: 0px;"
         " padding: 2px 6px;"
-        " selection-background-color: #2a4a80; }\n"
-        "QAbstractSpinBox:focus { border-color: #70b0ff; }\n"
+        " selection-background-color: #35353d; }\n"
+        "QAbstractSpinBox:focus { border-color: #8e8e98; }\n"
         "QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {"
         " background: #5a5a70; border: none; width: 14px; }\n"
         "QAbstractSpinBox::up-button { border-top-right-radius: 3px; }\n"
         "QAbstractSpinBox::down-button { border-bottom-right-radius: 3px; }\n"
         "QAbstractSpinBox::up-button:hover,"
         " QAbstractSpinBox::down-button:hover { background: #6a6a82; }\n"
-        "QComboBox { border: 1px solid #e8e8f0; }\n"
+        "QComboBox { border: 1px solid #3d3d44; }\n"
     )
 
 
@@ -266,25 +266,25 @@ def thermistor_ohms_to_c(ohms: float) -> float:
 
 COMBO_STYLE = """
     QComboBox {
-        background: #12121a;
-        color: #ececf4;
-        border: 1px solid #e8e8f0;
-        border-radius: 4px;
+        background: #161618;
+        color: #e4e4e7;
+        border: 1px solid #3d3d44;
+        border-radius: 0px;
         padding: 2px 6px;
         font-size: 12px;
     }
     QComboBox:focus {
         color: white;
-        border-color: #4070b0;
+        border-color: #5a5a64;
     }
     QComboBox::drop-down {
         border: none;
         width: 18px;
     }
     QComboBox QAbstractItemView {
-        background: #12121a;
-        color: #ececf4;
-        selection-background-color: #2a4a80;
+        background: #161618;
+        color: #e4e4e7;
+        selection-background-color: #35353d;
         selection-color: white;
         outline: none;
     }
@@ -295,8 +295,8 @@ def _style_combo(combo):
     combo.setStyleSheet(COMBO_STYLE)
     try:
         combo.view().setStyleSheet(
-            "background: #12121a; color: #ececf4;"
-            "selection-background-color: #2a4a80; selection-color: white;"
+            "background: #161618; color: #e4e4e7;"
+            "selection-background-color: #35353d; selection-color: white;"
         )
     except Exception:
         pass
@@ -353,9 +353,9 @@ class CollapsibleCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setStyleSheet("""
             QFrame {
-                background-color: #14141c;
-                border: 1px solid #1e1e2a;
-                border-radius: 10px;
+                background-color: #141416;
+                border: 1px solid #26262a;
+                border-radius: 0px;
             }
         """)
         outer = QtWidgets.QVBoxLayout(self)
@@ -384,7 +384,7 @@ class CollapsibleCard(QtWidgets.QFrame):
         header.addStretch()
         self.header_status = QtWidgets.QLabel("")
         self.header_status.setStyleSheet(
-            "color: #c0c0d4; font-size: 11px; font-weight: 600; border: none;"
+            "color: #a8a8ae; font-size: 11px; font-weight: 600; border: none;"
         )
         header.addWidget(self.header_status)
         outer.addLayout(header)
@@ -408,7 +408,7 @@ class CollapsibleCard(QtWidgets.QFrame):
     def set_expanded(self, expanded):
         self.toggle_btn.setChecked(bool(expanded))
 
-    def set_status(self, text, color="#c0c0d4"):
+    def set_status(self, text, color="#a8a8ae"):
         self.header_status.setText(text)
         self.header_status.setStyleSheet(
             f"color: {color}; font-size: 11px; font-weight: 600; border: none;"
@@ -487,9 +487,9 @@ class CameraViewWidget(QtWidgets.QWidget):
         self.message_label = QtWidgets.QLabel("No USB camera found")
         self.message_label.setAlignment(QtCore.Qt.AlignCenter)
         self.message_label.setStyleSheet(
-            "color: #c0c0d4; font-size: 16px; font-weight: 700;"
-            "border: 1px solid #1e1e2a; border-radius: 8px;"
-            "background: #0a0a0f; padding: 24px;"
+            "color: #a8a8ae; font-size: 16px; font-weight: 700;"
+            "border: 1px solid #26262a; border-radius: 0px;"
+            "background: #0b0b0c; padding: 24px;"
         )
         self.stack.addWidget(self.message_label)
 
@@ -497,7 +497,7 @@ class CameraViewWidget(QtWidgets.QWidget):
             from PyQt6.QtMultimediaWidgets import QVideoWidget
 
             self.video_widget = QVideoWidget()
-            self.video_widget.setStyleSheet("background: #050508;")
+            self.video_widget.setStyleSheet("background: #080809;")
             self.stack.addWidget(self.video_widget)
             self._multimedia_available = True
         except Exception as e:
@@ -675,8 +675,8 @@ class DeviceConfigDialog(QtWidgets.QDialog):
         discovered_layout.addWidget(make_section_title("Discovered USB Devices"))
         self.discovered_list = QtWidgets.QListWidget()
         self.discovered_list.setStyleSheet(
-            "QListWidget { background: #0e0e16; color: #ececf4;"
-            "border: 1px solid #1e1e2a; border-radius: 6px; }"
+            "QListWidget { background: #101012; color: #e4e4e7;"
+            "border: 1px solid #26262a; border-radius: 0px; }"
             "QListWidget::item { padding: 4px; }"
         )
         discovered_layout.addWidget(self.discovered_list, stretch=1)
@@ -685,7 +685,7 @@ class DeviceConfigDialog(QtWidgets.QDialog):
 
         self.hint_label = QtWidgets.QLabel("")
         self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet("color: #c0c0d4; border: none;")
+        self.hint_label.setStyleSheet("color: #a8a8ae; border: none;")
         root.addWidget(self.hint_label)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -852,7 +852,7 @@ class PidDialog(QtWidgets.QDialog):
             + ("" if current else " Current values could not be read.")
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #a0a0b4; border: none; font-size: 12px;")
+        note.setStyleSheet("color: #93939a; border: none; font-size: 12px;")
         root.addWidget(note)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -1012,8 +1012,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         chip.setText(text)
         chip.setStyleSheet(
             f"color: {color}; font-size: 12px; font-weight: 700;"
-            "border: 1px solid #1e1e2a; border-radius: 6px;"
-            "padding: 5px 10px; background: #0e0e16;"
+            "border: 1px solid #26262a; border-radius: 0px;"
+            "padding: 5px 10px; background: #101012;"
             f'font-family: "{TITLE_FONT_FAMILY}";'
         )
 
@@ -1135,25 +1135,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _build_menu(self):
         self.menuBar().setStyleSheet("""
             QMenuBar {
-                background: #0a0a0f;
-                color: #ececf4;
-                border-bottom: 1px solid #1e1e2a;
+                background: #0b0b0c;
+                color: #e4e4e7;
+                border-bottom: 1px solid #26262a;
             }
             QMenuBar::item {
                 background: transparent;
                 padding: 4px 10px;
             }
             QMenuBar::item:selected {
-                background: #1e1e2e;
+                background: #1c1c1f;
                 color: white;
             }
             QMenu {
-                background: #12121a;
-                color: #ececf4;
-                border: 1px solid #1e1e2a;
+                background: #161618;
+                color: #e4e4e7;
+                border: 1px solid #26262a;
             }
             QMenu::item:selected {
-                background: #2a4a80;
+                background: #35353d;
                 color: white;
             }
         """)
@@ -1188,10 +1188,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             chip = QtWidgets.QLabel("--")
             title_row.addWidget(chip)
             self.health_chips[key] = chip
-        self._set_chip("lock", "LOCK --", "#c0c0d4")
-        self._set_chip("usb", "USB --", "#c0c0d4")
-        self._set_chip("coils", "COILS OFF", "#c0c0d4")
-        self._set_chip("disp", "DISP IDLE", "#c0c0d4")
+        self._set_chip("lock", "LOCK --", "#a8a8ae")
+        self._set_chip("usb", "USB --", "#a8a8ae")
+        self._set_chip("coils", "COILS OFF", "#a8a8ae")
+        self._set_chip("disp", "DISP IDLE", "#a8a8ae")
         self._tip(
             "System health: laser lock, USB devices, MOT coils, dispenser.",
             *self.health_chips.values(),
@@ -1219,7 +1219,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.camera_toggle = QtWidgets.QCheckBox("Show USB Camera")
         self.camera_toggle.setCursor(QtCore.Qt.PointingHandCursor)
         self.camera_toggle.setStyleSheet(
-            "QCheckBox { color: #ececf4; font-size: 12px; font-weight: 700;"
+            "QCheckBox { color: #e4e4e7; font-size: 12px; font-weight: 700;"
             "border: none; padding: 4px 6px; }"
             "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
@@ -1235,11 +1235,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setStyleSheet("""
             QSplitter::handle {
-                background: #1e1e2a;
+                background: #26262a;
                 height: 4px;
             }
             QSplitter::handle:hover {
-                background: #2a4a80;
+                background: #35353d;
             }
         """)
         self.linien_widget = LinienWidget(
@@ -1270,13 +1270,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         psd_bar.addStretch()
         self.psd_view_status = QtWidgets.QLabel("")
         self.psd_view_status.setStyleSheet(
-            "color: #c0c0d4; font-size: 12px; font-weight: 700;"
+            "color: #a8a8ae; font-size: 12px; font-weight: 700;"
             "border: none; padding: 4px 6px;"
         )
         psd_bar.addWidget(self.psd_view_status)
         psd_layout.addLayout(psd_bar)
 
-        self.psd_plot = pg.PlotWidget(background="#0a0a0f")
+        self.psd_plot = pg.PlotWidget(background="#0b0b0c")
         self.psd_plot.setLogMode(True, True)
         self.psd_plot.showGrid(x=True, y=True, alpha=0.25)
         self.psd_plot.setLabel("bottom", "Frequency (Hz)")
@@ -1571,7 +1571,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.filter_auto_check.setChecked(True)
         self.filter_auto_check.setCursor(QtCore.Qt.PointingHandCursor)
         self.filter_auto_check.setStyleSheet(
-            "QCheckBox { color: #ececf4; font-size: 12px; border: none; }"
+            "QCheckBox { color: #e4e4e7; font-size: 12px; border: none; }"
             "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
         self.filter_auto_check.toggled.connect(self._on_filter_changed)
@@ -1588,7 +1588,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             enabled = QtWidgets.QCheckBox(f"Filter {index}")
             enabled.setCursor(QtCore.Qt.PointingHandCursor)
             enabled.setStyleSheet(
-                "QCheckBox { color: #ececf4; font-size: 12px; border: none; }"
+                "QCheckBox { color: #e4e4e7; font-size: 12px; border: none; }"
                 "QCheckBox::indicator { width: 14px; height: 14px; }"
             )
             type_combo = QtWidgets.QComboBox()
@@ -1668,8 +1668,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFixedHeight(150)
         self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: #0a0a0f; color: #c8c8da;"
-            "border: 1px solid #1e1e2a; border-radius: 6px;"
+            "QPlainTextEdit { background: #0b0b0c; color: #b0b0b6;"
+            "border: 1px solid #26262a; border-radius: 0px;"
             "font-size: 11px; padding: 4px; }"
         )
         self._tip(
@@ -1689,7 +1689,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         row.addWidget(edit, stretch=1)
         status = QtWidgets.QLabel("--")
         status.setStyleSheet(
-            "color: #c0c0d4; font-size: 12px; font-weight: 700; border: none;"
+            "color: #a8a8ae; font-size: 12px; font-weight: 700; border: none;"
         )
         status.setFixedWidth(84)
         status.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1972,7 +1972,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
-        sep.setStyleSheet("color: #1e1e2a;")
+        sep.setStyleSheet("color: #26262a;")
         layout.addWidget(sep)
 
         layout.addWidget(make_section_title("Dispenser — DPS5020"))
@@ -2122,7 +2122,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _small_label(text):
         label = QtWidgets.QLabel(text)
         label.setStyleSheet(
-            "color: #c0c0d4; font-size: 12px; font-weight: 600; border: none;"
+            "color: #a8a8ae; font-size: 12px; font-weight: 600; border: none;"
         )
         label.setFixedWidth(120)
         return label
@@ -2131,7 +2131,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _tiny_label(text):
         label = QtWidgets.QLabel(text)
         label.setStyleSheet(
-            "color: #a0a0b4; font-size: 11px; font-weight: 600; border: none;"
+            "color: #93939a; font-size: 11px; font-weight: 600; border: none;"
         )
         return label
 
@@ -2187,10 +2187,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Serial workers hold their ports open; release them for probing.
         self._stop_serial_workers()
 
-        self._set_chip("usb", "USB ...", "#c0c0d4")
+        self._set_chip("usb", "USB ...", "#a8a8ae")
         self.usb_card.set_status("Probing…")
         for attr in self._USB_STATUS_ROWS:
-            self._set_colored_text(getattr(self, attr), "Probing…", "#c0c0d4")
+            self._set_colored_text(getattr(self, attr), "Probing…", "#a8a8ae")
 
         self.probe_worker = SerialProbeWorker(
             saved={
@@ -2229,23 +2229,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             ("dispenser", "dispenser_usb_status"),
         ):
             if status.get(key) == "verified":
-                self._set_colored_text(getattr(self, attr), "Verified", "#40dd80")
+                self._set_colored_text(getattr(self, attr), "Verified", "#6f9e7c")
             else:
-                self._set_colored_text(getattr(self, attr), "Not found", "#dd5050")
+                self._set_colored_text(getattr(self, attr), "Not found", "#b56a6a")
 
         if res.get("ok"):
-            self._set_chip("usb", "USB 3/3", "#40dd80")
-            self.usb_card.set_status("3/3 verified", "#40dd80")
+            self._set_chip("usb", "USB 3/3", "#6f9e7c")
+            self.usb_card.set_status("3/3 verified", "#6f9e7c")
         else:
             n_ok = sum(
                 1
                 for key in ("laser", "mot_coil", "dispenser")
                 if status.get(key) == "verified"
             )
-            self._set_chip("usb", f"USB {n_ok}/3", "#dd5050")
+            self._set_chip("usb", f"USB {n_ok}/3", "#b56a6a")
             # Compact summary: the auto-expanded card's per-row statuses
             # show which device is missing.
-            self.usb_card.set_status(f"{n_ok}/3 verified", "#dd5050")
+            self.usb_card.set_status(f"{n_ok}/3 verified", "#b56a6a")
             self.usb_card.set_expanded(True)
 
         self._save_connection_settings()
@@ -2466,9 +2466,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_lock_state(self, locked):
         self._set_lock_label(self.lock_readout, locked)
         if locked:
-            self._set_chip("lock", "LOCKED", "#40dd80")
+            self._set_chip("lock", "LOCKED", "#6f9e7c")
         else:
-            self._set_chip("lock", "UNLOCKED", "#dd5050")
+            self._set_chip("lock", "UNLOCKED", "#b56a6a")
         self._event_log.log("lock", locked=bool(locked))
 
     # ------------------------------------------------------------------
@@ -2539,7 +2539,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_colored_text(
             self.laser_lock_label,
             "UNLOCKED" if unlocked else "LOCKED",
-            "#ff9f40" if unlocked else "#8a8aa0",
+            "#b9924f" if unlocked else "#84848b",
         )
 
     def _on_laser_unlock(self, unlocked):
@@ -2626,10 +2626,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         text = f"{current_a:.2f} A CC / {seconds:.0f} s fire"
         if is_default:
-            self._set_colored_text(self.dispenser_setpoint_label, text, "#c0c0d4")
+            self._set_colored_text(self.dispenser_setpoint_label, text, "#a8a8ae")
         else:
             self._set_colored_text(
-                self.dispenser_setpoint_label, text + "  (OVERRIDE)", "#ff9f40"
+                self.dispenser_setpoint_label, text + "  (OVERRIDE)", "#b9924f"
             )
 
     def _on_mot_coil_voltage(self, value):
@@ -2670,11 +2670,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._set_readback_text(self.mot_coil_readback, state)
         if int(state.get("protection", 0) or 0):
-            self._set_chip("coils", "COILS TRIP", "#dd5050")
+            self._set_chip("coils", "COILS TRIP", "#b56a6a")
         elif state.get("output_enabled"):
-            self._set_chip("coils", f"COILS {state['i_out']:.1f} A", "#40dd80")
+            self._set_chip("coils", f"COILS {state['i_out']:.1f} A", "#6f9e7c")
         else:
-            self._set_chip("coils", "COILS OFF", "#c0c0d4")
+            self._set_chip("coils", "COILS OFF", "#a8a8ae")
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
@@ -2693,7 +2693,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 label,
                 f"{kind} TRIPPED — {state['v_out']:.2f} V / "
                 f"{state['i_out']:.2f} A",
-                "#dd5050",
+                "#b56a6a",
             )
             return
         text = (
@@ -2703,7 +2703,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if show_mode and state.get("output_enabled"):
             text += " / CC" if state.get("cv_cc") else " / CV"
         label.setText(text)
-        label.setStyleSheet("color: #ececf4; font-size: 13px; border: none;")
+        label.setStyleSheet("color: #e4e4e7; font-size: 13px; border: none;")
 
     @staticmethod
     def _sync_output_button(button, state, on_text, off_text):
@@ -2733,9 +2733,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._set_colored_text(
                 self.dispenser_fire_label,
                 f"FIRING — {remaining:.0f} s left",
-                "#ff9f40",
+                "#b9924f",
             )
-            self._set_chip("disp", "DISP FIRING", "#ff9f40")
+            self._set_chip("disp", "DISP FIRING", "#b9924f")
         elif phase == "cooldown":
             minutes, seconds = divmod(int(round(remaining)), 60)
             self.dispenser_fire_btn.setEnabled(False)
@@ -2743,34 +2743,34 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._set_colored_text(
                 self.dispenser_fire_label,
                 f"Cooldown {minutes:d}:{seconds:02d}",
-                "#00d4ff",
+                "#b4b4bb",
             )
-            self._set_chip("disp", f"DISP {minutes:d}:{seconds:02d}", "#00d4ff")
+            self._set_chip("disp", f"DISP {minutes:d}:{seconds:02d}", "#b4b4bb")
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
-            self._set_colored_text(self.dispenser_fire_label, "Idle", "#c0c0d4")
-            self._set_chip("disp", "DISP IDLE", "#c0c0d4")
+            self._set_colored_text(self.dispenser_fire_label, "Idle", "#a8a8ae")
+            self._set_chip("disp", "DISP IDLE", "#a8a8ae")
 
     def _update_dispenser_progress(self, phase, remaining):
         if phase == "firing":
             total = max(1.0, self._dispenser_fire_seconds)
-            color = "#ff9f40"
+            color = "#b9924f"
         elif phase == "cooldown":
             total = DispenserWorker.COOLDOWN_SECONDS
-            color = "#00d4ff"
+            color = "#b4b4bb"
         else:
             self.dispenser_progress.setVisible(False)
             return
         fraction = max(0.0, min(1.0, remaining / total))
         self.dispenser_progress.setValue(int(round(1000 * fraction)))
         self.dispenser_progress.setStyleSheet(
-            "QProgressBar { background: #0e0e16; border: none;"
-            "border-radius: 3px; }"
+            "QProgressBar { background: #101012; border: none;"
+            "border-radius: 0px; }"
             f"QProgressBar::chunk {{ background: {color};"
-            "border-radius: 3px; }"
+            "border-radius: 0px; }"
         )
         self.dispenser_progress.setVisible(True)
 
@@ -3214,7 +3214,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             algorithm=int(self.psd_algo_combo.currentData()),
             max_decimation=self.psd_decimation_spin.value(),
         )
-        self._set_colored_text(self.psd_status_label, "Starting...", "#ff9f40")
+        self._set_colored_text(self.psd_status_label, "Starting...", "#b9924f")
 
     def _run_pid_optimization(self):
         worker = getattr(self, "psd_worker", None)
@@ -3234,16 +3234,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return
         worker.start_pid_optimization()
         self._event_log.log("pid_opt_start")
-        self._set_colored_text(self.psd_status_label, "Starting...", "#ff9f40")
+        self._set_colored_text(self.psd_status_label, "Starting...", "#b9924f")
 
     def _on_psd_connection(self, status):
         self._log_connection("psd", status)
         if status == "no_host":
             self._set_colored_text(
-                self.psd_status_label, "No RP host set", "#dd5050"
+                self.psd_status_label, "No RP host set", "#b56a6a"
             )
         elif status.startswith("error"):
-            self._set_colored_text(self.psd_status_label, "Error", "#dd5050")
+            self._set_colored_text(self.psd_status_label, "Error", "#b56a6a")
             self.psd_status_label.setToolTip(status)
 
     def _on_psd_status(self, state):
@@ -3252,14 +3252,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         busy = acquiring or optimizing
         if optimizing:
             self._set_colored_text(
-                self.psd_status_label, "Optimizing PID...", "#ff9f40"
+                self.psd_status_label, "Optimizing PID...", "#b9924f"
             )
         elif acquiring:
             self._set_colored_text(
-                self.psd_status_label, "Acquiring PSD...", "#ff9f40"
+                self.psd_status_label, "Acquiring PSD...", "#b9924f"
             )
         else:
-            self._set_colored_text(self.psd_status_label, "Idle", "#c0c0d4")
+            self._set_colored_text(self.psd_status_label, "Idle", "#a8a8ae")
         self.psd_view_status.setText(
             "OPTIMIZING" if optimizing else "ACQUIRING" if acquiring else ""
         )
@@ -3366,13 +3366,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         tooltip so the label never overflows its 84 px column.
         """
         if status.startswith("connected"):
-            text, color = "OK", "#40dd80"
+            text, color = "OK", "#6f9e7c"
         elif status in ("no_port", "no_host"):
-            text, color = "No port", "#c0c0d4"
+            text, color = "No port", "#a8a8ae"
         elif status.startswith("error"):
-            text, color = "Error", "#dd5050"
+            text, color = "Error", "#b56a6a"
         else:
-            text, color = "--", "#c0c0d4"
+            text, color = "--", "#a8a8ae"
         label.setText(text)
         label.setToolTip(status)
         label.setStyleSheet(
@@ -3383,19 +3383,19 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _set_status_label(label, status):
         if status.startswith("connected:"):
             text = status.split(":", 1)[1]
-            color = "#40dd80"
+            color = "#6f9e7c"
         elif status == "connected":
             text = "Connected"
-            color = "#40dd80"
+            color = "#6f9e7c"
         elif status in ("no_port", "no_host"):
             text = "Not configured"
-            color = "#c0c0d4"
+            color = "#a8a8ae"
         elif status.startswith("error:"):
             text = "Error"
-            color = "#dd5050"
+            color = "#b56a6a"
         else:
             text = "Disconnected"
-            color = "#dd5050"
+            color = "#b56a6a"
         label.setText(text)
         label.setStyleSheet(
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
@@ -3404,14 +3404,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _show_fault(self, label, device, message):
         label.setText("Fault")
         label.setStyleSheet(
-            "color: #dd5050; font-size: 13px; font-weight: 700; border: none;"
+            "color: #b56a6a; font-size: 13px; font-weight: 700; border: none;"
         )
         self._log_fault(device, message)
 
     @staticmethod
     def _set_lock_label(label, locked):
         text = "Locked" if locked else "Unlocked"
-        color = "#40dd80" if locked else "#dd5050"
+        color = "#6f9e7c" if locked else "#b56a6a"
         label.setText(text)
         label.setStyleSheet(
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
@@ -3475,7 +3475,7 @@ def main():
     app.setFont(QtGui.QFont(BODY_FONT_FAMILY))
     app.setStyleSheet(build_app_stylesheet())
     pg.setConfigOptions(
-        useOpenGL=False, enableExperimental=False, foreground="#c8c8da"
+        useOpenGL=False, enableExperimental=False, foreground="#b0b0b6"
     )
 
     window = OpenQuantumControlsWindow(
