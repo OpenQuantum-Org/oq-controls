@@ -349,17 +349,28 @@ def discover_serial_ports():
 class CollapsibleCard(QtWidgets.QFrame):
     """Card with a clickable header that shows/hides its content."""
 
-    def __init__(self, title, collapsed=True, parent=None):
+    def __init__(self, title, collapsed=True, parent=None, framed=True):
         super().__init__(parent)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #141416;
-                border: 1px solid #26262a;
-                border-radius: 0px;
-            }
-        """)
+        if framed:
+            self.setStyleSheet("""
+                QFrame {
+                    background-color: #141416;
+                    border: 1px solid #26262a;
+                    border-radius: 0px;
+                }
+            """)
+        else:
+            # Nested inside another card: no frame of its own, and no
+            # margins, so it reads as a section rather than a second box.
+            # Scoped by objectName — a bare "QFrame {...}" rule cascades
+            # into every descendant frame and breaks their painting.
+            self.setObjectName("nestedSection")
+            self.setStyleSheet(
+                "QFrame#nestedSection { border: none; background: transparent; }"
+            )
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(12, 10, 12, 10)
+        margin = (12, 10, 12, 10) if framed else (0, 0, 0, 0)
+        outer.setContentsMargins(*margin)
         outer.setSpacing(6)
 
         header = QtWidgets.QHBoxLayout()
@@ -1328,7 +1339,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._add_laser_card(layout)
         self._add_repump_card(layout)
         self._add_lock_card(layout)
-        self._add_filter_card(layout)
         self._add_dps_card(layout)
         self._add_config_card(layout)
         self._add_log_card(layout)
@@ -1555,8 +1565,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.connect_btn)
         parent.addWidget(card)
 
-    def _add_filter_card(self, parent):
-        card = CollapsibleCard("Error Signal Filters", collapsed=True)
+    def _add_filter_section(self, parent):
+        """Error-signal filters, nested as a collapsible section of the
+        Linien Lock card rather than a card of its own."""
+        card = CollapsibleCard(
+            "Error Signal Filters", collapsed=True, framed=False
+        )
         self.filter_card = card
         layout = card.content_layout
         self._tip(
@@ -1826,6 +1840,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.psd_mode_btn,
         )
         layout.addLayout(lock_button_row)
+        self._add_filter_section(layout)
         parent.addWidget(card)
 
     def _add_laser_card(self, parent):
