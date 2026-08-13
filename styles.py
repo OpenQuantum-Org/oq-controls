@@ -97,7 +97,7 @@ APP_STYLESHEET = """
     QLabel.readout-label {
         color: #969696;
         font-weight: 600;
-        font-size: 12px;
+        font-size: 13px;
         border: none;
     }
     QLabel.readout-value {
@@ -139,10 +139,10 @@ LOCK_INDICATOR_UNLOCKED = """
         border-radius: 0px;
     }
 """
-LOCK_LABEL_LOCKED = "color: #6f9e7c; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
-LOCK_LABEL_UNLOCKED = "color: #b56a6a; font-size: 15px; font-weight: 700; border: none; letter-spacing: 1px;"
+LOCK_LABEL_LOCKED = "color: #6f9e7c; font-size: 13px; font-weight: 700; border: none; letter-spacing: 1px;"
+LOCK_LABEL_UNLOCKED = "color: #b56a6a; font-size: 13px; font-weight: 700; border: none; letter-spacing: 1px;"
 
-PD_READOUT_STYLE = "color: white; font-size: 22px; font-weight: 700; border: none;"
+PD_READOUT_STYLE = "color: white; font-size: 20px; font-weight: 700; border: none;"
 
 # ---------------------------------------------------------------------------
 # Big editable number fields
@@ -215,7 +215,7 @@ def add_slider_row(parent_layout, label_text, min_val, max_val, init_val,
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #ababab; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #ababab; font-size: 13px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)
@@ -256,7 +256,7 @@ def add_readout_row(parent_layout, label_text, initial_text="--", unit=""):
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #969696; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #969696; font-size: 13px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)

@@ -214,15 +214,15 @@ try:
     assert logo.height() >= mot_control.LOGO_HEIGHT_PX
     assert logo.width() > logo.height()  # horizontal lockup
 
-    # Fonts: titles render in Space Grotesk, body in IBM Plex Sans —
+    # One family throughout: Space Grotesk for headings and body alike —
     # verified via the resolved font, not the stylesheet text.
     assert resolved_family(window.usb_card.toggle_btn) == "Space Grotesk"
     section = mot_control.make_section_title("PROBE")
     section.show()
     app.processEvents()
     assert resolved_family(section) == "Space Grotesk"
-    assert resolved_family(window.laser_status) == "IBM Plex Sans"
-    assert resolved_family(window.dispenser_fire_btn) == "IBM Plex Sans"
+    assert resolved_family(window.laser_status) == "Space Grotesk"
+    assert resolved_family(window.dispenser_fire_btn) == "Space Grotesk"
 
     # Unit suffixes on the previously unitless fields.
     assert window.mod_freq_edit.text().endswith(" MHz")
@@ -510,7 +510,8 @@ try:
     assert pid_default.values() == (50, 5, 0)  # linien defaults
 
     # --- Error signal filter card ---
-    assert not window.filter_card.content.isVisibleTo(window.filter_card)
+    # Filters are inline in the Linien Lock card, not a nested dropdown.
+    assert not hasattr(window, "filter_card")
     assert window.filter_auto_check.isChecked()  # linien default: automatic
     assert not window.filter1_freq_spin.isEnabled()  # manual rows locked
     window.filter_auto_check.setChecked(False)

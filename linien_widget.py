@@ -120,7 +120,7 @@ class LinienWidget(QtWidgets.QWidget):
 
         # --- Overlay labels ---
         vb = self.plot.getViewBox()
-        overlay_label_style = "color: #ababab; background: transparent; font-size: 12px; border: none;"
+        overlay_label_style = "color: #ababab; background: transparent; font-size: 13px; border: none;"
 
         self.center_label = QtWidgets.QLabel("Center: 0.000 V")
         self.center_label.setStyleSheet(overlay_label_style)
@@ -142,7 +142,7 @@ class LinienWidget(QtWidgets.QWidget):
             QPushButton {
                 background-color: rgba(20,20,30,200); color: #c4c4c4;
                 border: 1px solid #2e2e2e; border-radius: 0px;
-                font-size: 12px; padding: 3px 8px;
+                font-size: 13px; padding: 3px 8px;
             }
             QPushButton:hover { background-color: rgba(40,40,60,220); color: white; }
         """
