@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Needed so tag builds can create the GitHub release.
+permissions:
+  contents: write
+
 env:
   QT_QPA_PLATFORM: offscreen
 
