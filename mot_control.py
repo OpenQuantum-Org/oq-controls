@@ -1097,7 +1097,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         title_row = QtWidgets.QHBoxLayout()
         self.title_label = QtWidgets.QLabel()
-        self.title_label.setStyleSheet("border: none; padding: 4px 6px;")
+        self.title_label.setStyleSheet("border: none; padding: 18px 6px 4px 6px;")
         logo = QtGui.QPixmap(resource_path("assets", "full-horizontal.png"))
         if logo.isNull():
             # Bundled asset missing (broken build): fall back to the
@@ -1166,6 +1166,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget = LinienWidget(
             linien_host=self._rp_host,
             v_to_freq_ghz=V_TO_GHZ,
+        )
+        # Built by the Linien widget (it owns the range logic) but shown up
+        # here beside the camera toggle, with the other view controls.
+        view_bar.insertWidget(
+            view_bar.count() - 1, self.linien_widget.autozoom_check
+        )
+        self._tip(
+            "Keep the vertical range tracking the signal. Uncheck to hold\n"
+            "the current zoom.",
+            self.linien_widget.autozoom_check,
         )
         self.camera_widget = CameraViewWidget()
         self.camera_widget.setVisible(False)
@@ -1441,29 +1451,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
         )
 
-        addr_row = QtWidgets.QHBoxLayout()
-        addr_row.setSpacing(8)
-        addr_row.addWidget(self._small_label("DPS Addr:"))
-        self.mot_coil_addr_spin = QtWidgets.QSpinBox()
-        self.mot_coil_addr_spin.setRange(1, 247)
-        self.mot_coil_addr_spin.setValue(self._mot_coil_address)
-        self.mot_coil_addr_spin.setFixedWidth(72)
-        self.dispenser_addr_spin = QtWidgets.QSpinBox()
-        self.dispenser_addr_spin.setRange(1, 247)
-        self.dispenser_addr_spin.setValue(self._dispenser_address)
-        self.dispenser_addr_spin.setFixedWidth(72)
-        addr_row.addWidget(self._tiny_label("Coil"))
-        addr_row.addWidget(self.mot_coil_addr_spin)
-        addr_row.addWidget(self._tiny_label("Disp"))
-        addr_row.addWidget(self.dispenser_addr_spin)
-        addr_row.addStretch()
-        manual_layout.addLayout(addr_row)
-        self._tip(
-            "Modbus slave addresses of the DPS supplies (front panel\n"
-            "setting; usually 1).",
-            self.mot_coil_addr_spin,
-            self.dispenser_addr_spin,
-        )
 
         # No separate discovered-devices list: the dropdowns above are the
         # list. This line only reports how many were found.
@@ -2197,8 +2184,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "mot_coil": self.mot_coil_port_edit.text().strip(),
                 "dispenser": self.dispenser_port_edit.text().strip(),
             },
-            coil_address=self.mot_coil_addr_spin.value(),
-            dispenser_address=self.dispenser_addr_spin.value(),
+            coil_address=self._mot_coil_address,
+            dispenser_address=self._dispenser_address,
         )
         self.probe_worker.result.connect(
             lambda res: self._on_probe_result(res, startup)
@@ -2287,10 +2274,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "dps/dispenser_port", self.dispenser_port_edit.text().strip()
         )
         self._settings.setValue(
-            "dps/mot_coil_address", self.mot_coil_addr_spin.value()
+            "dps/mot_coil_address", self._mot_coil_address
         )
         self._settings.setValue(
-            "dps/dispenser_address", self.dispenser_addr_spin.value()
+            "dps/dispenser_address", self._dispenser_address
         )
         self._settings.setValue("dac/vtune_min", self._vtune_min)
         self._settings.setValue("dac/vtune_max", self._vtune_max)
@@ -2312,7 +2299,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _start_dps_workers(self):
         self.mot_coil_worker = RidenDPSWorker(
             port=self.mot_coil_port_edit.text().strip(),
-            address=self.mot_coil_addr_spin.value(),
+            address=self._mot_coil_address,
             model="DPS5005",
         )
         self.mot_coil_worker.connection_status.connect(
@@ -2329,7 +2316,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self.dispenser_worker = DispenserWorker(
             port=self.dispenser_port_edit.text().strip(),
-            address=self.dispenser_addr_spin.value(),
+            address=self._dispenser_address,
             model="DPS5020",
             cooldown_until=self._dispenser_cooldown_until,
             fire_seconds=self._dispenser_fire_seconds,
@@ -2964,8 +2951,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "laser_port": self.laser_edit.text().strip(),
                 "mot_coil_port": self.mot_coil_port_edit.text().strip(),
                 "dispenser_port": self.dispenser_port_edit.text().strip(),
-                "mot_coil_address": self.mot_coil_addr_spin.value(),
-                "dispenser_address": self.dispenser_addr_spin.value(),
+                "mot_coil_address": self._mot_coil_address,
+                "dispenser_address": self._dispenser_address,
             },
             "linien": {
                 "mod_freq_khz": self.mod_freq_slider.value(),
@@ -3069,11 +3056,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             if key in connection:
                 edit.setText(str(connection[key]))
         if "mot_coil_address" in connection:
-            self.mot_coil_addr_spin.setValue(int(connection["mot_coil_address"]))
+            self._mot_coil_address = int(connection["mot_coil_address"])
         if "dispenser_address" in connection:
-            self.dispenser_addr_spin.setValue(
-                int(connection["dispenser_address"])
-            )
+            self._dispenser_address = int(connection["dispenser_address"])
 
         linien = config.get("linien", {})
         for key, slider in (

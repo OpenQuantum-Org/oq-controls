@@ -95,6 +95,10 @@ class LinienWidget(QtWidgets.QWidget):
             self.plot.setLabel("bottom", "Sweep Voltage (V)",
                                **{"font-size": "10pt", "color": "#969696"})
 
+        # pyqtgraph's own auto-range button: a small "A" that appears over
+        # the plot on hover. Autozoom replaces it.
+        self.plot.hideButtons()
+
         self.plot.setYRange(-0.05, 0.10)
         init_xmin, init_xmax = self._v_range_to_display(
             self._sweep_min_v, self._sweep_max_v)
@@ -155,20 +159,17 @@ class LinienWidget(QtWidgets.QWidget):
         # Nothing but labels sits over the traces. The lock controls are
         # handed to the host window (see lock_controls) so they can live in
         # the Linien Lock card, and autozoom sits under the plot.
-        foot = QtWidgets.QHBoxLayout()
-        foot.setContentsMargins(20, 2, 8, 2)
-        foot.setSpacing(8)
+        # Unparented: the host window places this with its other view
+        # controls (see autozoom_check).
         self.autozoom_check = QtWidgets.QCheckBox("Autozoom")
         self.autozoom_check.setChecked(True)
         self.autozoom_check.setCursor(QtCore.Qt.PointingHandCursor)
         self.autozoom_check.setStyleSheet(
-            "QCheckBox { color: #ababab; font-size: 13px; border: none; }"
+            "QCheckBox { color: #e6e6e6; font-size: 13px; font-weight: 700;"
+            "border: none; padding: 4px 6px; }"
             "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
         self.autozoom_check.toggled.connect(self._set_autozoom)
-        foot.addWidget(self.autozoom_check)
-        foot.addStretch()
-        layout.addLayout(foot)
         self._set_autozoom(True)
 
         self.lock_controls = QtWidgets.QWidget()
