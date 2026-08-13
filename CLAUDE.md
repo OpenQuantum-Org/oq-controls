@@ -29,7 +29,14 @@ that live there.
 `smoke_ui.py` builds the entire UI with no hardware and writes
 `mot-ui-smoke.png`. For any UI or styling change: edit, run it, then **look at
 the PNG**. That is the verification loop for visual work — use it before
-handing anything over.
+handing anything over. The `/verify` skill wraps all three plus the screenshot
+read.
+
+**Green tests say nothing about hardware.** All three suites are deliberately
+hardware-free: a fake client for the dispenser state machine, pure logic for
+port identification, and an offscreen UI build. No serial traffic, no Red
+Pitaya, no laser. Never report a device-facing change as working on the
+strength of `/verify` alone — that requires the bench.
 
 ## Hardware safety
 
@@ -43,6 +50,18 @@ forward to the next one:
 - Laser enable/disable or current changes
 - Any setpoint change on a currently locked system
 - DPS output enable
+
+### Laser operating point
+
+The laser runs at **80 mA** and **6215 Ω** thermistor. These are not defaults to
+be tuned — they are the operating point, and the GUI must not drift off them by
+accident. Both are already the code defaults (`mot_control.py:1850`, `:1866`).
+
+Treat any change as an actuation requiring explicit confirmation. Do not widen
+the slider ranges, do not "helpfully" adjust either value, and do not push
+either to hardware as a side effect of some other change. On connect, the
+sliders adopt the Koheron's actual setpoints rather than pushing the UI's — keep
+that direction.
 
 ## Architecture invariants
 
@@ -201,6 +220,21 @@ Do not add to it. UI restructuring work should **extract** the panel being
 changed into its own module rather than editing in place — the restructure and
 the split are one operation, not two. Colours and shared widget styling live in
 `styles.py`.
+
+## Working method
+
+One change at a time. Before editing, read the actual code and cite line
+numbers — never describe behaviour from memory or inference. After editing, run
+`/verify`; if the change touches a device, say plainly that bench verification
+is still outstanding rather than implying it passed.
+
+Commit at each logical boundary with a message explaining *why*, not what the
+diff already shows. Update the `ROADMAP.md` status marks as steps complete.
+
+When debugging: reproduce first, gather evidence from `logs/*.jsonl` rather than
+reasoning from the symptom description, form one hypothesis, and make the
+smallest change that would discriminate it. If it cannot be reproduced, say so
+instead of applying a plausible-looking fix.
 
 ## Style
 

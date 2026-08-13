@@ -25,8 +25,10 @@ enforced; rules written after are just documentation.
 
 Confirmed working 2026-08-13: all three suites pass, and the
 edit → `smoke_ui.py` → read `mot-ui-smoke.png` loop is verified end to end.
-The loop is three commands documented in `CLAUDE.md`; it needs no tooling
-around it.
+Wrapped as the `/verify` skill, whose real job is forcing the screenshot read —
+a green run only proves the UI constructed, not that it looks right.
+
+`/bench` (step 8) is the only other skill worth making, and not yet.
 
 ## [ ] 2. Colours and card order
 
