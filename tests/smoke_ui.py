@@ -204,7 +204,8 @@ try:
     assert not window.log_card.content.isVisibleTo(window.log_card)
 
     # Repump card sits above the power-supply card.
-    assert window.repump_card.y() < window.dps_card.y()
+    assert window.repump_card.y() < window.coils_card.y()
+    assert window.coils_card.y() < window.dispenser_card.y()
 
     # The header carries the logo asset, not text. A null pixmap means the
     # asset failed to load and the header silently fell back to a wordmark.

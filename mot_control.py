@@ -444,7 +444,9 @@ class CollapsibleCard(QtWidgets.QFrame):
         header = QtWidgets.QHBoxLayout()
         header.setSpacing(8)
         self.toggle_btn = QtWidgets.QToolButton()
-        self.toggle_btn.setText(title.upper())
+        # "&&" escapes the mnemonic marker: an unescaped "&" makes Qt
+        # underline the next character and swallow the ampersand.
+        self.toggle_btn.setText(title.upper().replace("&", "&&"))
         self.toggle_btn.setCheckable(True)
         self.toggle_btn.setChecked(not collapsed)
         self.toggle_btn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -950,8 +952,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     _CHIP_CARDS = {
         "lock": "lock_card",
         "usb": "usb_card",
-        "coils": "dps_card",
-        "disp": "dps_card",
+        "coils": "coils_card",
+        "disp": "dispenser_card",
     }
     _CHIP_NEUTRAL = "#ababab"
 
@@ -1404,7 +1406,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         return container
 
     def _add_connection_card(self, parent):
-        card = CollapsibleCard("Device Connections", collapsed=True)
+        card = CollapsibleCard("Devices", collapsed=True)
         self.usb_card = card
         layout = card.content_layout
 
@@ -1650,7 +1652,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_log_card(self, parent):
-        card = CollapsibleCard("Event Log", collapsed=True)
+        card = CollapsibleCard("Log", collapsed=True)
         self.log_card = card
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -1670,7 +1672,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_lock_card(self, parent):
-        card = CollapsibleCard("Linien Lock", collapsed=False)
+        card = CollapsibleCard("Error Signal & Lock", collapsed=False)
         self.lock_card = card
         layout = card.content_layout
 
@@ -1811,7 +1813,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_laser_card(self, parent):
-        card = CollapsibleCard("Koheron Laser Setpoints", collapsed=False)
+        card = CollapsibleCard("Laser Setpoints", collapsed=False)
         layout = card.content_layout
 
         self.laser_status = add_readout_row(layout, "Koheron:", "No port set")
@@ -1893,11 +1895,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_dps_card(self, parent):
-        card = CollapsibleCard("Power Supplies", collapsed=False)
-        self.dps_card = card
+        """Coils and dispenser: two cards, one per supply."""
+        card = CollapsibleCard("Coils", collapsed=False)
+        self.coils_card = card
         layout = card.content_layout
 
-        layout.addWidget(make_section_title("MOT Coils — DPS5005"))
         self.mot_coil_readback = add_readout_row(layout, "Readback:", "--")
         self._tip(
             "Measured coil supply output (V / A / W). Turns red if the\n"
@@ -1950,12 +1952,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mot_coil_current_edit,
         )
 
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.HLine)
-        sep.setStyleSheet("color: #282828;")
-        layout.addWidget(sep)
+        parent.addWidget(card)
 
-        layout.addWidget(make_section_title("Dispenser — DPS5020"))
+        card = CollapsibleCard("Dispenser", collapsed=False)
+        self.dispenser_card = card
+        layout = card.content_layout
+
         self.dispenser_readback = add_readout_row(layout, "Readback:", "--")
         self._tip(
             "Measured dispenser supply output (V / A / W) and CV/CC mode.\n"
@@ -2031,7 +2033,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_repump_card(self, parent):
-        card = CollapsibleCard("Repump Frequency Tuning", collapsed=False)
+        card = CollapsibleCard("Repump", collapsed=False)
         self.repump_card = card
         layout = card.content_layout
 
