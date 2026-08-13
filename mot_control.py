@@ -28,12 +28,13 @@ from styles import (
     APP_STYLESHEET,
     NEON_BLUE,
     add_readout_row,
-    add_slider_row,
+    add_slider_row as _eit_add_slider_row,
     make_card,
-    make_section_title,
+    make_section_title as _eit_make_section_title,
 )
 from workers import LaserSetpointWorker
 
+from mot_logging import EventLog
 from mot_workers import (
     DacClickWorker,
     DispenserWorker,
@@ -42,6 +43,69 @@ from mot_workers import (
     SerialProbeWorker,
     _is_likely_usb_serial,
 )
+
+# Riden DPS protection register (reg 7) values.
+DPS_PROTECTION = {1: "OVP", 2: "OCP", 3: "OPP"}
+
+# App typography: IBM Plex Sans for body text, Space Grotesk for titles.
+FONTS_DIR = os.path.join(HERE, "fonts")
+BODY_FONT_FAMILY = "IBM Plex Sans"
+TITLE_FONT_FAMILY = "Space Grotesk"
+
+
+def load_app_fonts():
+    """Register the font files bundled in fonts/.
+
+    Both families ship with the repo under the SIL OFL (IBM Plex Sans for
+    body text, Space Grotesk for titles); additional font files dropped
+    into fonts/ are also registered but stay local (licensed files are
+    gitignored). Fonts are registered from bytes because the path-based
+    QFontDatabase.addApplicationFont silently fails on this Qt build
+    (6.11/macOS). Missing families fall back to Helvetica Neue, with a
+    console warning.
+    """
+    if os.path.isdir(FONTS_DIR):
+        for name in sorted(os.listdir(FONTS_DIR)):
+            if not name.lower().endswith((".ttf", ".otf")):
+                continue
+            path = os.path.join(FONTS_DIR, name)
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                print(f"! could not read font {name}: {e}")
+                continue
+            if QtGui.QFontDatabase.addApplicationFontFromData(data) < 0:
+                print(f"! could not register font: {name}")
+    families = set(QtGui.QFontDatabase.families())
+    for family in (BODY_FONT_FAMILY, TITLE_FONT_FAMILY):
+        if family not in families:
+            print(f"! font family not available, using fallback: {family}")
+
+
+def build_app_stylesheet():
+    return APP_STYLESHEET + (
+        "\n* {"
+        f' font-family: "{BODY_FONT_FAMILY}", "Helvetica Neue",'
+        ' "Segoe UI", sans-serif; }\n'
+    )
+
+
+def make_section_title(text):
+    label = _eit_make_section_title(text)
+    label.setStyleSheet(
+        label.styleSheet() + f' font-family: "{TITLE_FONT_FAMILY}";'
+    )
+    return label
+
+
+def add_slider_row(*args, **kwargs):
+    slider, edit = _eit_add_slider_row(*args, **kwargs)
+    # The shared helper sizes its value edit for the old monospace font;
+    # the proportional body font is wider, so give values like "1000 mV"
+    # room (the smoke test checks every edit fits its extreme values).
+    edit.setFixedWidth(100)
+    return slider, edit
 
 
 # Voltage to frequency conversion for Koheron drivers + 780 nm laser diodes.
@@ -78,6 +142,18 @@ def vtune_to_vco_mhz(vtune_v: float) -> float:
     f0, f1 = _VCO_FREQ_MHZ[i - 1], _VCO_FREQ_MHZ[i]
     w = (vtune_v - v0) / (v1 - v0)
     return f0 + w * (f1 - f0)
+
+
+def thermistor_ohms_to_c(ohms: float) -> float:
+    """Steinhart-Hart for the laser head's 10 k NTC thermistor.
+
+    Coefficients carried over from the old qMOT-os rig (same laser head).
+    """
+    import math
+
+    r = max(1e-3, float(ohms))
+    ln_r = math.log(r)
+    return 1.0 / (0.00113 + 0.000234 * ln_r + 8.78e-8 * ln_r**3) - 273.15
 
 COMBO_STYLE = """
     QComboBox {
@@ -191,7 +267,8 @@ class CollapsibleCard(QtWidgets.QFrame):
         self.toggle_btn.setStyleSheet(
             f"QToolButton {{ color: {NEON_BLUE}; font-size: 11px;"
             "font-weight: 600; letter-spacing: 1px; border: none;"
-            "background: transparent; padding: 2px 4px; }"
+            "background: transparent; padding: 2px 4px;"
+            f' font-family: "{TITLE_FONT_FAMILY}"; }}'
         )
         self.toggle_btn.toggled.connect(self._on_toggled)
         header.addWidget(self.toggle_btn)
@@ -279,6 +356,7 @@ class CameraViewWidget(QtWidgets.QWidget):
         title.setStyleSheet(
             f"color: {NEON_BLUE}; font-size: 12px; font-weight: 700;"
             "letter-spacing: 1px; border: none; padding: 4px 6px;"
+            f'font-family: "{TITLE_FONT_FAMILY}";'
         )
         header.addWidget(title)
         header.addStretch()
@@ -555,6 +633,78 @@ class DeviceConfigDialog(QtWidgets.QDialog):
         )
 
 
+class DispenserOverrideDialog(QtWidgets.QDialog):
+    """Change the dispenser fire current/duration (confirmed afterwards)."""
+
+    def __init__(self, parent, current_a, fire_seconds):
+        super().__init__(parent)
+        self.setWindowTitle("Dispenser Override")
+
+        from mot_workers import DPS_MODELS
+
+        max_current = DPS_MODELS["DPS5020"]["max_current"]
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+
+        self.current_spin = QtWidgets.QDoubleSpinBox()
+        self.current_spin.setRange(0.1, max_current)
+        self.current_spin.setDecimals(2)
+        self.current_spin.setSingleStep(0.1)
+        self.current_spin.setSuffix(" A")
+        self.current_spin.setValue(float(current_a))
+
+        self.duration_spin = QtWidgets.QDoubleSpinBox()
+        self.duration_spin.setRange(1.0, 120.0)
+        self.duration_spin.setDecimals(0)
+        self.duration_spin.setSingleStep(1.0)
+        self.duration_spin.setSuffix(" s")
+        self.duration_spin.setValue(float(fire_seconds))
+
+        form.addRow("Fire current:", self.current_spin)
+        form.addRow("Fire duration:", self.duration_spin)
+        root.addLayout(form)
+
+        note = QtWidgets.QLabel(
+            "The dispenser runs constant-current; the default of "
+            f"{DispenserWorker.DISPENSE_CURRENT_A:.1f} A for "
+            f"{DispenserWorker.FIRE_SECONDS:.0f} s is the safe operating "
+            "point. Higher settings risk burning out the dispenser or "
+            "overloading the pump."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #cc8830; border: none; font-size: 12px;")
+        root.addWidget(note)
+
+        button_row = QtWidgets.QHBoxLayout()
+        defaults_btn = QtWidgets.QPushButton(
+            f"Defaults ({DispenserWorker.DISPENSE_CURRENT_A:.1f} A / "
+            f"{DispenserWorker.FIRE_SECONDS:.0f} s)"
+        )
+        defaults_btn.clicked.connect(self._fill_defaults)
+        button_row.addWidget(defaults_btn)
+        button_row.addStretch()
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        apply_btn = QtWidgets.QPushButton("Apply...")
+        apply_btn.setDefault(True)
+        apply_btn.clicked.connect(self.accept)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(apply_btn)
+        root.addLayout(button_row)
+
+    def _fill_defaults(self):
+        self.current_spin.setValue(DispenserWorker.DISPENSE_CURRENT_A)
+        self.duration_spin.setValue(DispenserWorker.FIRE_SECONDS)
+
+    def values(self):
+        return self.current_spin.value(), self.duration_spin.value()
+
+
 class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
@@ -592,8 +742,22 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_cooldown_until = float(
             self._settings.value("dispenser/cooldown_until", 0.0) or 0.0
         )
+        self._dispenser_fire_current = self._float_setting(
+            "dispenser/fire_current_a", DispenserWorker.DISPENSE_CURRENT_A
+        )
+        self._dispenser_fire_seconds = self._float_setting(
+            "dispenser/fire_seconds", DispenserWorker.FIRE_SECONDS
+        )
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
+
+        self._event_log = EventLog(os.path.join(HERE, "logs"))
+        self._readback_log_t = {}
+        self._readback_log_output = {}
+        self._readback_log_protection = {}
+        self._log_debounce = {}
+        self._last_logged_vtune = None
+        self._event_log.log("app_start")
 
         self.setWindowTitle("OpenQuantum Controls")
         self.resize(1540, 960)
@@ -611,6 +775,91 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._build_control_column(root)
 
         QtCore.QTimer.singleShot(0, self._deferred_start)
+
+    # ------------------------------------------------------------------
+    # Settings helpers
+    # ------------------------------------------------------------------
+
+    def _int_setting(self, key, default, lo=None, hi=None):
+        try:
+            value = int(float(self._settings.value(key, default)))
+        except (TypeError, ValueError):
+            value = int(default)
+        if lo is not None:
+            value = max(lo, value)
+        if hi is not None:
+            value = min(hi, value)
+        return value
+
+    def _float_setting(self, key, default):
+        try:
+            return float(self._settings.value(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    # ------------------------------------------------------------------
+    # Event logging helpers
+    # ------------------------------------------------------------------
+
+    READBACK_LOG_PERIOD_S = 10.0
+
+    def _log_connection(self, device, status):
+        print(f"{device}: {status}")
+        self._event_log.log("connection", device=device, status=status)
+
+    def _log_fault(self, device, message):
+        print(f"! {device} fault: {message}")
+        self._event_log.log("fault", device=device, message=str(message))
+
+    def _debounced_log(self, key, event, payload_fn, delay_ms=1500):
+        """Log once after a burst of changes (e.g. a slider drag) settles."""
+        timer = self._log_debounce.get(key)
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            self._log_debounce[key] = timer
+        try:
+            timer.timeout.disconnect()
+        except TypeError:
+            pass
+        timer.timeout.connect(lambda: self._event_log.log(event, **payload_fn()))
+        timer.start(delay_ms)
+
+    def _log_readback(self, channel, state):
+        """Decimated supply readback logging: every 10 s, plus immediately
+        on any output-enable or protection change."""
+        now = time.monotonic()
+        output = bool(state.get("output_enabled"))
+        protection = int(state.get("protection", 0) or 0)
+        due = (
+            now - self._readback_log_t.get(channel, -1e9)
+            >= self.READBACK_LOG_PERIOD_S
+        )
+        output_changed = self._readback_log_output.get(channel) != output
+        protection_changed = (
+            self._readback_log_protection.get(channel) != protection
+        )
+        if not (due or output_changed or protection_changed):
+            return
+        self._readback_log_t[channel] = now
+        self._readback_log_output[channel] = output
+        self._readback_log_protection[channel] = protection
+        self._event_log.log(
+            "readback",
+            channel=channel,
+            v_out=state.get("v_out"),
+            i_out=state.get("i_out"),
+            power=state.get("power"),
+            output=output,
+            cv_cc=int(state.get("cv_cc", 0) or 0),
+            protection=protection,
+        )
+        if protection_changed and protection:
+            self._event_log.log(
+                "protection_trip",
+                channel=channel,
+                kind=DPS_PROTECTION.get(protection, str(protection)),
+            )
 
     # ------------------------------------------------------------------
     # UI construction
@@ -656,12 +905,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         left.setSpacing(6)
 
         title_row = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("OPENQUANTUM CONTROLS")
-        title.setStyleSheet(
-            f"color: {NEON_BLUE}; font-size: 22px; font-weight: 900;"
+        self.title_label = QtWidgets.QLabel("OpenQuantum")
+        self.title_label.setStyleSheet(
+            f"color: {NEON_BLUE}; font-size: 22px; font-weight: 700;"
             "letter-spacing: 3px; border: none; padding: 4px 6px;"
+            f'font-family: "{TITLE_FONT_FAMILY}";'
         )
-        title_row.addWidget(title)
+        title_row.addWidget(self.title_label)
         title_row.addStretch()
         self.master_state_label = QtWidgets.QLabel("IDLE")
         self.master_state_label.setStyleSheet(
@@ -680,6 +930,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         spectroscopy_label.setStyleSheet(
             f"color: {NEON_BLUE}; font-size: 12px; font-weight: 700;"
             "letter-spacing: 1px; border: none; padding: 4px 6px;"
+            f'font-family: "{TITLE_FONT_FAMILY}";'
         )
         view_bar.addWidget(spectroscopy_label)
         view_bar.addStretch()
@@ -729,8 +980,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _build_control_column(self, root):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(430)
-        scroll.setMaximumWidth(560)
+        # Wide enough that no card ever needs horizontal scrolling; the
+        # smoke test asserts the content fits at the minimum width.
+        scroll.setMinimumWidth(460)
+        scroll.setMaximumWidth(600)
 
         inner = QtWidgets.QWidget()
         inner.setStyleSheet("background: transparent;")
@@ -829,7 +1082,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Mod Freq:",
             1,
             50000,
-            15000,
+            self._int_setting("linien/mod_freq_khz", 15000, 1, 50000),
             single=1,
             page=1000,
             decimals=3,
@@ -838,7 +1091,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.mod_freq_slider.valueChanged.connect(self._on_mod_freq)
 
         self.mod_phase_slider, self.mod_phase_edit = add_slider_row(
-            layout, "Mod Phase:", 0, 360, 0, single=1, page=10
+            layout,
+            "Mod Phase:",
+            0,
+            360,
+            self._int_setting("linien/mod_phase_deg", 0, 0, 360),
+            single=1,
+            page=10,
         )
         self.mod_phase_slider.valueChanged.connect(self._on_mod_phase)
 
@@ -847,7 +1106,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Mod Strength:",
             0,
             1000,
-            0,
+            self._int_setting("linien/mod_strength_mv", 0, 0, 1000),
             single=1,
             page=50,
             suffix=" mV",
@@ -878,7 +1137,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             (15, "0.116 Hz"),
         ]:
             self.sweep_speed_combo.addItem(label, value)
-        self.sweep_speed_combo.setCurrentIndex(8)
+        self.sweep_speed_combo.setCurrentIndex(
+            self._int_setting("linien/sweep_speed_index", 8, 0, 15)
+        )
         self.sweep_speed_combo.currentIndexChanged.connect(self._on_sweep_speed)
         speed_row.addWidget(self.sweep_speed_combo, stretch=1)
         layout.addLayout(speed_row)
@@ -899,13 +1160,28 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.laser_btn)
 
         self.current_slider, self.current_edit = add_slider_row(
-            layout, "Current:", 0, 200, 130, single=1, page=5, suffix=" mA"
+            layout,
+            "Current:",
+            0,
+            200,
+            self._int_setting("laser/current_ma", 130, 0, 200),
+            single=1,
+            page=5,
+            suffix=" mA",
         )
         self.current_slider.valueChanged.connect(self._on_current)
         self.therm_slider, self.therm_edit = add_slider_row(
-            layout, "Thermistor:", 5000, 10000, 6215, single=1, page=50
+            layout,
+            "Thermistor:",
+            5000,
+            10000,
+            self._int_setting("laser/thermistor_ohm", 6215, 5000, 10000),
+            single=1,
+            page=50,
         )
         self.therm_slider.valueChanged.connect(self._on_thermistor)
+        self.therm_temp_readback = add_readout_row(layout, "Temp (est):", "--")
+        self._update_therm_temp(self.therm_slider.value())
         parent.addWidget(card)
 
     def _add_dps_card(self, parent):
@@ -926,7 +1202,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Voltage:",
             0,
             50000,
-            5000,
+            self._int_setting("coil/voltage_mv", 5000, 0, 50000),
             single=10,
             page=1000,
             suffix=" V",
@@ -939,7 +1215,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Current:",
             0,
             5000,
-            1000,
+            self._int_setting("coil/current_ma", 1000, 0, 5000),
             single=10,
             page=100,
             suffix=" A",
@@ -955,21 +1231,31 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(make_section_title("Dispenser — DPS5020"))
         self.dispenser_readback = add_readout_row(layout, "Readback:", "--")
-        # The dispense operating point is fixed in DispenserWorker (7.5 A
-        # constant-current, 30 s fire) and deliberately has no UI controls.
-        add_readout_row(
-            layout,
-            "Setpoint:",
-            f"{DispenserWorker.DISPENSE_CURRENT_A:.1f} A CC / "
-            f"{DispenserWorker.FIRE_SECONDS:.0f} s fire",
-        )
+        # The dispense operating point defaults to 7.5 A constant-current
+        # for 30 s and is only changeable through the confirmed Override
+        # dialog; there are no free-form controls.
+        self.dispenser_setpoint_label = add_readout_row(layout, "Setpoint:", "--")
+        self.dispenser_history_label = add_readout_row(layout, "Fires:", "--")
+        self._update_dispenser_history_label()
         self.dispenser_fire_label = add_readout_row(layout, "Fire:", "Idle")
+
+        fire_row = QtWidgets.QHBoxLayout()
+        fire_row.setSpacing(6)
         self.dispenser_fire_btn = QtWidgets.QPushButton(
-            f"Fire Dispenser ({DispenserWorker.FIRE_SECONDS:.0f} s)"
+            f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
         )
         self.dispenser_fire_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.dispenser_fire_btn.clicked.connect(self._fire_dispenser_clicked)
-        layout.addWidget(self.dispenser_fire_btn)
+        fire_row.addWidget(self.dispenser_fire_btn, stretch=1)
+        self.dispenser_override_btn = QtWidgets.QPushButton("Override...")
+        self.dispenser_override_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.dispenser_override_btn.clicked.connect(
+            self._open_dispenser_override_dialog
+        )
+        fire_row.addWidget(self.dispenser_override_btn)
+        layout.addLayout(fire_row)
+
+        self._update_dispenser_setpoint_text()
         parent.addWidget(card)
 
     def _add_repump_card(self, parent):
@@ -982,7 +1268,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.vtune_freq_readback = add_readout_row(layout, "VCO Freq:", "--")
         vtune_min_mv = int(round(self._vtune_min * 1000))
         vtune_max_mv = int(round(self._vtune_max * 1000))
-        vtune_initial_mv = max(vtune_min_mv, min(vtune_max_mv, 0))
+        vtune_initial_mv = self._int_setting(
+            "dac/vtune_mv", 0, vtune_min_mv, vtune_max_mv
+        )
         self.vtune_slider, self.vtune_edit = add_slider_row(
             layout,
             "V_tune:",
@@ -1075,11 +1363,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     _USB_STATUS_ROWS = ("laser_usb_status", "coil_usb_status", "dispenser_usb_status")
-    _USB_KEY_LABELS = {
-        "laser": "Koheron",
-        "mot_coil": "Coil DPS5005",
-        "dispenser": "Disp DPS5020",
-    }
 
     def _run_usb_probe(self, startup=False):
         probe = getattr(self, "probe_worker", None)
@@ -1110,6 +1393,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_probe_result(self, res, startup=False):
         assignments = res.get("assignments", {})
         status = res.get("status", {})
+        self._event_log.log(
+            "usb_probe",
+            ok=bool(res.get("ok")),
+            assignments=assignments,
+            status=status,
+        )
         for key, edit in (
             ("laser", self.laser_edit),
             ("mot_coil", self.mot_coil_port_edit),
@@ -1132,15 +1421,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.master_state_label.setText("USB 3/3")
             self.usb_card.set_status("3/3 verified", "#40dd80")
         else:
-            missing = [
-                self._USB_KEY_LABELS[key]
+            n_ok = sum(
+                1
                 for key in ("laser", "mot_coil", "dispenser")
-                if status.get(key) != "verified"
-            ]
-            self.master_state_label.setText("CHECK USB DEVICES")
-            self.usb_card.set_status(
-                "Missing: " + ", ".join(missing), "#dd5050"
+                if status.get(key) == "verified"
             )
+            self.master_state_label.setText("CHECK USB DEVICES")
+            # Compact summary: the auto-expanded card's per-row statuses
+            # show which device is missing.
+            self.usb_card.set_status(f"{n_ok}/3 verified", "#dd5050")
             self.usb_card.set_expanded(True)
 
         self._save_connection_settings()
@@ -1206,7 +1495,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             lambda status: self._set_status_label(self.laser_status, status)
         )
         self.laser_worker.connection_status.connect(
-            lambda status: self._set_status_label(self.laser_usb_status, status)
+            lambda status: self._set_usb_status_label(self.laser_usb_status, status)
+        )
+        self.laser_worker.connection_status.connect(
+            lambda status: self._log_connection("laser", status)
         )
         self.laser_worker.start()
 
@@ -1217,11 +1509,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             model="DPS5005",
         )
         self.mot_coil_worker.connection_status.connect(
-            lambda status: self._set_status_label(self.coil_usb_status, status)
+            lambda status: self._set_usb_status_label(self.coil_usb_status, status)
+        )
+        self.mot_coil_worker.connection_status.connect(
+            lambda status: self._log_connection("coil", status)
         )
         self.mot_coil_worker.readback.connect(self._on_mot_coil_readback)
         self.mot_coil_worker.fault.connect(
-            lambda msg: self._show_fault(self.coil_usb_status, msg)
+            lambda msg: self._show_fault(self.coil_usb_status, "coil", msg)
         )
         self.mot_coil_worker.start()
 
@@ -1230,17 +1525,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             address=self.dispenser_addr_spin.value(),
             model="DPS5020",
             cooldown_until=self._dispenser_cooldown_until,
+            fire_seconds=self._dispenser_fire_seconds,
+            dispense_current_a=self._dispenser_fire_current,
         )
         self.dispenser_worker.connection_status.connect(
-            lambda status: self._set_status_label(self.dispenser_usb_status, status)
+            lambda status: self._set_usb_status_label(self.dispenser_usb_status, status)
+        )
+        self.dispenser_worker.connection_status.connect(
+            lambda status: self._log_connection("dispenser", status)
         )
         self.dispenser_worker.readback.connect(self._on_dispenser_readback)
         self.dispenser_worker.fire_state.connect(self._on_dispenser_fire_state)
+        self.dispenser_worker.fire_summary.connect(self._on_dispenser_fire_summary)
         self.dispenser_worker.cooldown_started.connect(
             self._on_dispenser_cooldown_started
         )
         self.dispenser_worker.fault.connect(
-            lambda msg: self._show_fault(self.dispenser_usb_status, msg)
+            lambda msg: self._show_fault(self.dispenser_usb_status, "dispenser", msg)
         )
         self.dispenser_worker.start()
 
@@ -1252,11 +1553,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             max_voltage=self._vtune_max,
         )
         self.vtune_worker.connection_status.connect(
-            lambda status: print(f"DAC Click (linien): {status}")
+            lambda status: self._log_connection("dac_click", status)
         )
         self.vtune_worker.voltage_readback.connect(self._on_vtune_readback)
         self.vtune_worker.fault.connect(
-            lambda msg: print(f"! DAC Click fault: {msg}")
+            lambda msg: self._log_fault("dac_click", msg)
         )
         self.vtune_worker.start()
 
@@ -1269,11 +1570,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             active_high=False,
         )
         self.repump_gpio_worker.connection_status.connect(
-            lambda status: print(f"Repump gate (linien GPIO): {status}")
+            lambda status: self._log_connection("repump_gate", status)
         )
         self.repump_gpio_worker.output_state.connect(self._on_repump_gpio_state)
         self.repump_gpio_worker.fault.connect(
-            lambda msg: print(f"! Repump gate fault: {msg}")
+            lambda msg: self._log_fault("repump_gate", msg)
         )
         self.repump_gpio_worker.start()
 
@@ -1298,23 +1599,48 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_mod_freq(self, value):
         self.mod_freq_edit.setText(f"{value / 1000.0:.3f}")
+        self._settings.setValue("linien/mod_freq_khz", value)
+        self._debounced_log(
+            "mod_freq",
+            "setpoint",
+            lambda: {"name": "mod_freq_khz", "value": self.mod_freq_slider.value()},
+        )
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_frequency(value)
 
     def _on_mod_phase(self, value):
         self.mod_phase_edit.setText(str(value))
+        self._settings.setValue("linien/mod_phase_deg", value)
+        self._debounced_log(
+            "mod_phase",
+            "setpoint",
+            lambda: {"name": "mod_phase_deg", "value": self.mod_phase_slider.value()},
+        )
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_phase(value)
 
     def _on_mod_strength(self, value):
         self.mod_strength_edit.setText(f"{value} mV")
+        self._settings.setValue("linien/mod_strength_mv", value)
+        self._debounced_log(
+            "mod_strength",
+            "setpoint",
+            lambda: {
+                "name": "mod_strength_mv",
+                "value": self.mod_strength_slider.value(),
+            },
+        )
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_amplitude(value)
 
-    def _on_sweep_speed(self, _combo_index):
+    def _on_sweep_speed(self, combo_index):
+        self._settings.setValue("linien/sweep_speed_index", combo_index)
+        self._event_log.log(
+            "setpoint", name="sweep_speed_index", value=combo_index
+        )
         worker = self._get_lock_worker()
         speed = self.sweep_speed_combo.currentData()
         if worker is not None and speed is not None:
@@ -1322,6 +1648,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_lock_state(self, locked):
         self._set_lock_label(self.lock_readout, locked)
+        self._event_log.log("lock", locked=bool(locked))
 
     # ------------------------------------------------------------------
     # Koheron laser controls
@@ -1337,21 +1664,53 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.therm_slider.setValue(int(values["thermistor"]))
         self.therm_slider.blockSignals(False)
         self.therm_edit.setText(str(int(values["thermistor"])))
+        self._update_therm_temp(int(values["thermistor"]))
+        self._event_log.log(
+            "laser_init",
+            current_ma=int(values["current"]),
+            thermistor_ohm=int(values["thermistor"]),
+        )
 
     def _toggle_laser(self, checked):
         self.laser_btn.setText("Laser On" if checked else "Laser Off")
-        if hasattr(self, "laser_worker"):
-            self.laser_worker.laser_on(checked)
+        self._event_log.log("laser_output", on=bool(checked))
+        worker = getattr(self, "laser_worker", None)
+        if worker is not None:
+            worker.laser_on(checked)
 
     def _on_current(self, value):
         self.current_edit.setText(f"{value} mA")
-        if hasattr(self, "laser_worker"):
-            self.laser_worker.set_current(value)
+        self._settings.setValue("laser/current_ma", value)
+        self._debounced_log(
+            "laser_current",
+            "setpoint",
+            lambda: {"name": "laser_current_ma", "value": self.current_slider.value()},
+        )
+        worker = getattr(self, "laser_worker", None)
+        if worker is not None:
+            worker.set_current(value)
 
     def _on_thermistor(self, value):
         self.therm_edit.setText(str(value))
-        if hasattr(self, "laser_worker"):
-            self.laser_worker.set_thermistor(value)
+        self._settings.setValue("laser/thermistor_ohm", value)
+        self._update_therm_temp(value)
+        self._debounced_log(
+            "laser_thermistor",
+            "setpoint",
+            lambda: {
+                "name": "laser_thermistor_ohm",
+                "value": self.therm_slider.value(),
+                "temp_c": round(thermistor_ohms_to_c(self.therm_slider.value()), 2),
+            },
+        )
+        worker = getattr(self, "laser_worker", None)
+        if worker is not None:
+            worker.set_thermistor(value)
+
+    def _update_therm_temp(self, ohms):
+        self.therm_temp_readback.setText(
+            f"{thermistor_ohms_to_c(ohms):.1f} \N{DEGREE SIGN}C"
+        )
 
     # ------------------------------------------------------------------
     # DPS5005 controls
@@ -1359,8 +1718,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_mot_coils(self, checked):
         self.mot_coil_output_btn.setText("Coils On" if checked else "Coils Off")
-        if hasattr(self, "mot_coil_worker"):
-            self.mot_coil_worker.set_output(checked)
+        worker = getattr(self, "mot_coil_worker", None)
+        if worker is not None:
+            worker.set_output(checked)
 
     def _fire_dispenser_clicked(self):
         worker = getattr(self, "dispenser_worker", None)
@@ -1371,42 +1731,156 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         else:
             worker.fire()
 
+    def _open_dispenser_override_dialog(self):
+        dialog = DispenserOverrideDialog(
+            self, self._dispenser_fire_current, self._dispenser_fire_seconds
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        current_a, seconds = dialog.values()
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Confirm Dispenser Override",
+            f"Set the dispenser fire to {current_a:.2f} A for "
+            f"{seconds:.0f} s?\n\n"
+            f"The safe default is {DispenserWorker.DISPENSE_CURRENT_A:.1f} A "
+            f"for {DispenserWorker.FIRE_SECONDS:.0f} s. Excessive current or "
+            "duration can burn out the dispenser or overload the pump.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if confirm != QtWidgets.QMessageBox.Yes:
+            return
+        self._apply_dispenser_override(current_a, seconds)
+
+    def _apply_dispenser_override(self, current_a, seconds):
+        self._dispenser_fire_current = float(current_a)
+        self._dispenser_fire_seconds = float(seconds)
+        self._settings.setValue(
+            "dispenser/fire_current_a", self._dispenser_fire_current
+        )
+        self._settings.setValue(
+            "dispenser/fire_seconds", self._dispenser_fire_seconds
+        )
+        worker = getattr(self, "dispenser_worker", None)
+        if worker is not None:
+            worker.set_fire_parameters(
+                self._dispenser_fire_current, self._dispenser_fire_seconds
+            )
+        self._event_log.log(
+            "dispenser_override",
+            current_a=self._dispenser_fire_current,
+            seconds=self._dispenser_fire_seconds,
+        )
+        self._update_dispenser_setpoint_text()
+        if self._dispenser_phase == "idle":
+            self.dispenser_fire_btn.setText(
+                f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
+            )
+
+    def _update_dispenser_setpoint_text(self):
+        current_a = self._dispenser_fire_current
+        seconds = self._dispenser_fire_seconds
+        is_default = (
+            abs(current_a - DispenserWorker.DISPENSE_CURRENT_A) < 0.005
+            and abs(seconds - DispenserWorker.FIRE_SECONDS) < 0.5
+        )
+        text = f"{current_a:.2f} A CC / {seconds:.0f} s fire"
+        if is_default:
+            self._set_colored_text(self.dispenser_setpoint_label, text, "#8888a0")
+        else:
+            self._set_colored_text(
+                self.dispenser_setpoint_label, text + "  (OVERRIDE)", "#ff9f40"
+            )
+
     def _on_mot_coil_voltage(self, value):
         volts = value / 1000.0
         self.mot_coil_voltage_edit.setText(f"{volts:.3f} V")
-        if hasattr(self, "mot_coil_worker"):
-            self.mot_coil_worker.set_voltage(volts)
+        self._settings.setValue("coil/voltage_mv", value)
+        self._debounced_log(
+            "coil_voltage",
+            "setpoint",
+            lambda: {
+                "name": "coil_voltage_v",
+                "value": self.mot_coil_voltage_slider.value() / 1000.0,
+            },
+        )
+        worker = getattr(self, "mot_coil_worker", None)
+        if worker is not None:
+            worker.set_voltage(volts)
 
     def _on_mot_coil_current(self, value):
         amps = value / 1000.0
         self.mot_coil_current_edit.setText(f"{amps:.3f} A")
-        if hasattr(self, "mot_coil_worker"):
-            self.mot_coil_worker.set_current(amps)
+        self._settings.setValue("coil/current_ma", value)
+        self._debounced_log(
+            "coil_current",
+            "setpoint",
+            lambda: {
+                "name": "coil_current_a",
+                "value": self.mot_coil_current_slider.value() / 1000.0,
+            },
+        )
+        worker = getattr(self, "mot_coil_worker", None)
+        if worker is not None:
+            worker.set_current(amps)
 
     def _on_mot_coil_readback(self, state):
-        self._update_dps_readback(
-            self.mot_coil_readback,
-            self.mot_coil_output_btn,
-            state,
-            on_text="Coils On",
-            off_text="Coils Off",
+        self._sync_output_button(
+            self.mot_coil_output_btn, state, "Coils On", "Coils Off"
         )
+        self._set_readback_text(self.mot_coil_readback, state)
+        self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
         # The fire button is driven by the worker's fire_state, not by the
         # raw output flag, so only the numeric readback is updated here.
+        self._set_readback_text(self.dispenser_readback, state, show_mode=True)
+        self._log_readback("dispenser", state)
+
+    def _set_readback_text(self, label, state, show_mode=False):
+        protection = int(state.get("protection", 0) or 0)
+        if protection:
+            # Keep this short so the row never widens the control column;
+            # power/mode are meaningless once the supply has tripped.
+            kind = DPS_PROTECTION.get(protection, f"PROT {protection}")
+            self._set_colored_text(
+                label,
+                f"{kind} TRIPPED — {state['v_out']:.2f} V / "
+                f"{state['i_out']:.2f} A",
+                "#dd5050",
+            )
+            return
         text = (
             f"{state['v_out']:.2f} V / {state['i_out']:.2f} A / "
             f"{state['power']:.2f} W"
         )
-        if state.get("output_enabled"):
+        if show_mode and state.get("output_enabled"):
             text += " / CC" if state.get("cv_cc") else " / CV"
-        self.dispenser_readback.setText(text)
+        label.setText(text)
+        label.setStyleSheet("color: #b0b0c8; font-size: 13px; border: none;")
+
+    @staticmethod
+    def _sync_output_button(button, state, on_text, off_text):
+        button.blockSignals(True)
+        button.setChecked(bool(state["output_enabled"]))
+        button.setText(on_text if state["output_enabled"] else off_text)
+        button.blockSignals(False)
 
     def _on_dispenser_fire_state(self, state):
         phase = state.get("phase", "idle")
         remaining = float(state.get("remaining_s", 0.0))
+        if phase != self._dispenser_phase:
+            if phase == "firing":
+                self._event_log.log(
+                    "dispenser_fire_start",
+                    current_a=self._dispenser_fire_current,
+                    planned_s=self._dispenser_fire_seconds,
+                )
+            elif phase == "idle" and self._dispenser_phase == "cooldown":
+                self._event_log.log("dispenser_ready")
         self._dispenser_phase = phase
+        self.dispenser_override_btn.setEnabled(phase != "firing")
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
@@ -1427,7 +1901,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
-                f"Fire Dispenser ({DispenserWorker.FIRE_SECONDS:.0f} s)"
+                f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
             self._set_colored_text(self.dispenser_fire_label, "Idle", "#8888a0")
 
@@ -1435,6 +1909,26 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_cooldown_until = float(until_epoch)
         self._settings.setValue(
             "dispenser/cooldown_until", self._dispenser_cooldown_until
+        )
+        self._event_log.log(
+            "dispenser_cooldown", until_epoch=self._dispenser_cooldown_until
+        )
+
+    def _on_dispenser_fire_summary(self, summary):
+        self._event_log.log("dispenser_fire_end", **summary)
+        fires = self._int_setting("dispenser/total_fires", 0) + 1
+        total_s = self._float_setting("dispenser/total_fire_s", 0.0) + float(
+            summary.get("elapsed_s", 0.0)
+        )
+        self._settings.setValue("dispenser/total_fires", fires)
+        self._settings.setValue("dispenser/total_fire_s", total_s)
+        self._update_dispenser_history_label()
+
+    def _update_dispenser_history_label(self):
+        fires = self._int_setting("dispenser/total_fires", 0)
+        total_s = self._float_setting("dispenser/total_fire_s", 0.0)
+        self.dispenser_history_label.setText(
+            f"{fires} / {total_s:.0f} s total"
         )
 
     @staticmethod
@@ -1444,17 +1938,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
         )
 
-    @staticmethod
-    def _update_dps_readback(label, button, state, on_text, off_text):
-        label.setText(
-            f"{state['v_out']:.2f} V / {state['i_out']:.2f} A / "
-            f"{state['power']:.2f} W"
-        )
-        button.blockSignals(True)
-        button.setChecked(bool(state["output_enabled"]))
-        button.setText(on_text if state["output_enabled"] else off_text)
-        button.blockSignals(False)
-
     # ------------------------------------------------------------------
     # Repump tune / gate
     # ------------------------------------------------------------------
@@ -1462,15 +1945,27 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_vtune(self, value):
         volts = value / 1000.0
         self.vtune_edit.setText(f"{volts:.3f} V")
+        self._settings.setValue("dac/vtune_mv", value)
         # Live target frequency while dragging; the readback (actual)
         # overwrites it as soon as the ~0.3 s DAC write completes.
         self.vtune_freq_readback.setText(f"{vtune_to_vco_mhz(volts):.1f} MHz")
-        if hasattr(self, "vtune_worker"):
-            self.vtune_worker.set_voltage(volts)
+        worker = getattr(self, "vtune_worker", None)
+        if worker is not None:
+            worker.set_voltage(volts)
 
     def _on_vtune_readback(self, volts):
         self.vtune_readback.setText(f"{volts:.3f} V")
         self.vtune_freq_readback.setText(f"{vtune_to_vco_mhz(volts):.1f} MHz")
+        if (
+            self._last_logged_vtune is None
+            or abs(volts - self._last_logged_vtune) >= 0.001
+        ):
+            self._last_logged_vtune = volts
+            self._event_log.log(
+                "vtune",
+                volts=round(volts, 4),
+                vco_mhz=round(vtune_to_vco_mhz(volts), 2),
+            )
         # The linien server holds the DAC value across app restarts; adopt
         # it into the slider once per connect so the first drag doesn't
         # jump the VCO away from its current tune point.
@@ -1485,8 +1980,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.repump_gpio_btn.setText(
             "Repump Gate On" if checked else "Repump Gate Off"
         )
-        if hasattr(self, "repump_gpio_worker"):
-            self.repump_gpio_worker.set_output(checked)
+        self._event_log.log("repump_gate", on=bool(checked))
+        worker = getattr(self, "repump_gpio_worker", None)
+        if worker is not None:
+            worker.set_output(checked)
 
     def _on_repump_gpio_state(self, enabled):
         self.repump_gpio_btn.blockSignals(True)
@@ -1499,6 +1996,27 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Shared status helpers / cleanup
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _set_usb_status_label(label, status):
+        """Compact status for the fixed-width USB card rows.
+
+        The full status string (port path, error detail) goes in the
+        tooltip so the label never overflows its 84 px column.
+        """
+        if status.startswith("connected"):
+            text, color = "OK", "#40dd80"
+        elif status in ("no_port", "no_host"):
+            text, color = "No port", "#8888a0"
+        elif status.startswith("error"):
+            text, color = "Error", "#dd5050"
+        else:
+            text, color = "--", "#8888a0"
+        label.setText(text)
+        label.setToolTip(status)
+        label.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: 700; border: none;"
+        )
 
     @staticmethod
     def _set_status_label(label, status):
@@ -1522,13 +2040,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
         )
 
-    @staticmethod
-    def _show_fault(label, message):
+    def _show_fault(self, label, device, message):
         label.setText("Fault")
         label.setStyleSheet(
             "color: #dd5050; font-size: 13px; font-weight: 700; border: none;"
         )
-        print(f"! OpenQuantum Controls hardware fault: {message}")
+        self._log_fault(device, message)
 
     @staticmethod
     def _set_lock_label(label, locked):
@@ -1541,6 +2058,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         print("Shutting down OpenQuantum Controls...")
+        self._event_log.log("app_stop")
         if self._dispenser_phase == "firing":
             # Closing mid-fire skips the worker's cooldown transition; the
             # output is still forced off on stop, but persist the lockout
@@ -1588,11 +2106,10 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
 
-    font_path = os.path.join(EIT_CONTROLS, "fonts", "ShareTechMono-Regular.ttf")
-    if os.path.exists(font_path):
-        QtGui.QFontDatabase.addApplicationFont(font_path)
-
-    app.setStyleSheet(APP_STYLESHEET)
+    load_app_fonts()
+    # setFont covers non-stylesheet text (e.g. pyqtgraph axis labels).
+    app.setFont(QtGui.QFont(BODY_FONT_FAMILY))
+    app.setStyleSheet(build_app_stylesheet())
     pg.setConfigOptions(useOpenGL=False, enableExperimental=False)
 
     window = OpenQuantumControlsWindow(

@@ -356,9 +356,11 @@ class DispenserWorker(RidenDPSWorker):
     panel), the fixed setpoints and the same fire time limit are applied
     while the app is connected.
 
-    The dispense operating point is deliberately not adjustable from the
-    UI or this API (set_voltage/set_current are inert), to protect the
-    dispenser and the pump. The dispenser is a near-short (<~0.1 V at
+    The dispense operating point is not adjustable through the normal
+    supply API (set_voltage/set_current are inert), to protect the
+    dispenser and the pump. The only sanctioned way to change it is
+    set_fire_parameters(), which the UI gates behind an explicit
+    confirmation dialog. The dispenser is a near-short (<~0.1 V at
     7.5 A), so the supply runs current-limited (CC); the voltage setpoint
     is only headroom and is never reached.
 
@@ -371,19 +373,41 @@ class DispenserWorker(RidenDPSWorker):
     # Wall-clock epoch when the cooldown will end; the GUI persists this
     # so the lockout survives an app restart.
     cooldown_started = QtCore.pyqtSignal(float)
+    # Emitted once per completed/aborted fire:
+    # {"elapsed_s", "planned_s", "current_a", "aborted"}
+    fire_summary = QtCore.pyqtSignal(object)
 
     FIRE_SECONDS = 30.0
     COOLDOWN_SECONDS = 15 * 60.0
     DISPENSE_CURRENT_A = 7.5
     DISPENSE_VOLTAGE_V = 5.0
+    MIN_FIRE_SECONDS = 1.0
 
-    def __init__(self, *args, cooldown_until=0.0, **kwargs):
+    def __init__(
+        self,
+        *args,
+        cooldown_until=0.0,
+        fire_seconds=None,
+        dispense_current_a=None,
+        **kwargs,
+    ):
         kwargs.setdefault("model", "DPS5020")
         super().__init__(*args, **kwargs)
+        self.fire_seconds = self._clamp_seconds(fire_seconds or self.FIRE_SECONDS)
+        self.dispense_current_a = self._clamp_current(
+            dispense_current_a or self.DISPENSE_CURRENT_A
+        )
         remaining = max(0.0, float(cooldown_until or 0.0) - time.time())
         self._phase = "cooldown" if remaining > 0 else "idle"
         self._fire_end = 0.0
+        self._fire_started = 0.0
         self._cooldown_end = time.monotonic() + remaining
+
+    def _clamp_current(self, amps):
+        return max(0.01, min(float(amps), self.max_current))
+
+    def _clamp_seconds(self, seconds):
+        return max(self.MIN_FIRE_SECONDS, float(seconds))
 
     # --- GUI-thread interface ---
 
@@ -407,20 +431,33 @@ class DispenserWorker(RidenDPSWorker):
     def set_current(self, amps: float):
         """Ignored: the dispenser operating point is fixed."""
 
+    def set_fire_parameters(self, current_a: float, seconds: float):
+        """Override the dispense current and fire duration.
+
+        The UI confirms with the user before calling this. Takes effect
+        from the next fire (mid-fire, the new current is also enforced on
+        the next poll; the running fire keeps its original end time).
+        """
+        self._queue(("params", (float(current_a), float(seconds))))
+
     # --- worker-thread internals ---
 
     def _apply(self, kind, value):
         if kind == "fire":
             self._start_fire()
         elif kind == "abort":
-            self._end_fire()
+            self._end_fire(aborted=True)
+        elif kind == "params":
+            current_a, seconds = value
+            self.dispense_current_a = self._clamp_current(current_a)
+            self.fire_seconds = self._clamp_seconds(seconds)
         elif kind == "output":
             # Should not happen (set_output is rerouted), but keep the
             # cooldown authoritative for any direct queued output command.
             if value:
                 self._start_fire()
             else:
-                self._end_fire()
+                self._end_fire(aborted=True)
         else:
             super()._apply(kind, value)
 
@@ -433,20 +470,29 @@ class DispenserWorker(RidenDPSWorker):
             self._phase = "idle"
         if self._phase == "firing":
             return
-        # Program the fixed operating point before every enable so a
-        # front-panel change can never carry into a fire.
+        # Program the operating point before every enable so a front-panel
+        # change can never carry into a fire.
         super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
-        super()._apply("current", self.DISPENSE_CURRENT_A)
+        super()._apply("current", self.dispense_current_a)
         super()._apply("output", True)
         self._phase = "firing"
-        self._fire_end = now + self.FIRE_SECONDS
+        self._fire_started = now
+        self._fire_end = now + self.fire_seconds
         self._emit_fire_state()
 
-    def _end_fire(self):
+    def _end_fire(self, aborted=False):
         super()._apply("output", False)
         if self._phase == "firing":
             self._phase = "cooldown"
             self._cooldown_end = time.monotonic() + self.COOLDOWN_SECONDS
+            self.fire_summary.emit(
+                {
+                    "elapsed_s": max(0.0, time.monotonic() - self._fire_started),
+                    "planned_s": self.fire_seconds,
+                    "current_a": self.dispense_current_a,
+                    "aborted": bool(aborted),
+                }
+            )
             self.cooldown_started.emit(time.time() + self.COOLDOWN_SECONDS)
         self._emit_fire_state()
 
@@ -454,7 +500,7 @@ class DispenserWorker(RidenDPSWorker):
         now = time.monotonic()
         if self._phase == "firing":
             if now >= self._fire_end:
-                self._end_fire()
+                self._end_fire(aborted=False)
             else:
                 # Undo any mid-fire front-panel change of the setpoints.
                 self._enforce_setpoints(state)
@@ -466,18 +512,19 @@ class DispenserWorker(RidenDPSWorker):
             if now >= self._cooldown_end:
                 self._phase = "idle"
         elif self._phase == "idle" and state.get("output_enabled"):
-            # Output enabled outside our fire() path: enforce the fixed
+            # Output enabled outside our fire() path: enforce the
             # operating point and apply the same time limit.
             self._enforce_setpoints(state)
             self._phase = "firing"
-            self._fire_end = now + self.FIRE_SECONDS
+            self._fire_started = now
+            self._fire_end = now + self.fire_seconds
         self._emit_fire_state()
 
     def _enforce_setpoints(self, state):
         if abs(state.get("v_set", 0.0) - self.DISPENSE_VOLTAGE_V) > 0.005:
             super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
-        if abs(state.get("i_set", 0.0) - self.DISPENSE_CURRENT_A) > 0.005:
-            super()._apply("current", self.DISPENSE_CURRENT_A)
+        if abs(state.get("i_set", 0.0) - self.dispense_current_a) > 0.005:
+            super()._apply("current", self.dispense_current_a)
 
     def _emit_fire_state(self):
         now = time.monotonic()

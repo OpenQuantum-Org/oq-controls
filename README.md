@@ -77,11 +77,79 @@ cooldown starts, shown as a countdown, and the fire button is locked out
 until it expires. The cooldown end time is saved in `QSettings`, so
 restarting the app does not reset it. The setpoints are re-enforced during a
 fire and applied to any output enabled from the DPS front panel while the
-app is connected, which also gets the same 30 s limit. The operating point
-is only changeable in code (`DispenserWorker.DISPENSE_CURRENT_A` /
-`DISPENSE_VOLTAGE_V` / `FIRE_SECONDS` in `mot_workers.py`). The auto-off
+app is connected, which also gets the same fire time limit. The auto-off
 runs in the app — if the app or the serial link dies mid-fire, the supply
 does not shut off on its own.
+
+The `Override...` button next to the fire button opens a dialog for changing
+the fire current (up to the DPS5020's 20 A) and duration (1–120 s); a
+confirmation window restates the requested values and the safe default
+before anything is applied. Overridden values are shown in the Setpoint row
+with an orange `(OVERRIDE)` marker, persist across restarts, and can be
+restored via the dialog's Defaults button (the safe operating point remains
+`DispenserWorker.DISPENSE_CURRENT_A` / `FIRE_SECONDS` in `mot_workers.py`).
+The override is locked out while a fire is running.
+
+## Event log
+
+Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` (one JSON object
+per line, gitignored, safe to tail or load with
+`pandas.read_json(..., lines=True)`): app start/stop, USB probe results,
+device connections and faults, lock/unlock transitions, laser on/off and
+init, setpoint changes (debounced after a slider drag settles), V_tune/VCO
+frequency changes, supply readbacks (every 10 s, plus immediately on any
+output or protection change), DPS protection trips, and every dispenser
+fire (start, end with actual elapsed time and abort flag, cooldown,
+override). The dispenser card also shows a cumulative `Fires:` counter
+(count and total seconds, persisted) for tracking dispenser life.
+
+## DPS protection status
+
+The supplies' protection register is decoded on every poll; if a supply
+trips OVP/OCP/OPP, the readback row turns red (e.g.
+`OCP TRIPPED — 0.00 V / 0.00 A`) and a `protection_trip` event is logged.
+
+## Thermistor temperature
+
+The Koheron thermistor setpoint (ohms) is also shown as an estimated
+temperature (`Temp (est):`), using the Steinhart–Hart coefficients for the
+laser head's 10 k NTC carried over from the old qMOT-os rig.
+
+## Fonts
+
+Body text is **IBM Plex Sans**; titles (app header, card/section titles)
+are **Space Grotesk**. Both are bundled in `fonts/` under the SIL Open
+Font License, so the app looks the same on a fresh clone. Any extra font
+files dropped into `fonts/` are also registered but stay local (licensed
+files such as `PP*`/`Aptos*` are gitignored). A missing family falls
+back to Helvetica Neue with a console warning. Note: fonts are
+registered from bytes (`addApplicationFontFromData`) because the
+path-based Qt API silently fails on Qt 6.11/macOS. The smoke test
+asserts the *resolved* families on real widgets, so a regression here
+fails CI rather than just looking wrong.
+
+## Tests
+
+`tests/` contains three hardware-free suites, run directly:
+
+```bash
+.venv/bin/python tests/test_dispenser.py   # fire/cooldown/override state machine
+.venv/bin/python tests/test_probe.py       # USB port identification logic
+.venv/bin/python tests/smoke_ui.py         # offscreen UI build + behavior checks
+```
+
+The smoke test uses isolated settings/log files and refreshes
+`mot-ui-smoke.png`.
+
+## Parameter persistence
+
+All control parameters are saved to `QSettings` as they change and restored
+on the next launch: Linien modulation frequency/phase/strength and sweep
+speed, laser current and thermistor setpoints, MOT coil voltage/current,
+the V_tune slider, and the dispenser override. Restoring a parameter only
+sets the UI — nothing is pushed to hardware until you move a control (and
+the laser sliders re-adopt the Koheron's actual setpoints on connect, as
+the V_tune slider does from the DAC).
 
 ## DPS register scaling
 

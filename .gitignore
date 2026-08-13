@@ -5,3 +5,10 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# App event logs
+logs/
+
+# Licensed fonts stay local (bundled OFL fonts are committed)
+fonts/PP*
+fonts/Aptos*
