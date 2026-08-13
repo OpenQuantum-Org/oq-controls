@@ -13,7 +13,7 @@ a = Analysis(
     ["mot_control.py"],
     pathex=["."],
     binaries=[],
-    datas=[("fonts", "fonts")],
+    datas=[("fonts", "fonts"), ("assets", "assets")],
     hiddenimports=[
         # linien-client reaches parts of these through rpyc's dynamic
         # machinery, so collect them wholesale.

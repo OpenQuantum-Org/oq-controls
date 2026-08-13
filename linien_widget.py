@@ -52,7 +52,7 @@ class LinienWidget(QtWidgets.QWidget):
 
         pg.setConfigOptions(useOpenGL=False, enableExperimental=False, imageAxisOrder="row-major")
         self.pg_widget = pg.GraphicsLayoutWidget()
-        self.pg_widget.setBackground("#0b0b0c")
+        self.pg_widget.setBackground("#0b0b0b")
         layout.addWidget(self.pg_widget)
 
         # --- Sweep range slider ---
@@ -66,13 +66,13 @@ class LinienWidget(QtWidgets.QWidget):
         self.xrange_slider.setStyleSheet("""
             QRangeSlider { background: transparent; }
             QSlider::groove:horizontal {
-                height: 4px; background: #1c1c1f; border-radius: 0px;
+                height: 4px; background: #1d1d1d; border-radius: 0px;
             }
             QSlider::sub-page:horizontal {
-                background: #35353d; border-radius: 0px;
+                background: #383838; border-radius: 0px;
             }
             QSlider::handle:horizontal {
-                background: #5a5a64; width: 12px; border-radius: 0px; margin: -4px 0;
+                background: #5e5e5e; width: 12px; border-radius: 0px; margin: -4px 0;
             }
         """)
         slider_proxy = QtWidgets.QGraphicsProxyWidget()
@@ -87,13 +87,13 @@ class LinienWidget(QtWidgets.QWidget):
 
         if self._v_to_mhz is not None:
             self.plot.setLabel("bottom", "VCO Frequency (MHz)",
-                               **{"font-size": "10pt", "color": "#93939a"})
+                               **{"font-size": "10pt", "color": "#969696"})
         elif self._v_to_freq is not None:
             self.plot.setLabel("bottom", "Detuning (MHz)",
-                               **{"font-size": "10pt", "color": "#93939a"})
+                               **{"font-size": "10pt", "color": "#969696"})
         else:
             self.plot.setLabel("bottom", "Sweep Voltage (V)",
-                               **{"font-size": "10pt", "color": "#93939a"})
+                               **{"font-size": "10pt", "color": "#969696"})
 
         self.plot.setYRange(-0.05, 0.10)
         init_xmin, init_xmax = self._v_range_to_display(
@@ -120,7 +120,7 @@ class LinienWidget(QtWidgets.QWidget):
 
         # --- Overlay labels ---
         vb = self.plot.getViewBox()
-        overlay_label_style = "color: #a8a8ae; background: transparent; font-size: 12px; border: none;"
+        overlay_label_style = "color: #ababab; background: transparent; font-size: 12px; border: none;"
 
         self.center_label = QtWidgets.QLabel("Center: 0.000 V")
         self.center_label.setStyleSheet(overlay_label_style)
@@ -140,8 +140,8 @@ class LinienWidget(QtWidgets.QWidget):
 
         overlay_btn_style = """
             QPushButton {
-                background-color: rgba(20,20,30,200); color: #c2c2c8;
-                border: 1px solid #2c2c31; border-radius: 0px;
+                background-color: rgba(20,20,30,200); color: #c4c4c4;
+                border: 1px solid #2e2e2e; border-radius: 0px;
                 font-size: 12px; padding: 3px 8px;
             }
             QPushButton:hover { background-color: rgba(40,40,60,220); color: white; }

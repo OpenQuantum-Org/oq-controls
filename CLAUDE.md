@@ -120,4 +120,16 @@ behaviour from memory. Debugging: reproduce, pull evidence from `logs/*.jsonl`,
 one hypothesis, smallest discriminating change. If you can't reproduce it, say
 so rather than shipping a plausible fix.
 
+**Verification budget: run the three suites, glance at the screenshot, hand it
+over.** That is the whole check for UI work. The user's manual check is fast and
+is the real gate, so getting work in front of them beats proving it yourself.
+
+Specifically, do not: bisect to root-cause a cosmetic layout detail, prove a new
+assertion fails without its fix, measure widget geometry to confirm what a
+screenshot already shows, or re-run suites that passed and whose inputs have not
+changed. Fix the visible thing, say what you did not verify, move on.
+
+Real bugs still get real debugging — this is about not gold-plating the
+confirmation of work that already looks right.
+
 Comments explain why a value is what it is, not what the code does.

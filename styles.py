@@ -9,7 +9,7 @@ APP_STYLESHEET = """
     }
 
     QMainWindow, QWidget#central {
-        background-color: #0b0b0c;
+        background-color: #0b0b0b;
     }
 
     QScrollArea {
@@ -19,14 +19,14 @@ APP_STYLESHEET = """
 
     /* --- Card panels --- */
     QFrame.card {
-        background-color: #141416;
-        border: 1px solid #26262a;
+        background-color: #151515;
+        border: 1px solid #282828;
         border-radius: 0px;
     }
 
     /* --- Section titles --- */
     QLabel.section-title {
-        color: #a8a8ae;
+        color: #ababab;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 1px;
@@ -37,83 +37,83 @@ APP_STYLESHEET = """
 
     /* --- Buttons --- */
     QPushButton {
-        background-color: #1c1c1f;
-        color: #e4e4e7;
-        border: 1px solid #2c2c31;
+        background-color: #1d1d1d;
+        color: #e6e6e6;
+        border: 1px solid #2e2e2e;
         border-radius: 0px;
         font-weight: 600;
         font-size: 13px;
         padding: 6px 16px;
     }
     QPushButton:hover {
-        background-color: #2f2f35;
-        border-color: #3d3d44;
+        background-color: #313131;
+        border-color: #404040;
     }
     QPushButton:pressed {
-        background-color: #171719;
+        background-color: #181818;
     }
     QPushButton:checked {
-        background-color: #26262c;
-        color: #8e8e98;
-        border-color: #3a3a43;
+        background-color: #282828;
+        color: #949494;
+        border-color: #3d3d3d;
     }
 
     /* --- Sliders --- */
     QSlider::groove:horizontal {
         height: 4px;
-        background: #1c1c1f;
+        background: #1d1d1d;
         border-radius: 0px;
     }
     QSlider::handle:horizontal {
-        background: #5a5a64;
+        background: #5e5e5e;
         width: 12px;
         height: 12px;
         border-radius: 0px;
         margin: -4px 0;
     }
     QSlider::handle:horizontal:hover {
-        background: #6c6c77;
+        background: #707070;
     }
     QSlider::sub-page:horizontal {
-        background: #35353d;
+        background: #383838;
         border-radius: 0px;
     }
 
     /* --- Line edits --- */
     QLineEdit {
-        background: #161618;
-        color: #e4e4e7;
-        border: 1px solid #1c1c1f;
+        background: #171717;
+        color: #e6e6e6;
+        border: 1px solid #1d1d1d;
         border-radius: 0px;
         padding: 2px 6px;
-        selection-background-color: #35353d;
+        selection-background-color: #383838;
     }
     QLineEdit:focus {
         color: white;
-        border-color: #5a5a64;
+        border-color: #5e5e5e;
     }
 
     /* --- Readout labels --- */
     QLabel.readout-label {
-        color: #93939a;
+        color: #969696;
         font-weight: 600;
         font-size: 12px;
         border: none;
     }
     QLabel.readout-value {
-        color: #e4e4e7;
+        color: #e6e6e6;
         font-size: 13px;
         border: none;
     }
 
     /* --- Scroll bar --- */
     QScrollBar:vertical {
-        background: #0b0b0c;
+        background: #0b0b0b;
         width: 6px;
         border: none;
     }
     QScrollBar::handle:vertical {
-        background: #2c2c31;
+        background: #2e2e2e;
         border-radius: 0px;
         min-height: 30px;
     }
@@ -149,9 +149,9 @@ PD_READOUT_STYLE = "color: white; font-size: 22px; font-weight: 700; border: non
 # ---------------------------------------------------------------------------
 BIG_READOUT_STYLE = """
     QLineEdit {
-        background: #101012;
+        background: #111111;
         color: white;
-        border: 1px solid #2c2c31;
+        border: 1px solid #2e2e2e;
         border-radius: 0px;
         font-size: 20px;
         font-weight: 700;
@@ -159,8 +159,8 @@ BIG_READOUT_STYLE = """
         padding: 4px 8px;
     }
     QLineEdit:focus {
-        border-color: #5a5a64;
-        background: #131315;
+        border-color: #5e5e5e;
+        background: #141414;
     }
 """
 
@@ -174,8 +174,8 @@ def make_card() -> QtWidgets.QFrame:
     frame.setProperty("class", "card")
     frame.setStyleSheet("""
         QFrame {
-            background-color: #141416;
-            border: 1px solid #26262a;
+            background-color: #151515;
+            border: 1px solid #282828;
             border-radius: 0px;
         }
     """)
@@ -188,7 +188,7 @@ def make_card() -> QtWidgets.QFrame:
 # Accents are deliberately desaturated. On a near-black panel a saturated
 # hue reads as decoration; a muted one reads as an instrument, and status
 # colours still separate cleanly at a glance.
-ACCENT = "#b4b4bb"  # section titles, headings, neutral emphasis
+ACCENT = "#c4c4c4"  # section titles, headings, neutral emphasis
 STATUS_OK = "#6f9e7c"
 STATUS_WARN = "#b9924f"
 STATUS_BAD = "#b56a6a"
@@ -215,7 +215,7 @@ def add_slider_row(parent_layout, label_text, min_val, max_val, init_val,
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #a8a8ae; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #ababab; font-size: 12px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)
@@ -256,13 +256,13 @@ def add_readout_row(parent_layout, label_text, initial_text="--", unit=""):
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
-    label.setStyleSheet("color: #93939a; font-size: 12px; font-weight: 600; border: none;")
+    label.setStyleSheet("color: #969696; font-size: 12px; font-weight: 600; border: none;")
     label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     label.setFixedWidth(120)
     row.addWidget(label)
 
     value_label = QtWidgets.QLabel(f"{initial_text} {unit}".strip())
-    value_label.setStyleSheet("color: #e4e4e7; font-size: 13px; border: none;")
+    value_label.setStyleSheet("color: #e6e6e6; font-size: 13px; border: none;")
     value_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
     row.addWidget(value_label, stretch=1)
 

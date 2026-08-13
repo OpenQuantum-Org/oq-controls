@@ -86,7 +86,7 @@ assert "IBM Plex Sans" in QtGui.QFontDatabase.families()
 # Inputs are explicitly themed: spinboxes must not fall back to the
 # platform palette (black-on-dark). The outline is a muted grey rather
 # than the old near-white, which read as glare against the dark panel.
-INPUT_BORDER = "border: 1px solid #3d3d44"
+INPUT_BORDER = "border: 1px solid #404040"
 stylesheet = mot_control.build_app_stylesheet()
 assert "QAbstractSpinBox {" in stylesheet
 assert stylesheet.count(INPUT_BORDER) >= 3  # edit/spin/combo
@@ -206,10 +206,16 @@ try:
     # Repump card sits above the power-supply card.
     assert window.repump_card.y() < window.dps_card.y()
 
-    # Title text and fonts: titles render in Space Grotesk, body in IBM
-    # Plex Sans — verified via the resolved font, not the stylesheet text.
-    assert window.title_label.text() == "OpenQuantum"
-    assert resolved_family(window.title_label) == "Space Grotesk"
+    # The header carries the logo asset, not text. A null pixmap means the
+    # asset failed to load and the header silently fell back to a wordmark.
+    assert window.title_label.text() == ""
+    logo = window.title_label.pixmap()
+    assert logo is not None and not logo.isNull()
+    assert logo.height() >= mot_control.LOGO_HEIGHT_PX
+    assert logo.width() > logo.height()  # horizontal lockup
+
+    # Fonts: titles render in Space Grotesk, body in IBM Plex Sans —
+    # verified via the resolved font, not the stylesheet text.
     assert resolved_family(window.usb_card.toggle_btn) == "Space Grotesk"
     section = mot_control.make_section_title("PROBE")
     section.show()
@@ -647,6 +653,10 @@ try:
     assert not scroll.horizontalScrollBar().isVisible()
     window._apply_dispenser_override(7.5, 30.0)
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
+    # Back to the default shape so the reference screenshot shows what the
+    # app actually opens with.
+    window.manual_setup_card.set_expanded(False)
+    window.log_card.set_expanded(False)
 
     pixmap = window.grab()
     out = os.path.join(ROOT, "mot-ui-smoke.png")
