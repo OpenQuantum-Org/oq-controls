@@ -5,7 +5,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 # ---------------------------------------------------------------------------
 APP_STYLESHEET = """
     * {
-        font-family: "Share Tech Mono", "Menlo", "Segoe UI", "Helvetica Neue", sans-serif;
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
     }
 
     QMainWindow, QWidget#central {
@@ -85,6 +85,9 @@ APP_STYLESHEET = """
         color: #e6e6e6;
         border: 1px solid #1d1d1d;
         border-radius: 0px;
+        /* Without this an editable value inherits the app default and
+           renders larger than the read-only value beside it. */
+        font-size: 13px;
         padding: 2px 6px;
         selection-background-color: #383838;
     }
@@ -155,7 +158,7 @@ BIG_READOUT_STYLE = """
         border-radius: 0px;
         font-size: 20px;
         font-weight: 700;
-        font-family: "Share Tech Mono", "Menlo", "Consolas", monospace;
+        font-family: "Space Grotesk";
         padding: 4px 8px;
     }
     QLineEdit:focus {

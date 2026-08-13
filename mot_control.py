@@ -95,7 +95,7 @@ BODY_FONT_FAMILY = "Space Grotesk"
 TITLE_FONT_FAMILY = "Space Grotesk"
 # Header wordmark height. The asset is 2048x568, so this keeps the mark
 # about the same optical weight as the 22px text it replaced.
-LOGO_HEIGHT_PX = 42
+LOGO_HEIGHT_PX = 62
 
 
 def load_app_fonts():
@@ -155,7 +155,7 @@ def build_app_stylesheet():
         "QLineEdit { border: 1px solid #404040; color: #efefef; }\n"
         "QLineEdit:focus { border-color: #949494; }\n"
         "QAbstractSpinBox {"
-        " background: #171717; color: #efefef;"
+        " background: #171717; color: #efefef; font-size: 13px;"
         " border: 1px solid #404040; border-radius: 0px;"
         " padding: 2px 6px;"
         " selection-background-color: #383838; }\n"
@@ -1155,15 +1155,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         view_bar = QtWidgets.QHBoxLayout()
         view_bar.setSpacing(8)
-        spectroscopy_label = QtWidgets.QLabel(
-            "Laser Spectroscopy / Repump Error Signal"
-        )
-        spectroscopy_label.setStyleSheet(
-            f"color: {NEON_BLUE}; font-size: 13px; font-weight: 700;"
-            "letter-spacing: 1px; border: none; padding: 4px 6px;"
-            f'font-family: "{TITLE_FONT_FAMILY}";'
-        )
-        view_bar.addWidget(spectroscopy_label)
         view_bar.addStretch()
         self.camera_toggle = QtWidgets.QCheckBox("Show USB Camera")
         self.camera_toggle.setCursor(QtCore.Qt.PointingHandCursor)
