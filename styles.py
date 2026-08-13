@@ -185,13 +185,23 @@ def make_card() -> QtWidgets.QFrame:
     return frame
 
 
-NEON_BLUE = "#00d4ff"
+# Accents are deliberately desaturated. On a near-black panel a saturated
+# hue reads as decoration; a muted one reads as an instrument, and status
+# colours still separate cleanly at a glance.
+ACCENT = "#7f9dbd"  # section titles, headings, neutral emphasis
+STATUS_OK = "#5f9e78"
+STATUS_WARN = "#bf9152"
+STATUS_BAD = "#b56464"
+
+# Retained so older imports keep working; prefer ACCENT in new code.
+NEON_BLUE = ACCENT
+
 
 def make_section_title(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text.upper())
     label.setAlignment(QtCore.Qt.AlignLeft)
     label.setStyleSheet(
-        f"color: {NEON_BLUE}; font-size: 11px; font-weight: 600;"
+        f"color: {ACCENT}; font-size: 11px; font-weight: 600;"
         "letter-spacing: 1px; padding: 2px 4px; border: none;"
     )
     return label
