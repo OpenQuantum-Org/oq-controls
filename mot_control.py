@@ -638,123 +638,6 @@ class CameraViewWidget(QtWidgets.QWidget):
         self.stack.setCurrentWidget(self.message_label)
 
 
-class DeviceConfigDialog(QtWidgets.QDialog):
-    """Manual device config with best-effort USB discovery."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Device Configuration")
-        self.resize(760, 560)
-        self._parent = parent
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(10)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        root.addWidget(splitter, stretch=1)
-
-        form_box = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout(form_box)
-        form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        form.setFormAlignment(QtCore.Qt.AlignTop)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
-
-        self.rp_edit = QtWidgets.QLineEdit(parent.rp_edit.text())
-        self.laser_edit = QtWidgets.QLineEdit(parent.laser_edit.text())
-        self.mot_coil_edit = QtWidgets.QLineEdit(parent.mot_coil_port_edit.text())
-        self.dispenser_edit = QtWidgets.QLineEdit(parent.dispenser_port_edit.text())
-
-        for edit in (
-            self.rp_edit,
-            self.laser_edit,
-            self.mot_coil_edit,
-            self.dispenser_edit,
-        ):
-            edit.setMinimumWidth(250)
-
-        form.addRow("Linien RP:", self.rp_edit)
-        form.addRow("Koheron:", self.laser_edit)
-        form.addRow("MOT Coil DPS5005:", self.mot_coil_edit)
-        form.addRow("Dispenser DPS5020:", self.dispenser_edit)
-
-        splitter.addWidget(form_box)
-
-        discovered_box = QtWidgets.QWidget()
-        discovered_layout = QtWidgets.QVBoxLayout(discovered_box)
-        discovered_layout.setContentsMargins(0, 0, 0, 0)
-        discovered_layout.addWidget(make_section_title("Discovered USB Devices"))
-        self.discovered_list = QtWidgets.QListWidget()
-        self.discovered_list.setStyleSheet(
-            "QListWidget { background: #101012; color: #e4e4e7;"
-            "border: 1px solid #26262a; border-radius: 0px; }"
-            "QListWidget::item { padding: 4px; }"
-        )
-        discovered_layout.addWidget(self.discovered_list, stretch=1)
-        splitter.addWidget(discovered_box)
-        splitter.setSizes([430, 330])
-
-        self.hint_label = QtWidgets.QLabel("")
-        self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet("color: #a8a8ae; border: none;")
-        root.addWidget(self.hint_label)
-
-        button_row = QtWidgets.QHBoxLayout()
-        self.refresh_btn = QtWidgets.QPushButton("Refresh")
-        self.refresh_btn.clicked.connect(self.refresh_discovery)
-        self.best_guess_btn = QtWidgets.QPushButton("Apply Best Guess")
-        self.best_guess_btn.clicked.connect(lambda: self.apply_best_guess(force=True))
-        button_row.addWidget(self.refresh_btn)
-        button_row.addWidget(self.best_guess_btn)
-        button_row.addStretch()
-        self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        self.cancel_btn.clicked.connect(self.reject)
-        self.apply_btn = QtWidgets.QPushButton("Apply")
-        self.apply_btn.clicked.connect(self.accept)
-        button_row.addWidget(self.cancel_btn)
-        button_row.addWidget(self.apply_btn)
-        root.addLayout(button_row)
-
-        self.refresh_discovery()
-
-    def values(self):
-        return {
-            "rp": self.rp_edit.text().strip(),
-            "laser": self.laser_edit.text().strip(),
-            "mot_coil": self.mot_coil_edit.text().strip(),
-            "dispenser": self.dispenser_edit.text().strip(),
-        }
-
-    def refresh_discovery(self):
-        self._serial_ports = discover_serial_ports()
-        self.discovered_list.clear()
-        for port in self._serial_ports:
-            self.discovered_list.addItem(_serial_port_label(port))
-        if not self._serial_ports:
-            self.discovered_list.addItem("No USB serial devices found")
-        self.apply_best_guess(force=False)
-
-    def apply_best_guess(self, force=False):
-        current = {
-            "laser": "" if force else self.laser_edit.text().strip(),
-            "mot_coil": "" if force else self.mot_coil_edit.text().strip(),
-            "dispenser": "" if force else self.dispenser_edit.text().strip(),
-        }
-        guesses = infer_serial_assignments(self._serial_ports, current)
-        if (force or not self.laser_edit.text().strip()) and guesses.get("laser"):
-            self.laser_edit.setText(guesses["laser"])
-        if (force or not self.mot_coil_edit.text().strip()) and guesses.get("mot_coil"):
-            self.mot_coil_edit.setText(guesses["mot_coil"])
-        if (force or not self.dispenser_edit.text().strip()) and guesses.get("dispenser"):
-            self.dispenser_edit.setText(guesses["dispenser"])
-
-        likely_count = len([port for port in self._serial_ports if _is_likely_usb_serial(port)])
-        self.hint_label.setText(
-            f"Found {likely_count} likely USB serial device(s). "
-            "Best guesses fill empty fields only unless you press Apply Best Guess."
-        )
-
-
 class DispenserOverrideDialog(QtWidgets.QDialog):
     """Change the dispenser fire current/duration (confirmed afterwards)."""
 
@@ -1170,9 +1053,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """)
         devices_menu = self.menuBar().addMenu("Devices")
 
-        configure_action = QtGui.QAction("Configure Devices...", self)
-        configure_action.triggered.connect(self._open_device_config_dialog)
-        devices_menu.addAction(configure_action)
+        show_devices_action = QtGui.QAction("Show Device Connections", self)
+        show_devices_action.triggered.connect(
+            lambda: self.usb_card.set_expanded(True)
+        )
+        devices_menu.addAction(show_devices_action)
 
         discover_action = QtGui.QAction("Auto Discover USB Devices", self)
         discover_action.triggered.connect(lambda: self._run_usb_probe(startup=False))
@@ -1531,13 +1416,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.setSpacing(6)
-        self.device_dialog_btn = QtWidgets.QPushButton("Devices...")
-        self.device_dialog_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.device_dialog_btn.clicked.connect(self._open_device_config_dialog)
+        self.best_guess_btn = QtWidgets.QPushButton("Apply Best Guess")
+        self.best_guess_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.best_guess_btn.clicked.connect(self._apply_best_guess)
         self._tip(
-            "Open the device configuration dialog (discovered ports,\n"
-            "manual entry).",
-            self.device_dialog_btn,
+            "Assign the discovered ports to devices by name. Overwrites the\n"
+            "fields above; Auto Discover verifies by probing instead.",
+            self.best_guess_btn,
         )
         self.auto_discover_btn = QtWidgets.QPushButton("Auto Discover")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -1550,7 +1435,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "workers).",
             self.auto_discover_btn,
         )
-        button_row.addWidget(self.device_dialog_btn)
+        button_row.addWidget(self.best_guess_btn)
         button_row.addWidget(self.auto_discover_btn)
         layout.addLayout(button_row)
 
@@ -1563,7 +1448,57 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.connect_btn,
         )
         layout.addWidget(self.connect_btn)
+
+        # Discovery lives here rather than in a pop-up: the ports it
+        # informs are the fields directly above it.
+        layout.addWidget(make_section_title("Discovered USB Devices"))
+        self.discovered_list = QtWidgets.QListWidget()
+        self.discovered_list.setFixedHeight(96)
+        self.discovered_list.setStyleSheet(
+            "QListWidget { background: #101012; color: #e4e4e7;"
+            "border: 1px solid #26262a; border-radius: 0px; }"
+            "QListWidget::item { padding: 4px; }"
+        )
+        layout.addWidget(self.discovered_list)
+        self.discovery_hint = QtWidgets.QLabel("")
+        self.discovery_hint.setWordWrap(True)
+        self.discovery_hint.setStyleSheet(
+            "color: #93939a; font-size: 11px; border: none;"
+        )
+        layout.addWidget(self.discovery_hint)
+        self._refresh_discovery()
+
         parent.addWidget(card)
+
+    def _refresh_discovery(self):
+        """Repopulate the discovered-port list. Read-only: enumeration
+        only, no port is opened."""
+        self._serial_ports = discover_serial_ports()
+        self.discovered_list.clear()
+        for port in self._serial_ports:
+            self.discovered_list.addItem(_serial_port_label(port))
+        if not self._serial_ports:
+            self.discovered_list.addItem("No USB serial devices found")
+        likely = len(
+            [p for p in self._serial_ports if _is_likely_usb_serial(p)]
+        )
+        self.discovery_hint.setText(
+            f"{likely} likely USB serial device(s). "
+            "Apply Best Guess assigns by name; Auto Discover verifies by probing."
+        )
+
+    def _apply_best_guess(self):
+        self._refresh_discovery()
+        guesses = infer_serial_assignments(self._serial_ports, {})
+        for key, edit in (
+            ("laser", self.laser_edit),
+            ("mot_coil", self.mot_coil_port_edit),
+            ("dispenser", self.dispenser_port_edit),
+        ):
+            if guesses.get(key):
+                edit.setText(guesses[key])
+        self._save_connection_settings()
+        self._event_log.log("device_ports_guessed", **guesses)
 
     def _add_filter_section(self, parent):
         """Error-signal filters, nested as a collapsible section of the
@@ -2266,8 +2201,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._save_connection_settings()
 
         if startup and not res.get("ok"):
-            # Only interrupt with the pop-up when auto-detection failed.
-            self._open_device_config_dialog()
+            # No pop-up: the Device Connections card expands itself above
+            # and shows which device is missing, in place.
+            self._refresh_discovery()
         self._start_serial_workers()
 
     def _stop_serial_workers(self):
@@ -2287,13 +2223,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _start_serial_workers(self):
         self._start_laser_worker()
         self._start_dps_workers()
-
-    def _open_device_config_dialog(self):
-        dialog = DeviceConfigDialog(self)
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        self._apply_device_values(dialog.values())
-        self._save_connection_settings()
 
     def _apply_device_values(self, values):
         self.rp_edit.setText(values["rp"])

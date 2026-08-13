@@ -32,6 +32,9 @@ import mot_logging
 # real saved QSettings ports/hosts on this machine), log to a temp dir,
 # and use an isolated settings file for EVERY QSettings in the app.
 mot_control.OpenQuantumControlsWindow._deferred_start = lambda self: None
+# Port enumeration is read-only, but it still reads this machine -- stub it
+# so the test and its screenshot do not depend on what is plugged in.
+mot_control.discover_serial_ports = lambda: []
 mot_control.EventLog = lambda _directory: mot_logging.EventLog(LOG_DIR)
 _orig_qsettings = QtCore.QSettings
 
