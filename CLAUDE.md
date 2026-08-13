@@ -1,244 +1,123 @@
 # OpenQuantum Controls
 
-PyQt6 control panel for a MOT experiment: Koheron CTL200 laser controller, two
-Riden DPS supplies (MOT coil + Rb dispenser), a Red Pitaya running linien for
-laser locking, and a USB camera. Instruments are polled at 1–5 Hz over serial
-and RPyC.
+PyQt6 control panel for a MOT: Koheron CTL200 laser, two Riden DPS supplies
+(MOT coil + Rb dispenser), Red Pitaya running linien, USB camera. Polled at
+1–5 Hz over serial and RPyC.
 
-`README.md` documents hardware, register maps, GPIO wiring, and behaviour.
-Read it before changing device logic — do not duplicate it here.
+`README.md` has hardware detail, register maps, GPIO wiring. `ROADMAP.md` has
+the work sequence and open questions.
 
-`ROADMAP.md` holds the current work sequence and open design questions. Check
-it before starting anything substantial, and update the status marks as you go.
-
-## Environment
-
-Windows, PowerShell. Python 3.12 in `.venv`.
+## Commands
 
 ```powershell
 .venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
-.venv\Scripts\python.exe tests\test_dispenser.py   # fire/cooldown state machine
-.venv\Scripts\python.exe tests\test_probe.py       # USB port identification
-.venv\Scripts\python.exe tests\smoke_ui.py         # offscreen UI build; refreshes mot-ui-smoke.png
+.venv\Scripts\python.exe tests\test_dispenser.py
+.venv\Scripts\python.exe tests\test_probe.py
+.venv\Scripts\python.exe tests\smoke_ui.py    # refreshes mot-ui-smoke.png
 ```
 
-Always install with the explicit `.venv\Scripts\python.exe -m pip` form. A bare
-`pip` hits global Python and replaces the `2.2.0.dev0` editable linien installs
-that live there.
+Install with the explicit `.venv\Scripts\python.exe -m pip` form — a bare `pip`
+hits global Python and clobbers the editable linien installs there.
 
-`smoke_ui.py` builds the entire UI with no hardware and writes
-`mot-ui-smoke.png`. For any UI or styling change: edit, run it, then **look at
-the PNG**. That is the verification loop for visual work — use it before
-handing anything over. The `/verify` skill wraps all three plus the screenshot
-read.
-
-**Green tests say nothing about hardware.** All three suites are deliberately
-hardware-free: a fake client for the dispenser state machine, pure logic for
-port identification, and an offscreen UI build. No serial traffic, no Red
-Pitaya, no laser. Never report a device-facing change as working on the
-strength of `/verify` alone — that requires the bench.
+After any UI change, run `smoke_ui.py` and **read the PNG**. All three suites
+are hardware-free, so green says nothing about devices — never report a
+device-facing change as working without the bench.
 
 ## Hardware safety
 
-Reads are free — DPS voltage/current, laser setpoints, thermistor, linien lock
-state, port probing. Do those without asking.
+Reads are free. **Ask before every actuation, every time** — prior approval
+never carries forward:
 
-**Ask before every actuation, every time.** Prior approval never carries
-forward to the next one:
-
-- Dispenser fire — 7.5 A for 30 s, 15-minute lockout, consumes Rb
-- Laser enable/disable or current changes
-- Any setpoint change on a currently locked system
+- Dispenser fire (7.5 A, 30 s, 15-min lockout, consumes Rb)
+- Laser enable or current change
+- Setpoint change on a locked system
 - DPS output enable
 
-### Laser operating point
+Laser operating point is **80 mA** (`mot_control.py:1850`). Do not widen slider
+ranges or nudge it as a side effect of other work. On connect the sliders adopt
+the Koheron's actual setpoints — keep that direction.
 
-The laser runs at **80 mA** and **6215 Ω** thermistor. These are not defaults to
-be tuned — they are the operating point, and the GUI must not drift off them by
-accident. Both are already the code defaults (`mot_control.py:1850`, `:1866`).
+**Thermistor setpoint is unresolved.** Code default is 6215 Ω (`:1866`), which
+`thermistor_ohms_to_c` maps to 36.2 °C. Target is ~27 °C ≈ 9171 Ω; a 10 k NTC
+reads 10 kΩ at 25 °C. Do not change the default until confirmed.
 
-Treat any change as an actuation requiring explicit confirmation. Do not widen
-the slider ranges, do not "helpfully" adjust either value, and do not push
-either to hardware as a side effect of some other change. On connect, the
-sliders adopt the Koheron's actual setpoints rather than pushing the UI's — keep
-that direction.
+## Invariants
 
-## Architecture invariants
-
-1. The GUI thread never blocks on I/O. No serial, socket, or RPyC call from a
-   slot or a widget callback.
-2. A device client is touched by exactly one thread — the worker that owns it.
-   RPyC connections and `serial.Serial` handles are not thread-safe.
-3. GUI→worker is queued invocation (`QMetaObject.invokeMethod` with
-   `Qt.QueuedConnection`, or a signal into the worker). Worker→GUI is signals.
-   No direct method calls in either direction.
-4. Faults go to `EventLog`, never `print`. Anything that only reaches stdout is
-   invisible in `logs/*.jsonl` and therefore undebuggable after the fact.
+1. GUI thread never blocks on I/O — no serial, socket, or RPyC call from a slot.
+2. One thread per device client. RPyC and `serial.Serial` are not thread-safe.
+3. GUI→worker is queued invocation; worker→GUI is signals. No direct calls.
+4. Faults go to `EventLog`, never `print`.
 5. New UI code goes in a subsystem module, not `OpenQuantumControlsWindow`.
+6. Every I/O call has a timeout and a failure path that surfaces visibly.
+7. Teardown stops workers before widgets die, and drives outputs safe first —
+   the dispenser's auto-off lives in its worker thread, so killing it mid-fire
+   leaves the output on.
 
-Rules 3 and 4 are **not yet true of existing code** — there are ~24 direct
-GUI→worker calls in `mot_control.py` and 38 `print()` calls, 30 of them in
-`linien_worker.py`. These are being converted. Do not add new violations, and
-convert what you touch.
+3 and 4 are **not yet true**: ~24 direct GUI→worker calls, 38 `print`s (30 in
+`linien_worker.py`). Don't add more; convert what you touch.
 
-Two more that apply to every worker:
+## State ownership
 
-6. **Every I/O call has a bounded timeout and a defined failure path.** A
-   worker blocked forever on a serial read is a silently dead subsystem — the
-   UI keeps showing the last good value and nobody learns anything. On timeout,
-   emit a fault and degrade visibly.
-7. **Teardown is ordered and explicit.** Stop the worker, join it, *then* let
-   widgets die. A worker emitting into a deleted widget is the standard
-   crash-on-exit in Qt apps. Note that the dispenser's auto-off runs in its
-   worker thread, so killing that thread mid-fire leaves the output enabled —
-   teardown must drive outputs to a safe state before exiting.
+- Desired (what the user set) and actual (what the device reports) are separate.
+  A readback never overwrites a control the user is touching.
+  `_sync_filters_from_device` violates this today.
+- Show divergence, don't paper over it — it means a failed write, a front-panel
+  override, or a device in protection.
+- Setpoints conflate (latest value wins); side-effecting actions queue normally.
+- Tag reads so late responses can't clobber newer input.
+- Restoring persisted settings sets the UI only, never pushes to hardware.
 
-## State ownership and command semantics
+## Performance
 
-A control panel has two sources of truth: **desired** state (what the user set)
-and **actual** state (what the device reports). Conflating them is the root of
-most instrument-UI bugs. Keep them separate and make reconciliation explicit.
+Not throughput-bound and never will be — 1–5 Hz over 9600 baud. Performance
+means latency.
 
-- **A device readback never silently overwrites a control the user is
-  interacting with.** If a widget has focus or has been edited since the last
-  push, the readback updates the *actual* display, not the desired value.
-  `_sync_filters_from_device` currently violates this — it overwrites the UI
-  wholesale, which is exactly how "my typed value got reverted" happens.
-- **Show divergence rather than hiding it.** When desired and actual disagree
-  beyond tolerance, that is information — a failed write, a front-panel
-  override, a device in protection. Surface it; do not paper over it by
-  snapping the UI to whichever value arrived last.
-- **Setpoint commands conflate; they do not queue.** Once GUI→worker is queued
-  (invariant 3), a slider drag can post faster than the worker drains. Keep the
-  **latest value only** per parameter — FIFO here means setpoints landing
-  seconds after the user let go, and the queue growing without bound. Actions
-  with side effects (fire, connect, enable) are *not* conflatable and must
-  queue normally.
-- **Late responses must not clobber newer input.** When reads return via
-  signals, tag each request and drop responses that are older than the most
-  recent user action on that control.
-- **Restoring persisted settings sets the UI only.** Nothing is pushed to
-  hardware until the user moves a control. This is existing, deliberate
-  behaviour (see README) — preserve it.
-
-## Performance principles
-
-**This application is not throughput-bound and never will be.** It is a 1–5 Hz
-instrument panel driving 9600-baud serial links. Computation is free here.
-Performance work means *latency and responsiveness*, not speed of code.
-
-**Cost is round trips, not cycles.** Every `client.parameters.X.value` is a
-network hop to the Red Pitaya, and every DPS register access is a serial
-transaction. `LinienWorker.get_filters()` reads seven parameters, so it costs
-seven sequential round trips — not one. When something is slow, count round
-trips before profiling code. Make reads batch into a single call rather than
-making each one faster.
-
-**The GUI thread has a hard latency budget: 16 ms.** Anything on it must fit
-inside a frame. A single RPyC round trip to the Red Pitaya or a DPS Modbus
-transaction can consume that entirely, and they compound — so this reduces to a
-simple rule: no I/O on the GUI thread, ever (invariant 1). Freezes here are the
-only performance problem users actually perceive.
-
-**Measure before asserting.** The per-round-trip cost to `rp-f0f2b5.local` has
-not been characterised — the argument above assumes tens of milliseconds but
-that number is unverified. Time it and record the result here; a seven-round-
-trip read is a very different problem at 2 ms than at 200 ms.
-
-**Make latency observable in the event log.** Device operations should record
-their duration as structured `EventLog` fields, not just their outcome. That
-puts performance data in the same place as faults, so a slow link and a broken
-one are distinguishable from `logs/*.jsonl` after the fact instead of requiring
-a live reproduction. This is the only profiling infrastructure this app needs.
-
-**Time-to-interactive counts as performance.** Startup does USB port
-enumeration and per-port probing, which is slow on Windows. That work belongs
-off the GUI thread with the UI usable and honestly labelled as still
-discovering — never behind a blocked window or a modal.
-
-**Poll intervals are a shared budget.** Each worker's poll loop is a standing
-cost on a link other workers also use. Prefer event-driven updates; when
-polling is unavoidable, poll as slowly as the UX tolerates and justify the
-interval in a comment. Do not add new poll loops without removing or slowing
-another.
-
-**Coalesce input before it becomes device traffic.** A slider drag must not
-become 100 writes. The existing debounce idiom is correct and should be reused:
-`_debounced_log` for log entries, and the 400 ms timer in `_on_filter_changed`
-that collapses typing into one hardware write.
-
-**On warm plot paths, mutate — do not rebuild.** `linien_widget.py` is the
-reference: curves are created once (`:108`), updated with `setData` (`:271`),
-and the Y range is fixed (`:98`) rather than recomputed per frame. Creating and
-removing plot items per update is only acceptable on cold paths.
-
-**Do not optimize these — they were measured and are fine.** The camera runs on
-Qt's native `QVideoWidget` capture path with no per-frame Python. The PSD plot
-recreates curves per update but runs once per acquisition stage, seconds apart.
-The 100–2000 ms worker poll loops are nowhere near saturating 9600-baud serial.
-Work on any of these is decorative; spend the effort on round-trip count and
-GUI-thread blocking instead.
+- **Count round trips, not cycles.** `get_filters()` is seven sequential RPyC
+  hops, not one. Batch reads; don't micro-optimize the code around them.
+- GUI thread budget is 16 ms; one round trip can eat it. Hence invariant 1.
+- Log durations on device ops. That's the only profiling this app needs.
+- Coalesce input before it becomes traffic (see the 400 ms filter-push timer).
+- Warm plot paths mutate, never rebuild — `linien_widget.py:108`/`:271` is the
+  reference.
+- Round-trip cost to `rp-f0f2b5.local` is **unmeasured**. Measure it before
+  arguing from it.
+- **Measured and fine, do not optimize:** camera (native Qt capture path), PSD
+  plot rebuild (cold, seconds apart), worker poll loops (nowhere near serial
+  saturation).
 
 ## Linien
 
-Targets `rp-f0f2b5.local`, running a **hand-patched linien-server 2.1.0** (the
-`dac_click_voltage` MCP4921 patch is applied directly to `parameters.py` /
-`registers.py` on the device). The client in `.venv` is pinned to 2.1.0 to match.
+`rp-f0f2b5.local` runs a **hand-patched linien-server 2.1.0** (`dac_click_voltage`
+MCP4921 patch applied on the device). Client pinned to 2.1.0 to match.
 
-- **Never run linien-gui against this Red Pitaya.** Its
-  `install_remote_server()` path runs `pip3 uninstall linien-server -y` on the
-  device and destroys the patch. It triggers automatically on
-  `ServerNotInstalled` or `InvalidServerVersion`.
-- A client version containing `dev` skips the client/server compatibility check
-  entirely. That is a dev escape hatch, not a compatibility strategy — it turns
-  a loud failure into a silent one. Keep the client pinned so the check passes
-  on its merits.
-- Never point two clients at one Red Pitaya simultaneously.
-- `rp-f0f2b4.local` is a **different** Red Pitaya, one character off.
-
-The hardcoded fallback host in `linien_widget.py:42` and `linien_worker.py:25`
-is `rp-F0C6AD.local` — the wrong device. On fresh QSettings, always pass
-`--rp-host`. (Fixing that default is a known TODO.)
+- **Never run linien-gui against this RP** — `install_remote_server()` runs
+  `pip3 uninstall linien-server -y` and destroys the patch. Fires automatically
+  on `ServerNotInstalled` or `InvalidServerVersion`.
+- A client version containing `dev` skips the compatibility check entirely. Not
+  a strategy — it turns a loud failure silent.
+- Never point two clients at one RP.
+- `rp-f0f2b4.local` is a different RP, one character off.
+- Fallback host in `linien_widget.py:42` and `linien_worker.py:25` is
+  `rp-F0C6AD.local` — wrong device. Known TODO.
 
 ## Landmines
 
-- **DPS scaling differs by model.** DPS5005 is 0.001 A / 0.01 W per LSB;
-  DPS5020 is 0.01 A / 0.1 W. Getting this wrong silently misreports current by
-  10x. Sanity-check readback against the supply's front panel.
-- **QSettings persists between runs**, so stale ports and hosts survive a
-  restart and look like code bugs. `smoke_ui.py` isolates settings and logs to a
-  temp dir; anything else you write that touches QSettings should too.
-- The repump GPIO gate is fixed at `DIO1_N` and `DIO3_N` is the DAC Click chip
-  select — verified empirically, see README before changing.
+- **DPS scaling is per-model.** DPS5005 = 0.001 A/LSB, DPS5020 = 0.01 A/LSB.
+  Wrong one misreports current by 10x.
+- QSettings persists between runs — stale ports look like code bugs.
+- Repump gate is `DIO1_N`; `DIO3_N` is the DAC Click chip select.
 
 ## Code layout
 
-`mot_control.py` is 3,452 lines and `OpenQuantumControlsWindow` is ~2,500 of
-them across 129 methods. It is the main obstacle to working in this repo.
+`mot_control.py` is 3,452 lines; `OpenQuantumControlsWindow` is ~2,500 of them
+across 129 methods. Don't add to it — extract the panel you're changing into
+its own module. Colours live in `styles.py`.
 
-Do not add to it. UI restructuring work should **extract** the panel being
-changed into its own module rather than editing in place — the restructure and
-the split are one operation, not two. Colours and shared widget styling live in
-`styles.py`.
+## Method
 
-## Working method
+One change at a time. Read the code and cite line numbers; don't describe
+behaviour from memory. Debugging: reproduce, pull evidence from `logs/*.jsonl`,
+one hypothesis, smallest discriminating change. If you can't reproduce it, say
+so rather than shipping a plausible fix.
 
-One change at a time. Before editing, read the actual code and cite line
-numbers — never describe behaviour from memory or inference. After editing, run
-`/verify`; if the change touches a device, say plainly that bench verification
-is still outstanding rather than implying it passed.
-
-Commit at each logical boundary with a message explaining *why*, not what the
-diff already shows. Update the `ROADMAP.md` status marks as steps complete.
-
-When debugging: reproduce first, gather evidence from `logs/*.jsonl` rather than
-reasoning from the symptom description, form one hypothesis, and make the
-smallest change that would discriminate it. If it cannot be reproduced, say so
-instead of applying a plausible-looking fix.
-
-## Style
-
-Match the surrounding code. Existing classes carry substantial docstrings that
-explain hardware behaviour and the reasoning behind limits — keep that up;
-those comments are load-bearing for anyone debugging at the bench. Comments
-should explain why a value or sequence is what it is, not restate the code.
+Comments explain why a value is what it is, not what the code does.
