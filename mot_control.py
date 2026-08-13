@@ -1325,10 +1325,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         scroll.setWidget(inner)
 
         self._add_connection_card(layout)
-        self._add_lock_card(layout)
-        self._add_filter_card(layout)
         self._add_laser_card(layout)
         self._add_repump_card(layout)
+        self._add_lock_card(layout)
+        self._add_filter_card(layout)
         self._add_dps_card(layout)
         self._add_config_card(layout)
         self._add_log_card(layout)
