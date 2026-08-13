@@ -46,7 +46,6 @@ from mot_workers import (
     PsdWorker,
     RidenDPSWorker,
     SerialProbeWorker,
-    _is_likely_usb_serial,
 )
 
 # Colors cycled through for successive PSD measurement runs.
@@ -1452,15 +1451,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
 
 
-        # No separate discovered-devices list: the dropdowns above are the
-        # list. This line only reports how many were found.
-        self.discovery_hint = QtWidgets.QLabel("")
-        self.discovery_hint.setWordWrap(True)
-        self.discovery_hint.setStyleSheet(
-            "color: #969696; font-size: 13px; border: none;"
-        )
-        manual_layout.addWidget(self.discovery_hint)
-
         self.connect_btn = QtWidgets.QPushButton("Connect / Reconnect")
         self.connect_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.connect_btn.clicked.connect(self._connect_all)
@@ -1540,13 +1530,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_port_edit,
         ):
             select.set_available(ports)
-        likely = len(
-            [p for p in self._serial_ports if _is_likely_usb_serial(p)]
-        )
-        self.discovery_hint.setText(
-            f"{len(ports)} serial port(s), {likely} likely USB. "
-            "Auto Discover identifies each one by probing it."
-        )
 
     def _add_filter_section(self, parent):
         """Error-signal filters, inline in the Linien Lock card.
