@@ -865,10 +865,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         central.setObjectName("central")
         self.setCentralWidget(central)
 
-        root = QtWidgets.QHBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
+        # The header spans the window so the plot and the sidebar both
+        # start beneath it and line up without a tuned spacer.
+        outer = QtWidgets.QVBoxLayout(central)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+
+        root = QtWidgets.QHBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
 
+        self._build_header(outer)
+        outer.addLayout(root, stretch=1)
         self._build_spectroscopy_column(root)
         self._build_control_column(root)
 
@@ -1090,13 +1098,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # UI construction
     # ------------------------------------------------------------------
 
-    def _build_spectroscopy_column(self, root):
-        left = QtWidgets.QVBoxLayout()
-        left.setSpacing(6)
+    def _build_header(self, outer):
+        """Logo left, view controls right, spanning the whole window."""
+        self._header_row = QtWidgets.QHBoxLayout()
+        self._header_row.setContentsMargins(6, 10, 6, 0)
+        self._header_row.setSpacing(8)
 
-        title_row = QtWidgets.QHBoxLayout()
         self.title_label = QtWidgets.QLabel()
-        self.title_label.setStyleSheet("border: none; padding: 18px 6px 4px 6px;")
+        self.title_label.setStyleSheet("border: none;")
         logo = QtGui.QPixmap(resource_path("assets", "full-horizontal.png"))
         if logo.isNull():
             # Bundled asset missing (broken build): fall back to the
@@ -1104,7 +1113,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.title_label.setText("OpenQuantum")
             self.title_label.setStyleSheet(
                 f"color: {ACCENT}; font-size: 20px; font-weight: 700;"
-                "letter-spacing: 3px; border: none; padding: 4px 6px;"
+                "letter-spacing: 3px; border: none;"
                 f'font-family: "{TITLE_FONT_FAMILY}";'
             )
         else:
@@ -1118,24 +1127,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             scaled.setDevicePixelRatio(ratio)
             self.title_label.setPixmap(scaled)
         self.title_label.setToolTip("OpenQuantum Controls")
-        title_row.addWidget(self.title_label)
-        title_row.addStretch()
+        self._header_row.addWidget(self.title_label)
+        self._header_row.addStretch()
 
-        # Statuses live in each card's header, not in a strip up here.
-        self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
-        self._set_chip("usb", "USB --", self._CHIP_NEUTRAL)
-        self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
-        self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
-        left.addLayout(title_row)
-
-        normal_view = QtWidgets.QWidget()
-        normal_layout = QtWidgets.QVBoxLayout(normal_view)
-        normal_layout.setContentsMargins(0, 0, 0, 0)
-        normal_layout.setSpacing(6)
-
-        view_bar = QtWidgets.QHBoxLayout()
-        view_bar.setSpacing(8)
-        view_bar.addStretch()
         self.camera_toggle = QtWidgets.QCheckBox("Show USB Camera")
         self.camera_toggle.setCursor(QtCore.Qt.PointingHandCursor)
         self.camera_toggle.setStyleSheet(
@@ -1148,8 +1142,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Show the USB camera pane below the spectroscopy plot.",
             self.camera_toggle,
         )
-        view_bar.addWidget(self.camera_toggle)
-        normal_layout.addLayout(view_bar)
+        self._header_row.addWidget(self.camera_toggle)
+        outer.addLayout(self._header_row)
+
+        # Statuses live in each card's header, not in a strip up here.
+        self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
+        self._set_chip("usb", "USB --", self._CHIP_NEUTRAL)
+        self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
+        self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
+
+    def _build_spectroscopy_column(self, root):
+        left = QtWidgets.QVBoxLayout()
+        left.setSpacing(6)
+
+        normal_view = QtWidgets.QWidget()
+        normal_layout = QtWidgets.QVBoxLayout(normal_view)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(6)
 
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.main_splitter.setChildrenCollapsible(False)
@@ -1166,10 +1175,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             linien_host=self._rp_host,
             v_to_freq_ghz=V_TO_GHZ,
         )
-        # Built by the Linien widget (it owns the range logic) but shown up
-        # here beside the camera toggle, with the other view controls.
-        view_bar.insertWidget(
-            view_bar.count() - 1, self.linien_widget.autozoom_check
+        # Built by the Linien widget (it owns the range logic) but shown in
+        # the header beside the camera toggle, with the other view controls.
+        self._header_row.insertWidget(
+            self._header_row.count() - 1, self.linien_widget.autozoom_check
         )
         self._tip(
             "Keep the vertical range tracking the signal. Uncheck to hold\n"
@@ -3140,6 +3149,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return
         self.view_stack.setCurrentIndex(1)
         self.sidebar_stack.setCurrentIndex(1)
+        # The header no longer swaps with the view, so hide the controls
+        # that do not apply to the PSD page.
+        self._set_view_controls_visible(False)
         self._psd_prev_status = {}
         self._event_log.log("psd_mode", entered=True)
 
@@ -3160,7 +3172,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.psd_worker = None
         self.view_stack.setCurrentIndex(0)
         self.sidebar_stack.setCurrentIndex(0)
+        self._set_view_controls_visible(True)
         self._event_log.log("psd_mode", entered=False)
+
+    def _set_view_controls_visible(self, visible):
+        """Show/hide the header controls that only apply to the plot view."""
+        self.camera_toggle.setVisible(visible)
+        self.linien_widget.autozoom_check.setVisible(visible)
 
     def _run_psd(self):
         worker = getattr(self, "psd_worker", None)
