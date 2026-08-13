@@ -800,6 +800,173 @@ class DacClickWorker(QtCore.QThread):
 
 
 # ---------------------------------------------------------------------------
+# Lock-noise PSD measurement / PID optimization, via linien
+# ---------------------------------------------------------------------------
+
+
+class PsdWorker(QtCore.QThread):
+    """Drive linien's lock-noise PSD measurement and PID optimization.
+
+    Uses its own RPyC connection (parameter cache off, as required for
+    writes to reach the server). Results arrive as pickled payload dicts
+    in the ``psd_data_partial`` / ``psd_data_complete`` parameters:
+
+        {"uuid", "time", "p", "i", "d", "signals",
+         "psds": {decimation: (freq_Hz, asd_counts_per_sqrtHz)},
+         "fitness", "complete"}
+
+    The acquisition steps through decimations (each stage ~16x longer
+    than the last); ``psd_acquisition_max_decimation`` bounds how low in
+    frequency (and how long) it runs. There is no server-side abort —
+    an in-flight acquisition finishes on its own.
+    """
+
+    connection_status = QtCore.pyqtSignal(str)
+    # {"acquiring": bool, "optimizing": bool, "locked": bool, p, i, d}
+    status = QtCore.pyqtSignal(object)
+    psd_data = QtCore.pyqtSignal(object)  # unpickled payload dict
+    fault = QtCore.pyqtSignal(str)
+
+    POLL_MS = 2000
+
+    def __init__(self, host=None, username="root", password="root"):
+        super().__init__()
+        self.host = host
+        self.username = username
+        self.password = password
+        self.running = False
+
+        self._client = None
+        self._mutex = QtCore.QMutex()
+        self._pending = []
+        self._last_payload_key = None
+        self._was_busy = False
+        self._fetch_complete = True  # pick up an existing result on connect
+
+    def run(self):
+        if not self.host:
+            self.connection_status.emit("no_host")
+            return
+
+        try:
+            from linien_client.connection import LinienClient
+            from linien_client.device import Device
+
+            dev = Device(
+                host=self.host, username=self.username, password=self.password
+            )
+            self._client = LinienClient(dev)
+            # Cache off: cached parameter writes never reach the server.
+            self._client.connect(autostart_server=True, use_parameter_cache=False)
+            self.connection_status.emit(f"connected:{self.host}")
+        except Exception as e:
+            self.connection_status.emit(f"error:{e}")
+            return
+
+        self.running = True
+        while self.running:
+            try:
+                self._process_pending()
+                self._poll()
+            except Exception as e:
+                self.fault.emit(str(e))
+            self.msleep(self.POLL_MS)
+
+        try:
+            self._client.disconnect()
+        except Exception:
+            pass
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+    # --- GUI-thread interface ---
+
+    def start_psd(self):
+        self._queue(("start_psd", None))
+
+    def start_pid_optimization(self):
+        self._queue(("start_pid_opt", None))
+
+    def set_algorithm(self, value: int):
+        self._queue(("algorithm", int(value)))
+
+    def set_max_decimation(self, value: int):
+        self._queue(("max_decimation", int(value)))
+
+    def _queue(self, item):
+        with QtCore.QMutexLocker(self._mutex):
+            self._pending = [p for p in self._pending if p[0] != item[0]]
+            self._pending.append(item)
+
+    def _pop_pending(self):
+        with QtCore.QMutexLocker(self._mutex):
+            items = self._pending
+            self._pending = []
+        return items
+
+    # --- worker-thread internals ---
+
+    def _process_pending(self):
+        params = self._client.parameters
+        for kind, value in self._pop_pending():
+            if kind == "start_psd":
+                self._client.connection.root.start_psd_acquisition()
+            elif kind == "start_pid_opt":
+                self._client.connection.root.start_pid_optimization()
+            elif kind == "algorithm":
+                params.psd_algorithm.value = value
+            elif kind == "max_decimation":
+                params.psd_acquisition_max_decimation.value = value
+
+    def _poll(self):
+        import pickle
+
+        params = self._client.parameters
+        acquiring = bool(params.psd_acquisition_running.value)
+        optimizing = bool(params.psd_optimization_running.value)
+        busy = acquiring or optimizing
+        self.status.emit(
+            {
+                "acquiring": acquiring,
+                "optimizing": optimizing,
+                "locked": bool(params.lock.value),
+                "p": int(params.p.value),
+                "i": int(params.i.value),
+                "d": int(params.d.value),
+            }
+        )
+
+        # Fetch strategy keeps network traffic down: partial data only
+        # while a measurement runs, the complete payload once when it
+        # finishes (payloads carry raw traces and can be megabytes).
+        if self._was_busy and not busy:
+            self._fetch_complete = True
+        self._was_busy = busy
+
+        raw = None
+        if busy:
+            raw = params.psd_data_partial.value
+        elif self._fetch_complete:
+            raw = params.psd_data_complete.value
+            self._fetch_complete = False
+        if not raw:
+            return
+
+        payload = pickle.loads(raw)
+        key = (
+            payload.get("uuid"),
+            payload.get("time"),
+            bool(payload.get("complete")),
+        )
+        if key == self._last_payload_key:
+            return
+        self._last_payload_key = key
+        self.psd_data.emit(payload)
+
+
+# ---------------------------------------------------------------------------
 # Linien GPIO bitfield output (repump RF gate)
 # ---------------------------------------------------------------------------
 

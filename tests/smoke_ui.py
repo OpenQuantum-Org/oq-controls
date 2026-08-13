@@ -56,6 +56,13 @@ pg.setConfigOptions(
 assert "Space Grotesk" in QtGui.QFontDatabase.families()
 assert "IBM Plex Sans" in QtGui.QFontDatabase.families()
 
+# Inputs are explicitly themed: spinboxes must not fall back to the
+# platform palette (black-on-dark), and all inputs get white outlines.
+stylesheet = mot_control.build_app_stylesheet()
+assert "QAbstractSpinBox {" in stylesheet
+assert stylesheet.count("border: 1px solid #e8e8f0") >= 3  # edit/spin/combo
+assert "border: 1px solid #e8e8f0" in mot_control.COMBO_STYLE
+
 
 def resolved_family(widget):
     """The family a widget will ACTUALLY render with (not just the CSS)."""
@@ -335,6 +342,50 @@ try:
     window._on_repump_gpio_state(False)
     assert window.repump_gpio_btn.text() == "Repump Off"
 
+    # --- Lock PSD mode: view/sidebar swap, status, plotting, exit ---
+    import numpy as np
+
+    assert window.view_stack.currentIndex() == 0
+    assert window.sidebar_stack.currentIndex() == 0
+    window._enter_psd_mode()  # rp host empty -> worker exits with no_host
+    assert window.view_stack.currentIndex() == 1
+    assert window.sidebar_stack.currentIndex() == 1
+    window._on_psd_status(
+        {"acquiring": True, "optimizing": False, "locked": True,
+         "p": 100, "i": 50, "d": 0}
+    )
+    assert "Acquiring" in window.psd_status_label.text()
+    assert not window.psd_run_btn.isEnabled()
+    assert not window.psd_opt_btn.isEnabled()
+    assert window.psd_pid_label.text() == "100 / 50 / 0"
+    payload = {
+        "uuid": "run1", "time": 1.0, "p": 100, "i": 50, "d": 0,
+        "signals": {},
+        "psds": {
+            1: (np.array([1e2, 1e3, 1e4]), np.array([1e-3, 1e-4, 1e-5])),
+            5: (np.array([1e1, 5e1]), np.array([1e-2, 5e-3])),
+        },
+        "fitness": 0.0111, "complete": True,
+    }
+    window._on_psd_data(payload)
+    assert window.psd_fitness_label.text() == "1.110e-02"
+    assert len(window._psd_runs) == 1
+    assert len(window._psd_runs["run1"]["curves"]) == 2
+    window._on_psd_data(dict(payload, uuid="run2", p=200))  # second run overlays
+    assert len(window._psd_runs) == 2
+    window._on_psd_status(
+        {"acquiring": False, "optimizing": False, "locked": True,
+         "p": 100, "i": 50, "d": 0}
+    )
+    assert window.psd_run_btn.isEnabled()
+    window._clear_psd_plot()
+    assert len(window._psd_runs) == 0
+    assert window.psd_fitness_label.text() == "--"
+    window._exit_psd_mode()
+    assert window.view_stack.currentIndex() == 0
+    assert window.sidebar_stack.currentIndex() == 0
+    assert getattr(window, "psd_worker", None) is None
+
     # --- Dispenser override dialog + apply flow (modal exec skipped) ---
     dlg = mot_control.DispenserOverrideDialog(window, 7.5, 30.0)
     assert dlg.values() == (7.5, 30.0)
@@ -381,6 +432,86 @@ try:
         window.log_view,
     ):
         assert tipped.toolTip(), tipped
+
+    # --- PID dialog (modal exec skipped) ---
+    pid_dlg = mot_control.PidDialog(window, (120, 40, 3))
+    assert pid_dlg.values() == (120, 40, 3)
+    pid_dlg.p_spin.setValue(9999)  # clamped to linien's max
+    assert pid_dlg.values() == (8191, 40, 3)
+    pid_default = mot_control.PidDialog(window, None)
+    assert pid_default.values() == (50, 5, 0)  # linien defaults
+
+    # --- Error signal filter card ---
+    assert not window.filter_card.content.isVisibleTo(window.filter_card)
+    assert window.filter_auto_check.isChecked()  # linien default: automatic
+    assert not window.filter1_freq_spin.isEnabled()  # manual rows locked
+    window.filter_auto_check.setChecked(False)
+    assert window.filter1_freq_spin.isEnabled()
+    window.filter1_enabled_check.setChecked(True)
+    window.filter1_type_combo.setCurrentIndex(1)  # high pass
+    window.filter1_freq_spin.setValue(25000)
+    filters = window._filters_from_ui()
+    assert filters["automatic"] is False
+    assert filters["filter_1_enabled"] is True
+    assert filters["filter_1_type"] == 1
+    assert filters["filter_1_frequency"] == 25000
+    assert filters["filter_2_enabled"] is False
+    window._set_filters_ui(
+        {"automatic": True, "filter_1_frequency": 12000}
+    )  # partial sync from device
+    assert window.filter_auto_check.isChecked()
+    assert window.filter1_freq_spin.value() == 12000
+    assert not window.filter1_freq_spin.isEnabled()  # auto re-locks rows
+    window._sync_filters_from_device()  # no linien connection: harmless no-op
+
+    # --- Config snapshot + JSON export round-trip ---
+    window.current_slider.setValue(85)
+    window.mot_coil_current_slider.setValue(2200)
+    config = window._collect_config()
+    assert config["laser"]["current_ma"] == 85
+    assert config["coils"]["current_a"] == 2.2
+    assert config["dispenser"]["fire_current_a"] == 7.5
+    assert config["psd"]["max_decimation"] == window.psd_decimation_spin.value()
+    assert config["repump"]["vco_mhz"] == round(
+        mot_control.vtune_to_vco_mhz(window.vtune_slider.value() / 1000.0), 1
+    )
+    assert config["linien"]["pid"] is None  # no linien connection in smoke
+    assert config["saved_at"]
+    assert config["linien"]["filters"]["filter_1_frequency"] == 12000
+    config_path = os.path.join(TMP, "config-export.json")
+    window._write_config_json(config_path)
+    with open(config_path, encoding="utf-8") as f:
+        loaded = json.load(f)
+    assert loaded["laser"]["current_ma"] == 85
+    assert loaded["coils"]["current_a"] == 2.2
+    assert loaded["connection"]["mot_coil_address"] == 1
+
+    # --- Config load: change everything, then restore from the file ---
+    window.current_slider.setValue(60)
+    window.mot_coil_current_slider.setValue(500)
+    window.vtune_slider.setValue(1000)
+    window.psd_decimation_spin.setValue(9)
+    window._set_filters_ui({"automatic": False, "filter_1_frequency": 777})
+    window._apply_dispenser_override(12.0, 40.0)
+    orig_question = QtWidgets.QMessageBox.question
+    QtWidgets.QMessageBox.question = (
+        lambda *a, **k: QtWidgets.QMessageBox.Yes
+    )
+    try:
+        window._apply_config(loaded, path=config_path)
+    finally:
+        QtWidgets.QMessageBox.question = orig_question
+    assert window.current_slider.value() == 85
+    assert window.mot_coil_current_slider.value() == 2200
+    assert window.psd_decimation_spin.value() == loaded["psd"]["max_decimation"]
+    assert window.filter1_freq_spin.value() == 12000
+    assert window.filter_auto_check.isChecked()
+    assert window._dispenser_fire_current == 7.5  # confirm-gated restore
+    assert window._dispenser_fire_seconds == 30.0
+    # partial configs apply without touching anything else
+    window._apply_config({"laser": {"current_ma": 92}})
+    assert window.current_slider.value() == 92
+    assert window.mot_coil_current_slider.value() == 2200
 
     # --- Probe-result handling ---
     window._on_probe_result(
@@ -518,6 +649,10 @@ for expected in (
     "dispenser_override",
     "vtune",
     "lock",
+    "psd_mode",
+    "psd_complete",
+    "config_saved",
+    "config_loaded",
 ):
     assert expected in logged_events, f"missing log event: {expected}"
 

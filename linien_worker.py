@@ -182,6 +182,76 @@ class LinienWorker(QtCore.QThread):
         except Exception as e:
             print(f"! Linien sweep speed update failed: {e}")
 
+    def get_pid(self):
+        """Read the lock PID gains as (p, i, d), or None if unavailable."""
+        if not hasattr(self, "client"):
+            return None
+        try:
+            params = self.client.parameters
+            return (
+                int(params.p.value),
+                int(params.i.value),
+                int(params.d.value),
+            )
+        except Exception as e:
+            print(f"! Linien PID read failed: {e}")
+            return None
+
+    def set_pid(self, p_value: int, i_value: int, d_value: int):
+        """Write the lock PID gains (each 0–8191)."""
+        if not hasattr(self, "client"):
+            print("! Linien PID update failed: not connected")
+            return
+        try:
+            params = self.client.parameters
+            params.p.value = int(p_value)
+            params.i.value = int(i_value)
+            params.d.value = int(d_value)
+            self.client.connection.root.write_registers()
+        except Exception as e:
+            print(f"! Linien PID update failed: {e}")
+
+    def get_filters(self):
+        """Read the channel-A error-signal filter settings, or None."""
+        if not hasattr(self, "client"):
+            return None
+        try:
+            params = self.client.parameters
+            return {
+                "automatic": bool(params.filter_automatic_a.value),
+                "filter_1_enabled": bool(params.filter_1_enabled_a.value),
+                "filter_1_type": int(params.filter_1_type_a.value),
+                "filter_1_frequency": int(params.filter_1_frequency_a.value),
+                "filter_2_enabled": bool(params.filter_2_enabled_a.value),
+                "filter_2_type": int(params.filter_2_type_a.value),
+                "filter_2_frequency": int(params.filter_2_frequency_a.value),
+            }
+        except Exception as e:
+            print(f"! Linien filter read failed: {e}")
+            return None
+
+    def set_filters(self, settings: dict):
+        """Write the channel-A error-signal filters (see get_filters)."""
+        if not hasattr(self, "client"):
+            print("! Linien filter update failed: not connected")
+            return
+        try:
+            params = self.client.parameters
+            params.filter_automatic_a.value = bool(settings["automatic"])
+            params.filter_1_enabled_a.value = bool(settings["filter_1_enabled"])
+            params.filter_1_type_a.value = int(settings["filter_1_type"])
+            params.filter_1_frequency_a.value = int(
+                settings["filter_1_frequency"]
+            )
+            params.filter_2_enabled_a.value = bool(settings["filter_2_enabled"])
+            params.filter_2_type_a.value = int(settings["filter_2_type"])
+            params.filter_2_frequency_a.value = int(
+                settings["filter_2_frequency"]
+            )
+            self.client.connection.root.write_registers()
+        except Exception as e:
+            print(f"! Linien filter update failed: {e}")
+
     def request_sweep_change(self, center: float, amplitude: float):
         try:
             self.current_center = center

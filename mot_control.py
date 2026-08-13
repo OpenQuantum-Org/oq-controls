@@ -10,10 +10,13 @@ coils run from a DPS5005 supply; the dispenser runs from a DPS5020 with a
 timed 10 s fire and a 15 min lockout cooldown.
 """
 
+import json
 import os
 import sys
 import time
+from datetime import datetime
 
+import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -39,9 +42,16 @@ from mot_workers import (
     DispenserWorker,
     LaserSetpointWorker,
     LinienGpioWorker,
+    PsdWorker,
     RidenDPSWorker,
     SerialProbeWorker,
     _is_likely_usb_serial,
+)
+
+# Colors cycled through for successive PSD measurement runs.
+PSD_RUN_COLORS = (
+    "#00d4ff", "#ff9f40", "#40dd80", "#dd50dd",
+    "#f0e060", "#7080ff", "#dd5050", "#50dddd",
 )
 
 # Riden DPS protection register (reg 7) values.
@@ -135,6 +145,24 @@ def build_app_stylesheet():
         "\n* {"
         f' font-family: "{BODY_FONT_FAMILY}", "Helvetica Neue",'
         ' "Segoe UI", sans-serif; }\n'
+        # Input affordance: white outlines + bright text on every text /
+        # number / dropdown input. QSpinBox in particular otherwise
+        # inherits the platform palette (black on dark = unreadable).
+        "QLineEdit { border: 1px solid #e8e8f0; color: #f0f0f8; }\n"
+        "QLineEdit:focus { border-color: #70b0ff; }\n"
+        "QAbstractSpinBox {"
+        " background: #12121a; color: #f0f0f8;"
+        " border: 1px solid #e8e8f0; border-radius: 4px;"
+        " padding: 2px 6px;"
+        " selection-background-color: #2a4a80; }\n"
+        "QAbstractSpinBox:focus { border-color: #70b0ff; }\n"
+        "QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {"
+        " background: #5a5a70; border: none; width: 14px; }\n"
+        "QAbstractSpinBox::up-button { border-top-right-radius: 3px; }\n"
+        "QAbstractSpinBox::down-button { border-bottom-right-radius: 3px; }\n"
+        "QAbstractSpinBox::up-button:hover,"
+        " QAbstractSpinBox::down-button:hover { background: #6a6a82; }\n"
+        "QComboBox { border: 1px solid #e8e8f0; }\n"
     )
 
 
@@ -240,7 +268,7 @@ COMBO_STYLE = """
     QComboBox {
         background: #12121a;
         color: #ececf4;
-        border: 1px solid #1e1e2e;
+        border: 1px solid #e8e8f0;
         border-radius: 4px;
         padding: 2px 6px;
         font-size: 12px;
@@ -361,8 +389,10 @@ class CollapsibleCard(QtWidgets.QFrame):
         header.addWidget(self.header_status)
         outer.addLayout(header)
 
+        # NOTE: no selector-less stylesheet here — those cascade to every
+        # descendant and override app-level input styling (borders,
+        # spinbox backgrounds). A plain QWidget is transparent anyway.
         self.content = QtWidgets.QWidget()
-        self.content.setStyleSheet("background: transparent; border: none;")
         self.content_layout = QtWidgets.QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(6)
@@ -786,6 +816,60 @@ class DispenserOverrideDialog(QtWidgets.QDialog):
         return self.current_spin.value(), self.duration_spin.value()
 
 
+class PidDialog(QtWidgets.QDialog):
+    """Set the Linien lock PID gains (each 0-8191)."""
+
+    def __init__(self, parent, current=None):
+        super().__init__(parent)
+        self.setWindowTitle("Lock PID")
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+
+        p_value, i_value, d_value = current if current else (50, 5, 0)
+        self.p_spin = QtWidgets.QSpinBox()
+        self.i_spin = QtWidgets.QSpinBox()
+        self.d_spin = QtWidgets.QSpinBox()
+        for spin, value in (
+            (self.p_spin, p_value),
+            (self.i_spin, i_value),
+            (self.d_spin, d_value),
+        ):
+            spin.setRange(0, 8191)
+            spin.setValue(int(value))
+        form.addRow("P:", self.p_spin)
+        form.addRow("I:", self.i_spin)
+        form.addRow("D:", self.d_spin)
+        root.addLayout(form)
+
+        note = QtWidgets.QLabel(
+            "Applied to the Red Pitaya immediately on Apply "
+            "(linien range 0-8191 each)."
+            + ("" if current else " Current values could not be read.")
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a0a0b4; border: none; font-size: 12px;")
+        root.addWidget(note)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch()
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        apply_btn = QtWidgets.QPushButton("Apply")
+        apply_btn.setDefault(True)
+        apply_btn.clicked.connect(self.accept)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(apply_btn)
+        root.addLayout(button_row)
+
+    def values(self):
+        return self.p_spin.value(), self.i_spin.value(), self.d_spin.value()
+
+
 class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
@@ -831,6 +915,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
+        self._psd_runs = {}
+        self._psd_color_index = 0
+        self._psd_prev_status = {}
+        self._filters_syncing = False
 
         self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
@@ -857,6 +945,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         # Route event-log records into the log pane (GUI thread only).
         self._event_log.on_record = self._on_log_record
+
+        # Pull the filter settings from the device once Linien connects.
+        self.linien_widget.connection_status_changed.connect(
+            self._on_linien_connection
+        )
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1106,6 +1199,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         left.addLayout(title_row)
 
+        normal_view = QtWidgets.QWidget()
+        normal_layout = QtWidgets.QVBoxLayout(normal_view)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(6)
+
         view_bar = QtWidgets.QHBoxLayout()
         view_bar.setSpacing(8)
         spectroscopy_label = QtWidgets.QLabel(
@@ -1131,7 +1229,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.camera_toggle,
         )
         view_bar.addWidget(self.camera_toggle)
-        left.addLayout(view_bar)
+        normal_layout.addLayout(view_bar)
 
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.main_splitter.setChildrenCollapsible(False)
@@ -1153,7 +1251,50 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.main_splitter.addWidget(self.linien_widget)
         self.main_splitter.addWidget(self.camera_widget)
         self.main_splitter.setSizes([700, 260])
-        left.addWidget(self.main_splitter, stretch=1)
+        normal_layout.addWidget(self.main_splitter, stretch=1)
+
+        # PSD view: swapped in when measuring lock noise.
+        psd_view = QtWidgets.QWidget()
+        psd_layout = QtWidgets.QVBoxLayout(psd_view)
+        psd_layout.setContentsMargins(0, 0, 0, 0)
+        psd_layout.setSpacing(6)
+        psd_bar = QtWidgets.QHBoxLayout()
+        psd_bar.setSpacing(8)
+        psd_title = QtWidgets.QLabel("Lock Noise PSD")
+        psd_title.setStyleSheet(
+            f"color: {NEON_BLUE}; font-size: 12px; font-weight: 700;"
+            "letter-spacing: 1px; border: none; padding: 4px 6px;"
+            f'font-family: "{TITLE_FONT_FAMILY}";'
+        )
+        psd_bar.addWidget(psd_title)
+        psd_bar.addStretch()
+        self.psd_view_status = QtWidgets.QLabel("")
+        self.psd_view_status.setStyleSheet(
+            "color: #c0c0d4; font-size: 12px; font-weight: 700;"
+            "border: none; padding: 4px 6px;"
+        )
+        psd_bar.addWidget(self.psd_view_status)
+        psd_layout.addLayout(psd_bar)
+
+        self.psd_plot = pg.PlotWidget(background="#0a0a0f")
+        self.psd_plot.setLogMode(True, True)
+        self.psd_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.psd_plot.setLabel("bottom", "Frequency (Hz)")
+        self.psd_plot.setLabel(
+            "left", "Error signal ASD (counts/\N{SQUARE ROOT}Hz)"
+        )
+        self._psd_legend = self.psd_plot.addLegend()
+        self._tip(
+            "Error-signal amplitude spectral density per measurement run;\n"
+            "colors distinguish runs (see legend for their PID settings).",
+            self.psd_plot,
+        )
+        psd_layout.addWidget(self.psd_plot, stretch=1)
+
+        self.view_stack = QtWidgets.QStackedWidget()
+        self.view_stack.addWidget(normal_view)
+        self.view_stack.addWidget(psd_view)
+        left.addWidget(self.view_stack, stretch=1)
 
         root.addLayout(left, stretch=3)
 
@@ -1169,13 +1310,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _build_control_column(self, root):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        # Wide enough that no card ever needs horizontal scrolling; the
-        # smoke test asserts the content fits at the minimum width.
-        scroll.setMinimumWidth(460)
-        scroll.setMaximumWidth(600)
 
         inner = QtWidgets.QWidget()
-        inner.setStyleSheet("background: transparent;")
+        inner.setObjectName("controlColumnInner")
+        # Scoped by objectName: a selector-less rule would cascade into
+        # every card child and override the input styling.
+        inner.setStyleSheet(
+            "QWidget#controlColumnInner { background: transparent; }"
+        )
         layout = QtWidgets.QVBoxLayout(inner)
         layout.setAlignment(QtCore.Qt.AlignTop)
         layout.setSpacing(8)
@@ -1184,13 +1326,142 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self._add_connection_card(layout)
         self._add_lock_card(layout)
+        self._add_filter_card(layout)
         self._add_laser_card(layout)
         self._add_repump_card(layout)
         self._add_dps_card(layout)
+        self._add_config_card(layout)
         self._add_log_card(layout)
         layout.addStretch()
 
-        root.addWidget(scroll, stretch=1)
+        # The sidebar swaps between the normal control cards and the PSD
+        # measurement panel. Wide enough that no card ever needs
+        # horizontal scrolling; the smoke test asserts the content fits
+        # at the minimum width.
+        self.sidebar_stack = QtWidgets.QStackedWidget()
+        self.sidebar_stack.setMinimumWidth(460)
+        self.sidebar_stack.setMaximumWidth(600)
+        self.sidebar_stack.addWidget(scroll)
+        self.sidebar_stack.addWidget(self._build_psd_sidebar())
+        root.addWidget(self.sidebar_stack, stretch=1)
+
+    def _build_psd_sidebar(self):
+        container = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(container)
+        outer.setAlignment(QtCore.Qt.AlignTop)
+        outer.setSpacing(8)
+        outer.setContentsMargins(0, 0, 4, 0)
+
+        card = make_card()
+        layout = card.layout()
+        layout.addWidget(make_section_title("Lock PSD Measurement"))
+
+        self.psd_status_label = add_readout_row(layout, "Status:", "Idle")
+        self._tip(
+            "PSD acquisition state. A measurement steps through\n"
+            "decimations; each stage takes ~16x longer than the last.",
+            self.psd_status_label,
+            help_cursor=True,
+        )
+        self.psd_lock_label = add_readout_row(layout, "Laser:", "--")
+        self._tip(
+            "Measure while locked — the point is error-signal noise\n"
+            "under lock.",
+            self.psd_lock_label,
+            help_cursor=True,
+        )
+
+        algo_row = QtWidgets.QHBoxLayout()
+        algo_row.setSpacing(8)
+        algo_row.addWidget(self._small_label("Algorithm:"))
+        self.psd_algo_combo = QtWidgets.QComboBox()
+        _style_combo(self.psd_algo_combo)
+        self.psd_algo_combo.addItem("LPSD", 1)
+        self.psd_algo_combo.addItem("Welch", 0)
+        saved_algo = self._int_setting("psd/algorithm", 1, 0, 1)
+        index = self.psd_algo_combo.findData(saved_algo)
+        self.psd_algo_combo.setCurrentIndex(max(0, index))
+        self.psd_algo_combo.currentIndexChanged.connect(self._on_psd_algorithm)
+        algo_row.addWidget(self.psd_algo_combo, stretch=1)
+        layout.addLayout(algo_row)
+        self._tip(
+            "PSD estimator: LPSD gives log-spaced frequency bins (best\n"
+            "for wide spans); Welch is the classic linear-bin estimate.",
+            self.psd_algo_combo,
+        )
+
+        decim_row = QtWidgets.QHBoxLayout()
+        decim_row.setSpacing(8)
+        decim_row.addWidget(self._small_label("Max Decimation:"))
+        self.psd_decimation_spin = QtWidgets.QSpinBox()
+        self.psd_decimation_spin.setRange(1, 32)
+        self.psd_decimation_spin.setValue(
+            self._int_setting("psd/max_decimation", 18, 1, 32)
+        )
+        self.psd_decimation_spin.valueChanged.connect(self._on_psd_decimation)
+        decim_row.addWidget(self.psd_decimation_spin)
+        decim_row.addStretch()
+        layout.addLayout(decim_row)
+        self._tip(
+            "How deep the decimation ladder goes: higher reaches lower\n"
+            "Fourier frequencies but takes much longer (~16x per +4).\n"
+            "Default 18; try 10-14 for quick checks.",
+            self.psd_decimation_spin,
+        )
+
+        self.psd_fitness_label = add_readout_row(layout, "Fitness:", "--")
+        self._tip(
+            "Integrated error-signal noise of the last completed run —\n"
+            "lower is better; use it to compare PID settings.",
+            self.psd_fitness_label,
+            help_cursor=True,
+        )
+        self.psd_pid_label = add_readout_row(layout, "PID (P/I/D):", "--")
+        self._tip(
+            "Live PID parameters on the Linien server (the optimizer\n"
+            "changes these while it runs).",
+            self.psd_pid_label,
+            help_cursor=True,
+        )
+
+        self.psd_run_btn = QtWidgets.QPushButton("Run PSD Measurement")
+        self.psd_run_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.psd_run_btn.clicked.connect(self._run_psd)
+        layout.addWidget(self.psd_run_btn)
+        self._tip(
+            "Record one PSD with the current settings. The spectroscopy\n"
+            "trace pauses while the raw acquisition runs.",
+            self.psd_run_btn,
+        )
+
+        self.psd_opt_btn = QtWidgets.QPushButton("Optimize PID")
+        self.psd_opt_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.psd_opt_btn.clicked.connect(self._run_pid_optimization)
+        layout.addWidget(self.psd_opt_btn)
+        self._tip(
+            "Run linien's PID optimizer: repeated PSD measurements while\n"
+            "actively changing the lock's P/I gains (confirmed first).",
+            self.psd_opt_btn,
+        )
+
+        self.psd_clear_btn = QtWidgets.QPushButton("Clear Plot")
+        self.psd_clear_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.psd_clear_btn.clicked.connect(self._clear_psd_plot)
+        layout.addWidget(self.psd_clear_btn)
+
+        self.psd_exit_btn = QtWidgets.QPushButton("Exit PSD Mode")
+        self.psd_exit_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.psd_exit_btn.clicked.connect(self._exit_psd_mode)
+        layout.addWidget(self.psd_exit_btn)
+        self._tip(
+            "Return to the normal spectroscopy view. An in-flight\n"
+            "acquisition finishes on the server by itself.",
+            self.psd_exit_btn,
+        )
+
+        outer.addWidget(card)
+        outer.addStretch()
+        return container
 
     def _add_connection_card(self, parent):
         card = CollapsibleCard("Device Connections", collapsed=True)
@@ -1230,13 +1501,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.mot_coil_addr_spin = QtWidgets.QSpinBox()
         self.mot_coil_addr_spin.setRange(1, 247)
         self.mot_coil_addr_spin.setValue(self._mot_coil_address)
+        self.mot_coil_addr_spin.setFixedWidth(72)
         self.dispenser_addr_spin = QtWidgets.QSpinBox()
         self.dispenser_addr_spin.setRange(1, 247)
         self.dispenser_addr_spin.setValue(self._dispenser_address)
+        self.dispenser_addr_spin.setFixedWidth(72)
         addr_row.addWidget(self._tiny_label("Coil"))
         addr_row.addWidget(self.mot_coil_addr_spin)
         addr_row.addWidget(self._tiny_label("Disp"))
         addr_row.addWidget(self.dispenser_addr_spin)
+        addr_row.addStretch()
         layout.addLayout(addr_row)
         self._tip(
             "Modbus slave addresses of the DPS supplies (front panel\n"
@@ -1279,6 +1553,111 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.connect_btn,
         )
         layout.addWidget(self.connect_btn)
+        parent.addWidget(card)
+
+    def _add_filter_card(self, parent):
+        card = CollapsibleCard("Error Signal Filters", collapsed=True)
+        self.filter_card = card
+        layout = card.content_layout
+        self._tip(
+            "Linien's two IIR filter stages applied to the demodulated\n"
+            "error signal (channel A).",
+            card.toggle_btn,
+        )
+
+        self.filter_auto_check = QtWidgets.QCheckBox(
+            "Automatic (two low-passes at half the modulation frequency)"
+        )
+        self.filter_auto_check.setChecked(True)
+        self.filter_auto_check.setCursor(QtCore.Qt.PointingHandCursor)
+        self.filter_auto_check.setStyleSheet(
+            "QCheckBox { color: #ececf4; font-size: 12px; border: none; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+        self.filter_auto_check.toggled.connect(self._on_filter_changed)
+        layout.addWidget(self.filter_auto_check)
+        self._tip(
+            "When checked, Linien chooses the filters itself; uncheck to\n"
+            "configure the two stages manually below.",
+            self.filter_auto_check,
+        )
+
+        for index in (1, 2):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(8)
+            enabled = QtWidgets.QCheckBox(f"Filter {index}")
+            enabled.setCursor(QtCore.Qt.PointingHandCursor)
+            enabled.setStyleSheet(
+                "QCheckBox { color: #ececf4; font-size: 12px; border: none; }"
+                "QCheckBox::indicator { width: 14px; height: 14px; }"
+            )
+            type_combo = QtWidgets.QComboBox()
+            _style_combo(type_combo)
+            type_combo.addItem("Low pass", 0)
+            type_combo.addItem("High pass", 1)
+            freq_spin = QtWidgets.QSpinBox()
+            freq_spin.setRange(1, 10_000_000)
+            freq_spin.setValue(10000)
+            freq_spin.setSuffix(" Hz")
+            row.addWidget(enabled)
+            row.addWidget(type_combo)
+            row.addWidget(freq_spin, stretch=1)
+            layout.addLayout(row)
+            enabled.toggled.connect(self._on_filter_changed)
+            type_combo.currentIndexChanged.connect(self._on_filter_changed)
+            freq_spin.valueChanged.connect(self._on_filter_changed)
+            setattr(self, f"filter{index}_enabled_check", enabled)
+            setattr(self, f"filter{index}_type_combo", type_combo)
+            setattr(self, f"filter{index}_freq_spin", freq_spin)
+            self._tip(
+                f"IIR stage {index}: enable, choose low/high pass, and set\n"
+                "the corner frequency. A disabled stage stays in the signal\n"
+                "path with unity gain (keeps the propagation delay fixed).",
+                enabled,
+                type_combo,
+                freq_spin,
+            )
+
+        self.filter_read_btn = QtWidgets.QPushButton("Read from Device")
+        self.filter_read_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.filter_read_btn.clicked.connect(self._sync_filters_from_device)
+        layout.addWidget(self.filter_read_btn)
+        self._tip(
+            "Re-read the filter settings from the Linien server (also done\n"
+            "automatically when it connects).",
+            self.filter_read_btn,
+        )
+
+        self._update_filter_rows_enabled()
+        parent.addWidget(card)
+
+    def _add_config_card(self, parent):
+        card = make_card()
+        layout = card.layout()
+        layout.addWidget(make_section_title("Config"))
+        config_row = QtWidgets.QHBoxLayout()
+        config_row.setSpacing(6)
+        self.save_config_btn = QtWidgets.QPushButton("Save Config As...")
+        self.save_config_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.save_config_btn.clicked.connect(self._save_config_dialog)
+        config_row.addWidget(self.save_config_btn)
+        self._tip(
+            "Snapshot every control setting (connections, lock + PID,\n"
+            "filters, laser, repump, supplies, dispenser, PSD) to a JSON\n"
+            "file.",
+            self.save_config_btn,
+        )
+        self.load_config_btn = QtWidgets.QPushButton("Load Config...")
+        self.load_config_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.load_config_btn.clicked.connect(self._load_config_dialog)
+        config_row.addWidget(self.load_config_btn)
+        self._tip(
+            "Apply a saved config: setpoints go to the hardware where\n"
+            "connected. Dispenser settings ask for confirmation; port\n"
+            "changes take effect on Connect / Reconnect.",
+            self.load_config_btn,
+        )
+        layout.addLayout(config_row)
         parent.addWidget(card)
 
     def _add_log_card(self, parent):
@@ -1421,6 +1800,28 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.lock_readout,
             help_cursor=True,
         )
+
+        lock_button_row = QtWidgets.QHBoxLayout()
+        lock_button_row.setSpacing(6)
+        self.pid_btn = QtWidgets.QPushButton("Set PID...")
+        self.pid_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.pid_btn.clicked.connect(self._open_pid_dialog)
+        lock_button_row.addWidget(self.pid_btn)
+        self._tip(
+            "Read and set the lock's P/I/D gains on the Red Pitaya\n"
+            "(each 0-8191).",
+            self.pid_btn,
+        )
+        self.psd_mode_btn = QtWidgets.QPushButton("Measure Lock PSD...")
+        self.psd_mode_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.psd_mode_btn.clicked.connect(self._enter_psd_mode)
+        lock_button_row.addWidget(self.psd_mode_btn)
+        self._tip(
+            "Switch to the lock-noise PSD view: measure the error-signal\n"
+            "noise spectrum under lock and optimize the PID from it.",
+            self.psd_mode_btn,
+        )
+        layout.addLayout(lock_button_row)
         parent.addWidget(card)
 
     def _add_laser_card(self, parent):
@@ -1974,6 +2375,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "dispenser_worker",
             "vtune_worker",
             "repump_gpio_worker",
+            "psd_worker",
         ):
             worker = getattr(self, attr, None)
             if worker is not None:
@@ -2411,6 +2813,502 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.repump_gpio_btn.setChecked(enabled)
         self.repump_gpio_btn.setText("Repump On" if enabled else "Repump Off")
         self.repump_gpio_btn.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # Error signal filters
+    # ------------------------------------------------------------------
+
+    def _filters_from_ui(self):
+        return {
+            "automatic": self.filter_auto_check.isChecked(),
+            "filter_1_enabled": self.filter1_enabled_check.isChecked(),
+            "filter_1_type": int(self.filter1_type_combo.currentData()),
+            "filter_1_frequency": self.filter1_freq_spin.value(),
+            "filter_2_enabled": self.filter2_enabled_check.isChecked(),
+            "filter_2_type": int(self.filter2_type_combo.currentData()),
+            "filter_2_frequency": self.filter2_freq_spin.value(),
+        }
+
+    def _set_filters_ui(self, filters):
+        self._filters_syncing = True
+        try:
+            self.filter_auto_check.setChecked(bool(filters.get("automatic", True)))
+            for index in (1, 2):
+                enabled = getattr(self, f"filter{index}_enabled_check")
+                type_combo = getattr(self, f"filter{index}_type_combo")
+                freq_spin = getattr(self, f"filter{index}_freq_spin")
+                enabled.setChecked(bool(filters.get(f"filter_{index}_enabled", False)))
+                combo_index = type_combo.findData(
+                    int(filters.get(f"filter_{index}_type", 0))
+                )
+                if combo_index >= 0:
+                    type_combo.setCurrentIndex(combo_index)
+                freq_spin.setValue(
+                    int(filters.get(f"filter_{index}_frequency", 10000))
+                )
+        finally:
+            self._filters_syncing = False
+        self._update_filter_rows_enabled()
+
+    def _update_filter_rows_enabled(self):
+        manual = not self.filter_auto_check.isChecked()
+        for index in (1, 2):
+            for name in ("enabled_check", "type_combo", "freq_spin"):
+                getattr(self, f"filter{index}_{name}").setEnabled(manual)
+
+    def _on_filter_changed(self, *_args):
+        if self._filters_syncing:
+            return
+        self._update_filter_rows_enabled()
+        self._debounced_log(
+            "error_filters",
+            "setpoint",
+            lambda: {"name": "error_filters", **self._filters_from_ui()},
+        )
+        # Coalesce bursts (typing a frequency) into one hardware write.
+        timer = self._log_debounce.get("_filter_push")
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._push_filters)
+            self._log_debounce["_filter_push"] = timer
+        timer.start(400)
+
+    def _push_filters(self):
+        worker = self._get_lock_worker()
+        if worker is not None:
+            worker.set_filters(self._filters_from_ui())
+
+    def _sync_filters_from_device(self):
+        worker = self._get_lock_worker()
+        filters = worker.get_filters() if worker is not None else None
+        if filters is None:
+            print("! error filter read skipped: Linien not connected")
+            return
+        self._set_filters_ui(filters)
+
+    def _on_linien_connection(self, status):
+        if status.startswith("connected"):
+            # Give the worker a moment to finish its own connect-time setup.
+            QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
+
+    # ------------------------------------------------------------------
+    # Lock PID / config snapshot
+    # ------------------------------------------------------------------
+
+    def _open_pid_dialog(self):
+        worker = self._get_lock_worker()
+        current = worker.get_pid() if worker is not None else None
+        dialog = PidDialog(self, current)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        p_value, i_value, d_value = dialog.values()
+        if worker is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Linien not connected",
+                "The PID could not be written: no Linien connection.\n"
+                "Set the Red Pitaya host and press Connect / Reconnect.",
+            )
+            return
+        worker.set_pid(p_value, i_value, d_value)
+        self._event_log.log("pid_set", p=p_value, i=i_value, d=d_value)
+
+    def _collect_config(self):
+        """Snapshot of every control setting, for the JSON export."""
+        worker = self._get_lock_worker()
+        pid = worker.get_pid() if worker is not None else None
+        vtune_v = self.vtune_slider.value() / 1000.0
+        return {
+            "saved_at": datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            ),
+            "connection": {
+                "rp_host": self.rp_edit.text().strip(),
+                "laser_port": self.laser_edit.text().strip(),
+                "mot_coil_port": self.mot_coil_port_edit.text().strip(),
+                "dispenser_port": self.dispenser_port_edit.text().strip(),
+                "mot_coil_address": self.mot_coil_addr_spin.value(),
+                "dispenser_address": self.dispenser_addr_spin.value(),
+            },
+            "linien": {
+                "mod_freq_khz": self.mod_freq_slider.value(),
+                "mod_phase_deg": self.mod_phase_slider.value(),
+                "mod_strength_mv": self.mod_strength_slider.value(),
+                "sweep_speed_index": self.sweep_speed_combo.currentIndex(),
+                "pid": (
+                    {"p": pid[0], "i": pid[1], "d": pid[2]} if pid else None
+                ),
+                "filters": self._filters_from_ui(),
+            },
+            "laser": {
+                "current_ma": self.current_slider.value(),
+                "thermistor_ohm": self.therm_slider.value(),
+                "temp_est_c": round(
+                    thermistor_ohms_to_c(self.therm_slider.value()), 2
+                ),
+            },
+            "repump": {
+                "vtune_v": vtune_v,
+                "vco_mhz": round(vtune_to_vco_mhz(vtune_v), 1),
+            },
+            "coils": {
+                "voltage_v": self.mot_coil_voltage_slider.value() / 1000.0,
+                "current_a": self.mot_coil_current_slider.value() / 1000.0,
+            },
+            "dispenser": {
+                "fire_current_a": self._dispenser_fire_current,
+                "fire_seconds": self._dispenser_fire_seconds,
+                "total_fires": self._int_setting("dispenser/total_fires", 0),
+                "total_fire_s": self._float_setting(
+                    "dispenser/total_fire_s", 0.0
+                ),
+                "cooldown_until_epoch": self._dispenser_cooldown_until,
+            },
+            "psd": {
+                "algorithm": int(self.psd_algo_combo.currentData()),
+                "max_decimation": self.psd_decimation_spin.value(),
+            },
+        }
+
+    def _write_config_json(self, path):
+        config = self._collect_config()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        self._event_log.log("config_saved", path=str(path))
+        return config
+
+    def _save_config_dialog(self):
+        default_name = time.strftime("oq-config-%Y%m%d-%H%M%S.json")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Config",
+            os.path.join(app_data_dir(), default_name),
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            self._write_config_json(path)
+        except OSError as e:
+            self._log_fault("config", e)
+            QtWidgets.QMessageBox.warning(
+                self, "Save failed", f"Could not write the config:\n{e}"
+            )
+
+    def _load_config_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Config", app_data_dir(), "JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("not a config object")
+        except (OSError, ValueError) as e:
+            self._log_fault("config", e)
+            QtWidgets.QMessageBox.warning(
+                self, "Load failed", f"Could not read the config:\n{e}"
+            )
+            return
+        self._apply_config(config, path=path)
+
+    def _apply_config(self, config, path=None):
+        """Apply a config snapshot to the UI (handlers push to hardware).
+
+        Missing keys are left unchanged, so partial configs are fine.
+        Ports/hosts only update the fields — press Connect / Reconnect to
+        use them. Dispenser settings are confirmation-gated. The fire
+        history and cooldown are device truth and are never loaded.
+        """
+        connection = config.get("connection", {})
+        for key, edit in (
+            ("rp_host", self.rp_edit),
+            ("laser_port", self.laser_edit),
+            ("mot_coil_port", self.mot_coil_port_edit),
+            ("dispenser_port", self.dispenser_port_edit),
+        ):
+            if key in connection:
+                edit.setText(str(connection[key]))
+        if "mot_coil_address" in connection:
+            self.mot_coil_addr_spin.setValue(int(connection["mot_coil_address"]))
+        if "dispenser_address" in connection:
+            self.dispenser_addr_spin.setValue(
+                int(connection["dispenser_address"])
+            )
+
+        linien = config.get("linien", {})
+        for key, slider in (
+            ("mod_freq_khz", self.mod_freq_slider),
+            ("mod_phase_deg", self.mod_phase_slider),
+            ("mod_strength_mv", self.mod_strength_slider),
+        ):
+            if key in linien:
+                slider.setValue(int(linien[key]))
+        if "sweep_speed_index" in linien:
+            self.sweep_speed_combo.setCurrentIndex(
+                max(0, min(15, int(linien["sweep_speed_index"])))
+            )
+        pid = linien.get("pid")
+        if pid:
+            worker = self._get_lock_worker()
+            if worker is not None:
+                p_value = int(pid.get("p", 50))
+                i_value = int(pid.get("i", 5))
+                d_value = int(pid.get("d", 0))
+                worker.set_pid(p_value, i_value, d_value)
+                self._event_log.log(
+                    "pid_set", p=p_value, i=i_value, d=d_value, source="config"
+                )
+        filters = linien.get("filters")
+        if filters:
+            self._set_filters_ui({**self._filters_from_ui(), **filters})
+            self._push_filters()
+
+        laser = config.get("laser", {})
+        if "current_ma" in laser:
+            self.current_slider.setValue(int(laser["current_ma"]))
+        if "thermistor_ohm" in laser:
+            self.therm_slider.setValue(int(laser["thermistor_ohm"]))
+
+        repump = config.get("repump", {})
+        if "vtune_v" in repump:
+            self.vtune_slider.setValue(
+                int(round(float(repump["vtune_v"]) * 1000))
+            )
+
+        coils = config.get("coils", {})
+        if "voltage_v" in coils:
+            self.mot_coil_voltage_slider.setValue(
+                int(round(float(coils["voltage_v"]) * 1000))
+            )
+        if "current_a" in coils:
+            self.mot_coil_current_slider.setValue(
+                int(round(float(coils["current_a"]) * 1000))
+            )
+
+        psd = config.get("psd", {})
+        if "algorithm" in psd:
+            index = self.psd_algo_combo.findData(int(psd["algorithm"]))
+            if index >= 0:
+                self.psd_algo_combo.setCurrentIndex(index)
+        if "max_decimation" in psd:
+            self.psd_decimation_spin.setValue(int(psd["max_decimation"]))
+
+        dispenser = config.get("dispenser", {})
+        new_current = float(
+            dispenser.get("fire_current_a", self._dispenser_fire_current)
+        )
+        new_seconds = float(
+            dispenser.get("fire_seconds", self._dispenser_fire_seconds)
+        )
+        if (
+            abs(new_current - self._dispenser_fire_current) > 0.005
+            or abs(new_seconds - self._dispenser_fire_seconds) > 0.5
+        ):
+            confirm = QtWidgets.QMessageBox.question(
+                self,
+                "Dispenser settings from config",
+                f"The config sets the dispenser fire to {new_current:.2f} A "
+                f"for {new_seconds:.0f} s (currently "
+                f"{self._dispenser_fire_current:.2f} A / "
+                f"{self._dispenser_fire_seconds:.0f} s).\n\nApply it?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Cancel,
+            )
+            if confirm == QtWidgets.QMessageBox.Yes:
+                self._apply_dispenser_override(new_current, new_seconds)
+
+        self._event_log.log(
+            "config_loaded",
+            path=str(path) if path else None,
+            saved_at=config.get("saved_at"),
+        )
+
+    # ------------------------------------------------------------------
+    # Lock PSD mode
+    # ------------------------------------------------------------------
+
+    def _enter_psd_mode(self):
+        if self.view_stack.currentIndex() == 1:
+            return
+        self.view_stack.setCurrentIndex(1)
+        self.sidebar_stack.setCurrentIndex(1)
+        self._psd_prev_status = {}
+        self._event_log.log("psd_mode", entered=True)
+
+        self.psd_worker = PsdWorker(host=self.rp_edit.text().strip())
+        self.psd_worker.connection_status.connect(self._on_psd_connection)
+        self.psd_worker.status.connect(self._on_psd_status)
+        self.psd_worker.psd_data.connect(self._on_psd_data)
+        self.psd_worker.fault.connect(lambda msg: self._log_fault("psd", msg))
+        # Queued settings apply once the worker connects.
+        self.psd_worker.set_algorithm(self.psd_algo_combo.currentData())
+        self.psd_worker.set_max_decimation(self.psd_decimation_spin.value())
+        self.psd_worker.start()
+
+    def _exit_psd_mode(self):
+        worker = getattr(self, "psd_worker", None)
+        if worker is not None:
+            worker.stop()
+            self.psd_worker = None
+        self.view_stack.setCurrentIndex(0)
+        self.sidebar_stack.setCurrentIndex(0)
+        self._event_log.log("psd_mode", entered=False)
+
+    def _run_psd(self):
+        worker = getattr(self, "psd_worker", None)
+        if worker is None:
+            return
+        worker.set_algorithm(self.psd_algo_combo.currentData())
+        worker.set_max_decimation(self.psd_decimation_spin.value())
+        worker.start_psd()
+        self._event_log.log(
+            "psd_start",
+            algorithm=int(self.psd_algo_combo.currentData()),
+            max_decimation=self.psd_decimation_spin.value(),
+        )
+        self._set_colored_text(self.psd_status_label, "Starting...", "#ff9f40")
+
+    def _run_pid_optimization(self):
+        worker = getattr(self, "psd_worker", None)
+        if worker is None:
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Optimize PID",
+            "Run linien's PID optimization?\n\n"
+            "This actively changes the lock's P/I gains on the Red Pitaya "
+            "while it measures — the lock must be engaged, and it can take "
+            "several minutes.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if confirm != QtWidgets.QMessageBox.Yes:
+            return
+        worker.start_pid_optimization()
+        self._event_log.log("pid_opt_start")
+        self._set_colored_text(self.psd_status_label, "Starting...", "#ff9f40")
+
+    def _on_psd_connection(self, status):
+        self._log_connection("psd", status)
+        if status == "no_host":
+            self._set_colored_text(
+                self.psd_status_label, "No RP host set", "#dd5050"
+            )
+        elif status.startswith("error"):
+            self._set_colored_text(self.psd_status_label, "Error", "#dd5050")
+            self.psd_status_label.setToolTip(status)
+
+    def _on_psd_status(self, state):
+        acquiring = bool(state.get("acquiring"))
+        optimizing = bool(state.get("optimizing"))
+        busy = acquiring or optimizing
+        if optimizing:
+            self._set_colored_text(
+                self.psd_status_label, "Optimizing PID...", "#ff9f40"
+            )
+        elif acquiring:
+            self._set_colored_text(
+                self.psd_status_label, "Acquiring PSD...", "#ff9f40"
+            )
+        else:
+            self._set_colored_text(self.psd_status_label, "Idle", "#c0c0d4")
+        self.psd_view_status.setText(
+            "OPTIMIZING" if optimizing else "ACQUIRING" if acquiring else ""
+        )
+        self.psd_run_btn.setEnabled(not busy)
+        self.psd_opt_btn.setEnabled(not busy)
+        self._set_lock_label(self.psd_lock_label, bool(state.get("locked")))
+        self.psd_pid_label.setText(
+            f"{state.get('p', 0)} / {state.get('i', 0)} / {state.get('d', 0)}"
+        )
+        previous = self._psd_prev_status
+        if previous.get("optimizing") and not optimizing:
+            self._event_log.log(
+                "pid_opt_done", p=state.get("p"), i=state.get("i")
+            )
+        self._psd_prev_status = state
+
+    def _on_psd_data(self, payload):
+        fitness = payload.get("fitness")
+        if fitness is not None:
+            self.psd_fitness_label.setText(f"{fitness:.3e}")
+        self._plot_psd_run(payload)
+        if payload.get("complete"):
+            self._event_log.log(
+                "psd_complete",
+                fitness=float(fitness) if fitness is not None else None,
+                p=payload.get("p"),
+                i=payload.get("i"),
+                d=payload.get("d"),
+                uuid=payload.get("uuid"),
+            )
+
+    def _plot_psd_run(self, payload):
+        uuid = payload.get("uuid") or "run"
+        run = self._psd_runs.get(uuid)
+        if run is None:
+            color = PSD_RUN_COLORS[self._psd_color_index % len(PSD_RUN_COLORS)]
+            self._psd_color_index += 1
+            run = {"color": color, "curves": [], "legend_added": False}
+            self._psd_runs[uuid] = run
+        for curve in run["curves"]:
+            self.psd_plot.removeItem(curve)
+        run["curves"] = []
+
+        pen = pg.mkPen(run["color"], width=2)
+        first = True
+        for decimation in sorted(payload.get("psds", {})):
+            freqs, asd = payload["psds"][decimation]
+            freqs = np.asarray(freqs, dtype=float)
+            asd = np.asarray(asd, dtype=float)
+            mask = (freqs > 0) & (asd > 0)  # log-log plot
+            if not mask.any():
+                continue
+            name = None
+            if first and not run["legend_added"]:
+                name = f"P={payload.get('p')} I={payload.get('i')}"
+                run["legend_added"] = True
+            curve = self.psd_plot.plot(
+                freqs[mask], asd[mask], pen=pen, name=name
+            )
+            run["curves"].append(curve)
+            first = False
+
+    def _clear_psd_plot(self):
+        for run in self._psd_runs.values():
+            for curve in run["curves"]:
+                self.psd_plot.removeItem(curve)
+        self._psd_runs = {}
+        self._psd_color_index = 0
+        if self._psd_legend is not None:
+            self._psd_legend.clear()
+        self.psd_fitness_label.setText("--")
+
+    def _on_psd_algorithm(self, _index):
+        value = int(self.psd_algo_combo.currentData())
+        self._settings.setValue("psd/algorithm", value)
+        self._event_log.log("setpoint", name="psd_algorithm", value=value)
+        worker = getattr(self, "psd_worker", None)
+        if worker is not None:
+            worker.set_algorithm(value)
+
+    def _on_psd_decimation(self, value):
+        self._settings.setValue("psd/max_decimation", value)
+        self._debounced_log(
+            "psd_decimation",
+            "setpoint",
+            lambda: {
+                "name": "psd_max_decimation",
+                "value": self.psd_decimation_spin.value(),
+            },
+        )
+        worker = getattr(self, "psd_worker", None)
+        if worker is not None:
+            worker.set_max_decimation(value)
 
     # ------------------------------------------------------------------
     # Shared status helpers / cleanup

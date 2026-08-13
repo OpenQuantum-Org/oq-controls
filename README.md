@@ -114,6 +114,50 @@ The override is locked out while a fire is running.
 - Slider drags are coalesced into single hardware writes (latest value
   wins) instead of replaying every intermediate step.
 
+## Lock PID and config snapshots
+
+`Set PID...` (Linien Lock card) opens a dialog pre-filled with the
+current P/I/D gains read from the Red Pitaya (each 0–8191) and writes
+them back on Apply; changes are logged as `pid_set` events.
+
+`Save Config As...` (Config card) exports a timestamped JSON snapshot of
+every control setting — connections, lock parameters, live PID, error
+signal filters, laser setpoints (with the estimated temperature), repump
+V_tune/VCO frequency, coil setpoints, the dispenser operating point and
+fire history, and the PSD settings. `Load Config...` applies a snapshot
+back: setpoints go to the hardware where connected, partial configs are
+fine (missing keys are left unchanged), dispenser settings are
+confirmation-gated, port/host changes take effect on Connect / Reconnect,
+and the fire history/cooldown are never loaded (they are device truth).
+Loads and saves are logged.
+
+## Error signal filters
+
+The collapsible "Error Signal Filters" card exposes Linien's two IIR
+stages on the demodulated error signal (channel A): an Automatic mode
+(two low-passes at half the modulation frequency — Linien's default) or
+manual control of each stage's enable, low/high-pass type, and corner
+frequency. Settings are read from the device when Linien connects (and
+via `Read from Device`); edits are pushed to the server after a short
+debounce. Note Linien keeps a disabled stage in the signal path at unity
+gain to preserve the propagation delay.
+
+## Lock PSD measurement
+
+`Measure Lock PSD...` (Linien Lock card) switches the plot area to a
+log-log error-signal noise view and the sidebar to the PSD panel:
+algorithm (LPSD or Welch), max decimation (deeper reaches lower Fourier
+frequencies but takes ~16x longer per +4; default 18), `Run PSD
+Measurement`, `Optimize PID` (confirmation required — it actively changes
+the lock's P/I gains on the Red Pitaya while measuring), `Clear Plot`,
+and `Exit PSD Mode`. Successive runs overlay in different colors with
+their PID settings in the legend, so you can compare lock configurations
+directly; each completed run also logs a `psd_complete` event with
+linien's integrated-noise "fitness" — trend it as a lock-health metric.
+Measure while locked. The live spectroscopy trace pauses during the raw
+acquisition stages, and exiting the mode does not abort an in-flight
+acquisition on the server (it finishes on its own).
+
 ## Event log
 
 Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` next to the
