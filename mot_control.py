@@ -83,11 +83,30 @@ def load_app_fonts():
             print(f"! font family not available, using fallback: {family}")
 
 
+# The shared EIT stylesheet's text colors are too dim for lab use; these
+# later rules (and _apply_contrast_remap for widget-level styles) brighten
+# text while keeping the visual hierarchy.
+CONTRAST_REMAP = {
+    "#6a6a80": "#a0a0b4",  # tiny/de-emphasized labels
+    "#7a7a90": "#c0c0d4",  # shared section-title class
+    "#8888a0": "#c0c0d4",  # row labels / idle statuses
+    "#9a9ab0": "#c8c8da",  # log text
+    "#a0a0b8": "#d0d0e0",  # linien overlay labels
+    "#b0b0c8": "#ececf4",  # readout values
+    "#c0c0d0": "#ececf4",  # button/combo/edit text
+}
+
+
 def build_app_stylesheet():
     return APP_STYLESHEET + (
         "\n* {"
         f' font-family: "{BODY_FONT_FAMILY}", "Helvetica Neue",'
         ' "Segoe UI", sans-serif; }\n'
+        "QPushButton { color: #ececf4; }\n"
+        "QLineEdit { color: #f0f0f8; }\n"
+        "QLabel.readout-label { color: #a0a0b4; }\n"
+        "QLabel.readout-value { color: #ececf4; }\n"
+        "QLabel.section-title { color: #c0c0d4; }\n"
     )
 
 
@@ -164,33 +183,18 @@ _MOD_GAIN = 2.5e-3
 _CURRENT_COEFF = 2.0e-9
 V_TO_GHZ = -_C / _LAMBDA_0**2 * _MOD_GAIN * _CURRENT_COEFF / 1e9
 
-# Repump VCO tuning curve from the datasheet @25 C: V_tune (V) -> output
-# frequency (MHz), linear interpolation between points, clamped at the ends.
-# The DAC Click reaches 0-5 V of this curve (~1790-2382 MHz).
-_VCO_VTUNE_V = [
-    0.00, 0.50, 1.00, 1.50, 2.00, 3.00, 4.00, 5.00, 6.00, 6.50,
-    7.00, 8.00, 9.00, 10.00, 11.00, 12.00, 12.50, 13.00, 13.50, 14.00,
-]
-_VCO_FREQ_MHZ = [
-    1790.1, 1888.8, 1967.3, 2034.2, 2094.4, 2199.9, 2294.2, 2381.7, 2466.0,
-    2505.7, 2546.8, 2625.8, 2703.8, 2782.1, 2861.2, 2940.8, 2979.7, 3019.9,
-    3058.0, 3096.2,
-]
+# Repump VCO tuning range: the DAC's 0-5 V V_tune span covers
+# 2800-2970 MHz (measured on this VCO — the old qMOT-os datasheet table
+# did not match the actual hardware). Linear, clamped at the ends.
+VCO_FREQ_MIN_MHZ = 2800.0
+VCO_FREQ_MAX_MHZ = 2970.0
+VCO_VTUNE_SPAN_V = 5.0
 
 
 def vtune_to_vco_mhz(vtune_v: float) -> float:
     """Convert a repump V_tune voltage to the VCO output frequency in MHz."""
-    from bisect import bisect_left
-
-    if vtune_v <= _VCO_VTUNE_V[0]:
-        return _VCO_FREQ_MHZ[0]
-    if vtune_v >= _VCO_VTUNE_V[-1]:
-        return _VCO_FREQ_MHZ[-1]
-    i = bisect_left(_VCO_VTUNE_V, vtune_v)
-    v0, v1 = _VCO_VTUNE_V[i - 1], _VCO_VTUNE_V[i]
-    f0, f1 = _VCO_FREQ_MHZ[i - 1], _VCO_FREQ_MHZ[i]
-    w = (vtune_v - v0) / (v1 - v0)
-    return f0 + w * (f1 - f0)
+    fraction = max(0.0, min(1.0, vtune_v / VCO_VTUNE_SPAN_V))
+    return VCO_FREQ_MIN_MHZ + fraction * (VCO_FREQ_MAX_MHZ - VCO_FREQ_MIN_MHZ)
 
 
 def thermistor_ohms_to_c(ohms: float) -> float:
@@ -207,7 +211,7 @@ def thermistor_ohms_to_c(ohms: float) -> float:
 COMBO_STYLE = """
     QComboBox {
         background: #12121a;
-        color: #c0c0d0;
+        color: #ececf4;
         border: 1px solid #1e1e2e;
         border-radius: 4px;
         padding: 2px 6px;
@@ -223,7 +227,7 @@ COMBO_STYLE = """
     }
     QComboBox QAbstractItemView {
         background: #12121a;
-        color: #c0c0d0;
+        color: #ececf4;
         selection-background-color: #2a4a80;
         selection-color: white;
         outline: none;
@@ -235,7 +239,7 @@ def _style_combo(combo):
     combo.setStyleSheet(COMBO_STYLE)
     try:
         combo.view().setStyleSheet(
-            "background: #12121a; color: #c0c0d0;"
+            "background: #12121a; color: #ececf4;"
             "selection-background-color: #2a4a80; selection-color: white;"
         )
     except Exception:
@@ -324,7 +328,7 @@ class CollapsibleCard(QtWidgets.QFrame):
         header.addStretch()
         self.header_status = QtWidgets.QLabel("")
         self.header_status.setStyleSheet(
-            "color: #8888a0; font-size: 11px; font-weight: 600; border: none;"
+            "color: #c0c0d4; font-size: 11px; font-weight: 600; border: none;"
         )
         header.addWidget(self.header_status)
         outer.addLayout(header)
@@ -346,7 +350,7 @@ class CollapsibleCard(QtWidgets.QFrame):
     def set_expanded(self, expanded):
         self.toggle_btn.setChecked(bool(expanded))
 
-    def set_status(self, text, color="#8888a0"):
+    def set_status(self, text, color="#c0c0d4"):
         self.header_status.setText(text)
         self.header_status.setStyleSheet(
             f"color: {color}; font-size: 11px; font-weight: 600; border: none;"
@@ -425,7 +429,7 @@ class CameraViewWidget(QtWidgets.QWidget):
         self.message_label = QtWidgets.QLabel("No USB camera found")
         self.message_label.setAlignment(QtCore.Qt.AlignCenter)
         self.message_label.setStyleSheet(
-            "color: #8888a0; font-size: 16px; font-weight: 700;"
+            "color: #c0c0d4; font-size: 16px; font-weight: 700;"
             "border: 1px solid #1e1e2a; border-radius: 8px;"
             "background: #0a0a0f; padding: 24px;"
         )
@@ -613,7 +617,7 @@ class DeviceConfigDialog(QtWidgets.QDialog):
         discovered_layout.addWidget(make_section_title("Discovered USB Devices"))
         self.discovered_list = QtWidgets.QListWidget()
         self.discovered_list.setStyleSheet(
-            "QListWidget { background: #0e0e16; color: #c0c0d0;"
+            "QListWidget { background: #0e0e16; color: #ececf4;"
             "border: 1px solid #1e1e2a; border-radius: 6px; }"
             "QListWidget::item { padding: 4px; }"
         )
@@ -623,7 +627,7 @@ class DeviceConfigDialog(QtWidgets.QDialog):
 
         self.hint_label = QtWidgets.QLabel("")
         self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet("color: #8888a0; border: none;")
+        self.hint_label.setStyleSheet("color: #c0c0d4; border: none;")
         root.addWidget(self.hint_label)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -826,6 +830,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Route event-log records into the log pane (GUI thread only).
         self._event_log.on_record = self._on_log_record
 
+        self._apply_contrast_remap()
+
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
         self._wheel_guard = WheelGuard(self)
@@ -874,6 +880,42 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # Small UI helpers
     # ------------------------------------------------------------------
 
+    def _apply_contrast_remap(self):
+        """Brighten dim text colors in widget-level stylesheets.
+
+        mot_control's own styles already use the bright palette; this
+        sweep catches widgets built by the shared eit-controls helpers
+        (slider/readout row labels, the Linien overlay labels) without
+        modifying that repo.
+        """
+        for widget in self.findChildren(QtWidgets.QWidget):
+            sheet = widget.styleSheet()
+            if not sheet:
+                continue
+            updated = sheet
+            for dim, bright in CONTRAST_REMAP.items():
+                updated = updated.replace(dim, bright)
+            if updated != sheet:
+                widget.setStyleSheet(updated)
+
+        # The pyqtgraph axes are not stylesheet-driven: brighten tick text
+        # and the axis labels directly (best-effort, eit internals).
+        try:
+            plot_item = self.linien_widget.plot
+            for name in ("bottom", "left"):
+                axis = plot_item.getAxis(name)
+                axis.setTextPen(pg.mkPen("#c8c8da"))
+                if getattr(axis, "labelText", ""):
+                    style = dict(getattr(axis, "labelStyle", {}) or {})
+                    style["color"] = "#c8c8da"
+                    axis.setLabel(
+                        axis.labelText,
+                        units=getattr(axis, "labelUnits", None) or None,
+                        **style,
+                    )
+        except Exception as e:
+            print(f"! plot axis restyle skipped: {e}")
+
     @staticmethod
     def _tip(text, *widgets, help_cursor=False):
         """Attach a hover tooltip; help_cursor shows a (?) cursor on hover."""
@@ -907,18 +949,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.usb_card.set_expanded(
             self._bool_setting("ui/usb_card_expanded", False)
         )
-        self.log_card.set_expanded(
-            self._bool_setting("ui/log_card_expanded", False)
-        )
-        # Persist expansion choices as they happen.
+        # Persist the USB card's expansion; the event log deliberately
+        # always starts collapsed.
         self.usb_card.toggle_btn.toggled.connect(
             lambda expanded: self._settings.setValue(
                 "ui/usb_card_expanded", bool(expanded)
-            )
-        )
-        self.log_card.toggle_btn.toggled.connect(
-            lambda expanded: self._settings.setValue(
-                "ui/log_card_expanded", bool(expanded)
             )
         )
 
@@ -1018,7 +1053,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.menuBar().setStyleSheet("""
             QMenuBar {
                 background: #0a0a0f;
-                color: #c0c0d0;
+                color: #ececf4;
                 border-bottom: 1px solid #1e1e2a;
             }
             QMenuBar::item {
@@ -1031,7 +1066,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             }
             QMenu {
                 background: #12121a;
-                color: #c0c0d0;
+                color: #ececf4;
                 border: 1px solid #1e1e2a;
             }
             QMenu::item:selected {
@@ -1070,10 +1105,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             chip = QtWidgets.QLabel("--")
             title_row.addWidget(chip)
             self.health_chips[key] = chip
-        self._set_chip("lock", "LOCK --", "#8888a0")
-        self._set_chip("usb", "USB --", "#8888a0")
-        self._set_chip("coils", "COILS OFF", "#8888a0")
-        self._set_chip("disp", "DISP IDLE", "#8888a0")
+        self._set_chip("lock", "LOCK --", "#c0c0d4")
+        self._set_chip("usb", "USB --", "#c0c0d4")
+        self._set_chip("coils", "COILS OFF", "#c0c0d4")
+        self._set_chip("disp", "DISP IDLE", "#c0c0d4")
         self._tip(
             "System health: laser lock, USB devices, MOT coils, dispenser.",
             *self.health_chips.values(),
@@ -1096,7 +1131,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.camera_toggle = QtWidgets.QCheckBox("Show USB Camera")
         self.camera_toggle.setCursor(QtCore.Qt.PointingHandCursor)
         self.camera_toggle.setStyleSheet(
-            "QCheckBox { color: #c0c0d0; font-size: 12px; font-weight: 700;"
+            "QCheckBox { color: #ececf4; font-size: 12px; font-weight: 700;"
             "border: none; padding: 4px 6px; }"
             "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
@@ -1264,7 +1299,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFixedHeight(150)
         self.log_view.setStyleSheet(
-            "QPlainTextEdit { background: #0a0a0f; color: #9a9ab0;"
+            "QPlainTextEdit { background: #0a0a0f; color: #c8c8da;"
             "border: 1px solid #1e1e2a; border-radius: 6px;"
             "font-size: 11px; padding: 4px; }"
         )
@@ -1285,7 +1320,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         row.addWidget(edit, stretch=1)
         status = QtWidgets.QLabel("--")
         status.setStyleSheet(
-            "color: #8888a0; font-size: 12px; font-weight: 700; border: none;"
+            "color: #c0c0d4; font-size: 12px; font-weight: 700; border: none;"
         )
         status.setFixedWidth(84)
         status.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1419,9 +1454,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.current_slider, self.current_edit = add_slider_row(
             layout,
             "Current:",
-            0,
-            200,
-            self._int_setting("laser/current_ma", 130, 0, 200),
+            50,
+            100,
+            self._int_setting("laser/current_ma", 80, 50, 100),
             single=1,
             page=5,
             suffix=" mA",
@@ -1436,8 +1471,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             layout,
             "Thermistor:",
             5000,
-            10000,
-            self._int_setting("laser/thermistor_ohm", 6215, 5000, 10000),
+            15000,
+            self._int_setting("laser/thermistor_ohm", 6215, 5000, 15000),
             single=1,
             page=50,
             suffix=" \N{OHM SIGN}",
@@ -1613,8 +1648,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.vtune_freq_readback = add_readout_row(layout, "VCO Freq:", "--")
         self._tip(
-            "Repump VCO output frequency from the datasheet tuning curve\n"
-            "(V_tune -> MHz, 25 \N{DEGREE SIGN}C).",
+            "Repump VCO output frequency: 0-5 V V_tune spans\n"
+            f"{VCO_FREQ_MIN_MHZ:.0f}-{VCO_FREQ_MAX_MHZ:.0f} MHz (linear).",
             self.vtune_freq_readback,
             help_cursor=True,
         )
@@ -1644,7 +1679,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.vtune_edit,
         )
 
-        self.repump_gpio_btn = QtWidgets.QPushButton("Repump Gate Off")
+        self.repump_gpio_btn = QtWidgets.QPushButton("Repump Off")
         self.repump_gpio_btn.setCheckable(True)
         self.repump_gpio_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.repump_gpio_btn.toggled.connect(self._toggle_repump_gpio)
@@ -1670,7 +1705,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _small_label(text):
         label = QtWidgets.QLabel(text)
         label.setStyleSheet(
-            "color: #8888a0; font-size: 12px; font-weight: 600; border: none;"
+            "color: #c0c0d4; font-size: 12px; font-weight: 600; border: none;"
         )
         label.setFixedWidth(120)
         return label
@@ -1679,7 +1714,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _tiny_label(text):
         label = QtWidgets.QLabel(text)
         label.setStyleSheet(
-            "color: #6a6a80; font-size: 11px; font-weight: 600; border: none;"
+            "color: #a0a0b4; font-size: 11px; font-weight: 600; border: none;"
         )
         return label
 
@@ -1735,10 +1770,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Serial workers hold their ports open; release them for probing.
         self._stop_serial_workers()
 
-        self._set_chip("usb", "USB ...", "#8888a0")
+        self._set_chip("usb", "USB ...", "#c0c0d4")
         self.usb_card.set_status("Probing…")
         for attr in self._USB_STATUS_ROWS:
-            self._set_colored_text(getattr(self, attr), "Probing…", "#8888a0")
+            self._set_colored_text(getattr(self, attr), "Probing…", "#c0c0d4")
 
         self.probe_worker = SerialProbeWorker(
             saved={
@@ -2155,7 +2190,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         text = f"{current_a:.2f} A CC / {seconds:.0f} s fire"
         if is_default:
-            self._set_colored_text(self.dispenser_setpoint_label, text, "#8888a0")
+            self._set_colored_text(self.dispenser_setpoint_label, text, "#c0c0d4")
         else:
             self._set_colored_text(
                 self.dispenser_setpoint_label, text + "  (OVERRIDE)", "#ff9f40"
@@ -2203,7 +2238,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         elif state.get("output_enabled"):
             self._set_chip("coils", f"COILS {state['i_out']:.1f} A", "#40dd80")
         else:
-            self._set_chip("coils", "COILS OFF", "#8888a0")
+            self._set_chip("coils", "COILS OFF", "#c0c0d4")
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
@@ -2232,7 +2267,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if show_mode and state.get("output_enabled"):
             text += " / CC" if state.get("cv_cc") else " / CV"
         label.setText(text)
-        label.setStyleSheet("color: #b0b0c8; font-size: 13px; border: none;")
+        label.setStyleSheet("color: #ececf4; font-size: 13px; border: none;")
 
     @staticmethod
     def _sync_output_button(button, state, on_text, off_text):
@@ -2280,8 +2315,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
-            self._set_colored_text(self.dispenser_fire_label, "Idle", "#8888a0")
-            self._set_chip("disp", "DISP IDLE", "#8888a0")
+            self._set_colored_text(self.dispenser_fire_label, "Idle", "#c0c0d4")
+            self._set_chip("disp", "DISP IDLE", "#c0c0d4")
 
     def _update_dispenser_progress(self, phase, remaining):
         if phase == "firing":
@@ -2375,9 +2410,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.vtune_edit.setText(f"{volts:.3f} V")
 
     def _toggle_repump_gpio(self, checked):
-        self.repump_gpio_btn.setText(
-            "Repump Gate On" if checked else "Repump Gate Off"
-        )
+        self.repump_gpio_btn.setText("Repump On" if checked else "Repump Off")
         self._event_log.log("repump_gate", on=bool(checked))
         worker = getattr(self, "repump_gpio_worker", None)
         if worker is not None:
@@ -2386,9 +2419,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_repump_gpio_state(self, enabled):
         self.repump_gpio_btn.blockSignals(True)
         self.repump_gpio_btn.setChecked(enabled)
-        self.repump_gpio_btn.setText(
-            "Repump Gate On" if enabled else "Repump Gate Off"
-        )
+        self.repump_gpio_btn.setText("Repump On" if enabled else "Repump Off")
         self.repump_gpio_btn.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -2405,11 +2436,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if status.startswith("connected"):
             text, color = "OK", "#40dd80"
         elif status in ("no_port", "no_host"):
-            text, color = "No port", "#8888a0"
+            text, color = "No port", "#c0c0d4"
         elif status.startswith("error"):
             text, color = "Error", "#dd5050"
         else:
-            text, color = "--", "#8888a0"
+            text, color = "--", "#c0c0d4"
         label.setText(text)
         label.setToolTip(status)
         label.setStyleSheet(
@@ -2426,7 +2457,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             color = "#40dd80"
         elif status in ("no_port", "no_host"):
             text = "Not configured"
-            color = "#8888a0"
+            color = "#c0c0d4"
         elif status.startswith("error:"):
             text = "Error"
             color = "#dd5050"
@@ -2509,7 +2540,9 @@ def main():
     # setFont covers non-stylesheet text (e.g. pyqtgraph axis labels).
     app.setFont(QtGui.QFont(BODY_FONT_FAMILY))
     app.setStyleSheet(build_app_stylesheet())
-    pg.setConfigOptions(useOpenGL=False, enableExperimental=False)
+    pg.setConfigOptions(
+        useOpenGL=False, enableExperimental=False, foreground="#c8c8da"
+    )
 
     window = OpenQuantumControlsWindow(
         rp_host=args.rp_host,

@@ -174,16 +174,15 @@ w6 = DispenserWorker(port=None, fire_seconds=None, dispense_current_a=0)
 assert w6.fire_seconds == 30.0
 assert w6.dispense_current_a == 7.5
 
-# --- VCO tuning curve ---
+# --- VCO tuning range: 0-5 V spans 2800-2970 MHz, linear, clamped ---
 from mot_control import thermistor_ohms_to_c, vtune_to_vco_mhz  # noqa: E402
 
-assert vtune_to_vco_mhz(-1.0) == 1790.1        # clamped low
-assert vtune_to_vco_mhz(0.0) == 1790.1         # table point
-assert vtune_to_vco_mhz(5.0) == 2381.7         # table point (DAC full scale)
-assert vtune_to_vco_mhz(20.0) == 3096.2        # clamped high
-mid = vtune_to_vco_mhz(2.5)                    # midpoint of 2.0->3.0 segment
-assert abs(mid - (2094.4 + 2199.9) / 2) < 1e-9, mid
-assert abs(vtune_to_vco_mhz(0.25) - (1790.1 + 1888.8) / 2) < 1e-9
+assert vtune_to_vco_mhz(-1.0) == 2800.0        # clamped low
+assert vtune_to_vco_mhz(0.0) == 2800.0
+assert vtune_to_vco_mhz(5.0) == 2970.0         # DAC full scale
+assert vtune_to_vco_mhz(20.0) == 2970.0        # clamped high
+assert abs(vtune_to_vco_mhz(2.5) - 2885.0) < 1e-9   # midpoint
+assert abs(vtune_to_vco_mhz(1.0) - 2834.0) < 1e-9   # 2800 + 0.2 * 170
 
 # --- Thermistor Steinhart-Hart conversion ---
 assert abs(thermistor_ohms_to_c(10000) - 25.0) < 1.5   # 10 k NTC ~ 25 C

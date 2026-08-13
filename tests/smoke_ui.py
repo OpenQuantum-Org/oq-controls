@@ -47,7 +47,9 @@ app = QtWidgets.QApplication([])
 mot_control.load_app_fonts()
 app.setFont(QtGui.QFont(mot_control.BODY_FONT_FAMILY))
 app.setStyleSheet(mot_control.build_app_stylesheet())
-pg.setConfigOptions(useOpenGL=False, enableExperimental=False)
+pg.setConfigOptions(
+    useOpenGL=False, enableExperimental=False, foreground="#c8c8da"
+)
 
 # Both bundled families must register (byte-based loading — the
 # path-based Qt API silently fails on this Qt build).
@@ -134,17 +136,22 @@ try:
             needed = fm.horizontalAdvance(text) + 20  # padding + border
             assert needed <= edit.width(), (text, needed, edit.width())
 
+    # Laser slider ranges: current 50-100 mA, thermistor up to 15000 ohm.
+    assert window.current_slider.minimum() == 50
+    assert window.current_slider.maximum() == 100
+    assert window.therm_slider.maximum() == 15000
+
     # Typed entry: the value boxes now drive the sliders (with clamping,
     # suffix tolerance, and garbage rejection).
-    window.current_slider.setValue(130)
-    window.current_edit.setText("142")
+    window.current_slider.setValue(90)
+    window.current_edit.setText("95")
     window.current_edit.editingFinished.emit()
-    assert window.current_slider.value() == 142
-    assert window.current_edit.text() == "142 mA"
+    assert window.current_slider.value() == 95
+    assert window.current_edit.text() == "95 mA"
     window.current_edit.setText("999 mA")
     window.current_edit.editingFinished.emit()
-    assert window.current_slider.value() == 200  # clamped to slider max
-    assert window.current_edit.text() == "200 mA"
+    assert window.current_slider.value() == 100  # clamped to slider max
+    assert window.current_edit.text() == "100 mA"
     window.mod_freq_edit.setText("17.5 MHz")
     window.mod_freq_edit.editingFinished.emit()
     assert window.mod_freq_slider.value() == 17500
@@ -279,8 +286,15 @@ try:
     assert window.vtune_slider.value() == 3300
     assert window.vtune_freq_readback.text().endswith("MHz")
     window._on_vtune_readback(5.0)
-    assert window.vtune_freq_readback.text() == "2381.7 MHz"
+    assert window.vtune_freq_readback.text() == "2970.0 MHz"
     assert window.vtune_slider.value() == 3300  # later readbacks don't move it
+
+    # Repump button wording (no "Gate").
+    assert window.repump_gpio_btn.text() == "Repump Off"
+    window._on_repump_gpio_state(True)
+    assert window.repump_gpio_btn.text() == "Repump On"
+    window._on_repump_gpio_state(False)
+    assert window.repump_gpio_btn.text() == "Repump Off"
 
     # --- Dispenser override dialog + apply flow (modal exec skipped) ---
     dlg = mot_control.DispenserOverrideDialog(window, 7.5, 30.0)
@@ -306,6 +320,14 @@ try:
     assert "dispenser_override" in window.log_view.toPlainText()
     assert "dispenser_fire_end" in window.log_view.toPlainText()
     assert window.log_card.header_status.text() != ""
+
+    # High-contrast palette: after the remap sweep and all the runtime
+    # status updates above, no widget stylesheet may still carry the old
+    # dim text colors.
+    for widget in window.findChildren(QtWidgets.QWidget):
+        sheet = widget.styleSheet()
+        for dim in mot_control.CONTRAST_REMAP:
+            assert dim not in sheet, (type(widget).__name__, dim, sheet[:80])
 
     # Tooltips exist across the app (hover help).
     for tipped in (
@@ -399,16 +421,16 @@ try:
     w1 = mot_control.OpenQuantumControlsWindow()
     w1.show()
     app.processEvents()
-    # UI state restored from the same isolated settings file.
+    # UI state restored from the same isolated settings file — except the
+    # event log, which always starts collapsed.
     assert w1.usb_card.content.isVisibleTo(w1.usb_card)  # was left expanded
-    assert w1.log_card.content.isVisibleTo(w1.log_card)
+    assert not w1.log_card.content.isVisibleTo(w1.log_card)
     assert w1._settings.value("ui/geometry") is not None
     assert w1._settings.value("ui/splitter_sizes") is not None
     w1.usb_card.set_expanded(False)
-    w1.log_card.set_expanded(False)
     w1.mod_freq_slider.setValue(23456)
-    w1.current_slider.setValue(155)
-    w1.therm_slider.setValue(7000)
+    w1.current_slider.setValue(95)
+    w1.therm_slider.setValue(12000)
     w1.mot_coil_voltage_slider.setValue(12000)
     w1.mot_coil_current_slider.setValue(2500)
     w1.vtune_slider.setValue(3300)
@@ -420,8 +442,8 @@ try:
 
     w2 = mot_control.OpenQuantumControlsWindow()
     assert w2.mod_freq_slider.value() == 23456
-    assert w2.current_slider.value() == 155
-    assert w2.therm_slider.value() == 7000
+    assert w2.current_slider.value() == 95
+    assert w2.therm_slider.value() == 12000
     assert w2.mot_coil_voltage_slider.value() == 12000
     assert w2.mot_coil_current_slider.value() == 2500
     assert w2.vtune_slider.value() == 3300

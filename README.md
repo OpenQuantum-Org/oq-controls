@@ -13,8 +13,8 @@ the MOT supplies and repump tune/gate controls.
 - Repump VCO tune voltage (V_tune) through the MikroE DAC Click (MCP4921) on
   the Red Pitaya Click Shield, socket 1 — driven via the patched
   linien-server's `dac_click_voltage` parameter (see below). The UI shows the
-  resulting VCO output frequency from the datasheet tuning curve (@25 C,
-  linear interpolation; 0–5 V spans ~1790–2382 MHz)
+  resulting VCO output frequency (measured tuning range: 0–5 V spans
+  2800–2970 MHz, linear)
 - Repump RF gate through a Linien Red Pitaya GPIO bit — fixed at `DIO1_N`
   (bank `n`, bit 1), **active-low** (the RF amp enable on Click Shield
   socket 2, the empirically verified mapping)
