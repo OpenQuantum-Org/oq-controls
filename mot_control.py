@@ -850,6 +850,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._psd_prev_status = {}
         self._filters_syncing = False
 
+        self._chip_state = {}
         self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
         self._readback_log_output = {}
@@ -936,15 +937,44 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             if help_cursor:
                 widget.setCursor(QtCore.Qt.WhatsThisCursor)
 
+    # Each status shows in the header of the card that owns it, rather
+    # than in a separate strip. Coils and dispenser share one card, so
+    # their two statuses are joined into that header.
+    _CHIP_CARDS = {
+        "lock": "lock_card",
+        "usb": "usb_card",
+        "coils": "dps_card",
+        "disp": "dps_card",
+    }
+    _CHIP_NEUTRAL = "#ababab"
+
     def _set_chip(self, key, text, color):
-        chip = self.health_chips[key]
-        chip.setText(text)
-        chip.setStyleSheet(
-            f"color: {color}; font-size: 13px; font-weight: 700;"
-            "border: 1px solid #282828; border-radius: 0px;"
-            "padding: 5px 10px; background: #111111;"
-            f'font-family: "{TITLE_FONT_FAMILY}";'
+        self._chip_state[key] = (text, color)
+        self._refresh_card_status(self._CHIP_CARDS[key])
+
+    def chip_text(self, key):
+        """Current status text for a key, independent of how it is shown."""
+        return self._chip_state.get(key, ("", ""))[0]
+
+    def _refresh_card_status(self, card_attr):
+        card = getattr(self, card_attr, None)
+        if card is None:
+            return  # card not built yet during startup
+        parts = [
+            self._chip_state[key]
+            for key in self._CHIP_CARDS
+            if self._CHIP_CARDS[key] == card_attr and key in self._chip_state
+        ]
+        if not parts:
+            return
+        text = "  ".join(part[0] for part in parts)
+        # Whichever part is not neutral wins, so a trip is never hidden
+        # behind an idle sibling.
+        color = next(
+            (c for _t, c in parts if c != self._CHIP_NEUTRAL),
+            self._CHIP_NEUTRAL,
         )
+        card.set_status(text, color)
 
     def _restore_ui_state(self):
         geometry = self._settings.value("ui/geometry")
@@ -1092,22 +1122,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         title_row.addWidget(self.title_label)
         title_row.addStretch()
 
-        # Health strip: one glance from across the lab tells you the state
-        # of the lock, the USB devices, the coils, and the dispenser.
-        self.health_chips = {}
-        for key in ("lock", "usb", "coils", "disp"):
-            chip = QtWidgets.QLabel("--")
-            title_row.addWidget(chip)
-            self.health_chips[key] = chip
-        self._set_chip("lock", "LOCK --", "#ababab")
-        self._set_chip("usb", "USB --", "#ababab")
-        self._set_chip("coils", "COILS OFF", "#ababab")
-        self._set_chip("disp", "DISP IDLE", "#ababab")
-        self._tip(
-            "System health: laser lock, USB devices, MOT coils, dispenser.",
-            *self.health_chips.values(),
-            help_cursor=True,
-        )
+        # Statuses live in each card's header, not in a strip up here.
+        self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
+        self._set_chip("usb", "USB --", self._CHIP_NEUTRAL)
+        self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
+        self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
         left.addLayout(title_row)
 
         normal_view = QtWidgets.QWidget()
@@ -1233,6 +1252,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._add_dps_card(layout)
         self._add_config_card(layout)
         self._add_log_card(layout)
+        for card_attr in set(self._CHIP_CARDS.values()):
+            self._refresh_card_status(card_attr)
         layout.addStretch()
 
         # The sidebar swaps between the normal control cards and the PSD
@@ -1671,6 +1692,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _add_lock_card(self, parent):
         card = CollapsibleCard("Linien Lock", collapsed=False)
+        self.lock_card = card
         layout = card.content_layout
 
         self.mod_freq_slider, self.mod_freq_edit = add_slider_row(
@@ -2166,7 +2188,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._stop_serial_workers()
 
         self._set_chip("usb", "USB ...", "#ababab")
-        self.usb_card.set_status("Probing…")
         for attr in self._USB_STATUS_ROWS:
             self._set_colored_text(getattr(self, attr), "Probing…", "#ababab")
 
@@ -2213,7 +2234,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         if res.get("ok"):
             self._set_chip("usb", "USB 3/3", "#6f9e7c")
-            self.usb_card.set_status("3/3 verified", "#6f9e7c")
         else:
             n_ok = sum(
                 1
@@ -2223,7 +2243,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._set_chip("usb", f"USB {n_ok}/3", "#b56a6a")
             # Compact summary: the auto-expanded card's per-row statuses
             # show which device is missing.
-            self.usb_card.set_status(f"{n_ok}/3 verified", "#b56a6a")
             self.usb_card.set_expanded(True)
 
         self._save_connection_settings()

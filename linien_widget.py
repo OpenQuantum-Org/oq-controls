@@ -105,10 +105,15 @@ class LinienWidget(QtWidgets.QWidget):
         self.original_xrange = self.plot.viewRange()[0]
         self.original_yrange = self.plot.viewRange()[1]
 
+        legend = self.plot.addLegend(offset=(-10, 10), labelTextSize="13pt")
+        legend.setLabelTextColor("#ababab")
+        legend.setBrush(pg.mkBrush(11, 11, 11, 200))
+        legend.setPen(pg.mkPen("#282828"))
+
         self.error_curve = self.plot.plot(
-            pen=pg.mkPen("#5cb8ff", width=1.5), name="Error")
+            pen=pg.mkPen("#5cb8ff", width=1.5), name="Error signal")
         self.monitor_curve = self.plot.plot(
-            pen=pg.mkPen("#c080e0", width=1.5), name="Monitor")
+            pen=pg.mkPen("#c080e0", width=1.5), name="Monitor signal")
 
         self.zero_line = pg.InfiniteLine(
             pos=0, angle=0,

@@ -314,9 +314,9 @@ try:
 
     # Health chips: lock, USB, coils, dispenser.
     window._on_lock_state(True)
-    assert window.health_chips["lock"].text() == "LOCKED"
+    assert window.chip_text("lock") == "LOCKED"
     window._on_lock_state(False)
-    assert window.health_chips["lock"].text() == "UNLOCKED"
+    assert window.chip_text("lock") == "UNLOCKED"
 
     # Thermistor row shows an estimated temperature in degrees C.
     expected_c = mot_control.thermistor_ohms_to_c(window.therm_slider.value())
@@ -330,20 +330,20 @@ try:
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 15.0})
     assert "Abort Fire" in window.dispenser_fire_btn.text()
     assert not window.dispenser_override_btn.isEnabled()  # locked while firing
-    assert window.health_chips["disp"].text() == "DISP FIRING"
+    assert window.chip_text("disp") == "DISP FIRING"
     assert window.dispenser_progress.isVisibleTo(window)
     assert window.dispenser_progress.value() == 500  # 15 s of 30 s left
     window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
     assert not window.dispenser_fire_btn.isEnabled()
     assert "14:32" in window.dispenser_fire_btn.text()
-    assert window.health_chips["disp"].text() == "DISP 14:32"
+    assert window.chip_text("disp") == "DISP 14:32"
     assert window.dispenser_progress.value() == 969  # 872 s of 900 s left
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     assert window.dispenser_fire_btn.isEnabled()
     assert window.dispenser_override_btn.isEnabled()
     assert "Fire Dispenser (30 s)" == window.dispenser_fire_btn.text()
     assert not window.dispenser_progress.isVisibleTo(window)
-    assert window.health_chips["disp"].text() == "DISP IDLE"
+    assert window.chip_text("disp") == "DISP IDLE"
 
     # Dispenser readback shows CC/CV only while the output is on, and DPS
     # protection trips are surfaced in red on both supplies (and chips).
@@ -362,13 +362,13 @@ try:
          "cv_cc": 0, "protection": 2}
     )
     assert window.mot_coil_readback.text().startswith("OCP TRIPPED")
-    assert window.health_chips["coils"].text() == "COILS TRIP"
+    assert window.chip_text("coils") == "COILS TRIP"
     window._on_mot_coil_readback(
         {"v_out": 5.0, "i_out": 1.0, "power": 5.0, "output_enabled": True,
          "cv_cc": 0, "protection": 0}
     )
     assert "TRIPPED" not in window.mot_coil_readback.text()
-    assert window.health_chips["coils"].text() == "COILS 1.0 A"
+    assert window.chip_text("coils") == "COILS 1.0 A"
 
     # USB row statuses stay compact (the 84 px column must never clip
     # text, which previously showed "Not configured" as "t configured").
@@ -600,8 +600,8 @@ try:
     # Status rows mirror the edits, which remain the source of truth.
     assert window.laser_status_value.text() == "/dev/cu.fakeA"
     assert window.coil_status_value.text() == "/dev/cu.fakeB"
-    assert window.usb_card.header_status.text() == "3/3 verified"
-    assert window.health_chips["usb"].text() == "USB 3/3"
+    assert "USB 3/3" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "USB 3/3"
     assert window.laser_usb_status.text() == "Verified"
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     assert hasattr(window, "laser_worker")  # serial workers were started
@@ -619,8 +619,8 @@ try:
         },
         startup=False,  # startup=True would open the modal dialog
     )
-    assert "1/3 verified" == window.usb_card.header_status.text()
-    assert window.health_chips["usb"].text() == "USB 1/3"
+    assert "USB 1/3" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "USB 1/3"
     assert window.coil_usb_status.text() == "Not found"
     assert window.usb_card.content.isVisibleTo(window.usb_card)  # auto-expanded
     app.processEvents()
