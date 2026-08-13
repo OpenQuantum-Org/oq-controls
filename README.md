@@ -1,8 +1,9 @@
 # OpenQuantum Controls
 
-This is the control UI for the rubidium MOT hardware. It reuses the EIT
-control app's Linien spectroscopy widget and Koheron setpoint worker, then adds
-the MOT supplies and repump tune/gate controls.
+This is the control UI for the rubidium MOT hardware. The repo is
+self-contained: the Linien spectroscopy widget/worker, the shared styles,
+and the Koheron setpoint worker are vendored here (originally from the
+eit-controls project), plus the MOT supplies and repump tune/gate controls.
 
 ## Hardware covered
 
@@ -115,8 +116,10 @@ The override is locked out while a fire is running.
 
 ## Event log
 
-Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` (one JSON object
-per line, gitignored, safe to tail or load with
+Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` next to the
+code (a frozen/packaged build writes to the OS per-user app-data
+directory instead, since the install location may be read-only). One
+JSON object per line, gitignored, safe to tail or load with
 `pandas.read_json(..., lines=True)`): app start/stop, USB probe results,
 device connections and faults, lock/unlock transitions, laser on/off and
 init, setpoint changes (debounced after a slider drag settles), V_tune/VCO
@@ -182,11 +185,10 @@ connect, sanity-check the app's readback against each supply's front panel.
 
 ## Run
 
-The `eit-controls` checkout must sit next to this repo — the UI imports its
-Linien spectroscopy widget, styles, and Koheron worker from `../eit-controls`.
+The repo stands alone — clone, install, run:
 
 ```bash
-# layout: <parent>/oq-controls (this repo) and <parent>/eit-controls
+git clone https://github.com/OpenQuantum-Org/oq-controls.git
 cd oq-controls
 uv venv --python 3.12 .venv
 uv pip install -r requirements.txt
@@ -196,6 +198,9 @@ uv run python mot_control.py \
   --mot-coil-port /dev/ttyUSB1 \
   --dispenser-port /dev/ttyUSB2
 ```
+
+(The port arguments are optional — the startup USB probe finds and
+verifies the devices automatically.)
 
 The app persists connection settings in `QSettings` and re-verifies them at
 startup, so command-line arguments are mostly needed for first launch or

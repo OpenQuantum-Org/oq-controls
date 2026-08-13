@@ -929,3 +929,78 @@ class LinienGpioWorker(QtCore.QThread):
         bit_high = bool(raw & (1 << self.bit))
         logical_on = bit_high if self.active_high else not bit_high
         self.output_state.emit(logical_on)
+
+
+# ---------------------------------------------------------------------------
+# Laser Diode Setpoint Controller (CTL200-0)
+# ---------------------------------------------------------------------------
+class LaserSetpointWorker(QtCore.QThread):
+    """Controls a CTL200-0 laser diode controller for current and temperature.
+
+    Connects via serial, reads initial setpoints, then exposes methods
+    for the GUI thread to update current, thermistor, and on/off state.
+
+    Signals:
+        initial_values(dict): {"current": int, "thermistor": int} on connect.
+        connection_status(str): "connected:<port>", "no_port", or "error:<msg>".
+    """
+    initial_values = QtCore.pyqtSignal(dict)
+    connection_status = QtCore.pyqtSignal(str)
+
+    def __init__(self, port=None, baudrate=115200):
+        super().__init__()
+        self._port = port
+        self._baudrate = baudrate
+        self._ser = None
+
+    def run(self):
+        import serial as _serial
+
+        if not self._port:
+            self.connection_status.emit("no_port")
+            return
+        try:
+            self._ser = _serial.Serial(
+                self._port, baudrate=self._baudrate, timeout=1.0
+            )
+            current = float(self._query("ilaser"))
+            thermistor = float(self._query("rtact"))
+            self.initial_values.emit({
+                "current": int(current),
+                "thermistor": int(thermistor),
+            })
+            self.connection_status.emit(f"connected:{self._port}")
+        except Exception as e:
+            self.connection_status.emit(f"error:{e}")
+
+    def _query(self, cmd: str) -> str:
+        self._ser.reset_input_buffer()
+        self._ser.write(f"{cmd}\r\n".encode("ascii"))
+        self._ser.readline()  # discard echo
+        return self._ser.readline().decode("ascii", errors="ignore").strip()
+
+    def _send(self, cmd: str):
+        if self._ser and self._ser.is_open:
+            self._ser.write(f"{cmd}\r\n".encode("ascii"))
+
+    def set_current(self, current_mA: float):
+        """Set laser diode current in mA."""
+        self._send(f"ilaser {current_mA}")
+
+    def set_thermistor(self, resistance_ohms: float):
+        """Set thermistor setpoint in Ohms."""
+        self._send(f"rtset {resistance_ohms}")
+
+    def laser_on(self, on: bool = True):
+        """Enable or disable laser output."""
+        self._send(f"lason {1 if on else 0}")
+
+    def stop(self):
+        try:
+            self._send("lason 0")
+        except Exception:
+            pass
+        if self._ser and self._ser.is_open:
+            self._ser.close()
+        self.wait()
+

@@ -1,1 +1,7 @@
--r ../eit-controls/requirements.txt
+pyqtgraph>=0.13
+PyQt6>=6.5
+superqt>=0.6
+numpy
+scipy>=1.10
+pyserial>=3.5
+linien-client>=2.0

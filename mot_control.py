@@ -17,11 +17,11 @@ import time
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+# Self-contained: the Linien widget/worker, styles, and the Koheron
+# worker are vendored in this repo (originally from eit-controls).
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(HERE)
-EIT_CONTROLS = os.path.join(REPO_ROOT, "eit-controls")
-if EIT_CONTROLS not in sys.path:
-    sys.path.insert(0, EIT_CONTROLS)
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 from linien_widget import LinienWidget
 from styles import (
@@ -32,12 +32,12 @@ from styles import (
     make_card,
     make_section_title as _eit_make_section_title,
 )
-from workers import LaserSetpointWorker
 
 from mot_logging import EventLog
 from mot_workers import (
     DacClickWorker,
     DispenserWorker,
+    LaserSetpointWorker,
     LinienGpioWorker,
     RidenDPSWorker,
     SerialProbeWorker,
@@ -47,8 +47,39 @@ from mot_workers import (
 # Riden DPS protection register (reg 7) values.
 DPS_PROTECTION = {1: "OVP", 2: "OCP", 3: "OPP"}
 
+def resource_path(*parts):
+    """Absolute path to a bundled resource (fonts, etc.).
+
+    Works both from a source checkout and from a frozen (PyInstaller)
+    build, where bundled files are unpacked under ``sys._MEIPASS``.
+    """
+    base = getattr(sys, "_MEIPASS", HERE)
+    return os.path.join(base, *parts)
+
+
+def app_data_dir():
+    """Writable per-user data directory.
+
+    From a source checkout this is the repo directory (so logs/ lands
+    next to the code, as before). A frozen build must not write next to
+    the executable (often read-only once installed), so it uses the OS
+    per-user application-data location instead.
+    """
+    if getattr(sys, "frozen", False):
+        base = QtCore.QStandardPaths.writableLocation(
+            QtCore.QStandardPaths.AppDataLocation
+        )
+        if base:
+            return base
+    return HERE
+
+
+def logs_dir():
+    return os.path.join(app_data_dir(), "logs")
+
+
 # App typography: IBM Plex Sans for body text, Space Grotesk for titles.
-FONTS_DIR = os.path.join(HERE, "fonts")
+FONTS_DIR = resource_path("fonts")
 BODY_FONT_FAMILY = "IBM Plex Sans"
 TITLE_FONT_FAMILY = "Space Grotesk"
 
@@ -83,12 +114,14 @@ def load_app_fonts():
             print(f"! font family not available, using fallback: {family}")
 
 
-# The shared EIT stylesheet's text colors are too dim for lab use; these
-# later rules (and _apply_contrast_remap for widget-level styles) brighten
-# text while keeping the visual hierarchy.
+# The original eit-controls text colors were too dim for lab use; the
+# vendored linien_widget/styles copies were brightened with this mapping
+# when they were imported into this repo. The dict is kept as the
+# guard list: the smoke test asserts no widget stylesheet ever carries
+# one of the dim colors again.
 CONTRAST_REMAP = {
     "#6a6a80": "#a0a0b4",  # tiny/de-emphasized labels
-    "#7a7a90": "#c0c0d4",  # shared section-title class
+    "#7a7a90": "#c0c0d4",  # section-title class
     "#8888a0": "#c0c0d4",  # row labels / idle statuses
     "#9a9ab0": "#c8c8da",  # log text
     "#a0a0b8": "#d0d0e0",  # linien overlay labels
@@ -102,11 +135,6 @@ def build_app_stylesheet():
         "\n* {"
         f' font-family: "{BODY_FONT_FAMILY}", "Helvetica Neue",'
         ' "Segoe UI", sans-serif; }\n'
-        "QPushButton { color: #ececf4; }\n"
-        "QLineEdit { color: #f0f0f8; }\n"
-        "QLabel.readout-label { color: #a0a0b4; }\n"
-        "QLabel.readout-value { color: #ececf4; }\n"
-        "QLabel.section-title { color: #c0c0d4; }\n"
     )
 
 
@@ -804,7 +832,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
 
-        self._event_log = EventLog(os.path.join(HERE, "logs"))
+        self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
         self._readback_log_output = {}
         self._readback_log_protection = {}
@@ -829,8 +857,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         # Route event-log records into the log pane (GUI thread only).
         self._event_log.on_record = self._on_log_record
-
-        self._apply_contrast_remap()
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -879,42 +905,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Small UI helpers
     # ------------------------------------------------------------------
-
-    def _apply_contrast_remap(self):
-        """Brighten dim text colors in widget-level stylesheets.
-
-        mot_control's own styles already use the bright palette; this
-        sweep catches widgets built by the shared eit-controls helpers
-        (slider/readout row labels, the Linien overlay labels) without
-        modifying that repo.
-        """
-        for widget in self.findChildren(QtWidgets.QWidget):
-            sheet = widget.styleSheet()
-            if not sheet:
-                continue
-            updated = sheet
-            for dim, bright in CONTRAST_REMAP.items():
-                updated = updated.replace(dim, bright)
-            if updated != sheet:
-                widget.setStyleSheet(updated)
-
-        # The pyqtgraph axes are not stylesheet-driven: brighten tick text
-        # and the axis labels directly (best-effort, eit internals).
-        try:
-            plot_item = self.linien_widget.plot
-            for name in ("bottom", "left"):
-                axis = plot_item.getAxis(name)
-                axis.setTextPen(pg.mkPen("#c8c8da"))
-                if getattr(axis, "labelText", ""):
-                    style = dict(getattr(axis, "labelStyle", {}) or {})
-                    style["color"] = "#c8c8da"
-                    axis.setLabel(
-                        axis.labelText,
-                        units=getattr(axis, "labelUnits", None) or None,
-                        **style,
-                    )
-        except Exception as e:
-            print(f"! plot axis restyle skipped: {e}")
 
     @staticmethod
     def _tip(text, *widgets, help_cursor=False):
@@ -2535,6 +2525,8 @@ def main():
     args = parser.parse_args()
 
     app = QtWidgets.QApplication(sys.argv)
+    app.setOrganizationName("OQ-Controls")
+    app.setApplicationName("OpenQuantumControls")
 
     load_app_fonts()
     # setFont covers non-stylesheet text (e.g. pyqtgraph axis labels).

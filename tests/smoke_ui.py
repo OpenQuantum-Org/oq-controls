@@ -63,6 +63,45 @@ def resolved_family(widget):
     return QtGui.QFontInfo(widget.font()).family()
 
 
+# --- Standalone vendoring: the Linien widget/worker, styles, and the
+# Koheron worker come from THIS repo, not a sibling eit-controls checkout.
+import linien_widget  # noqa: E402
+import linien_worker  # noqa: E402
+import styles  # noqa: E402
+from mot_workers import LaserSetpointWorker  # noqa: E402,F401
+
+for module in (linien_widget, linien_worker, styles, mot_control):
+    module_dir = os.path.dirname(os.path.abspath(module.__file__))
+    assert module_dir == ROOT, (module.__name__, module.__file__)
+assert not hasattr(mot_control, "EIT_CONTROLS")
+
+# --- Frozen-build paths: resource_path honors PyInstaller's _MEIPASS...
+assert mot_control.FONTS_DIR == os.path.join(ROOT, "fonts")
+assert os.path.isdir(mot_control.FONTS_DIR)
+sys._MEIPASS = os.path.join(TMP, "bundle")
+try:
+    assert mot_control.resource_path("fonts") == os.path.join(
+        TMP, "bundle", "fonts"
+    )
+finally:
+    del sys._MEIPASS
+assert mot_control.resource_path("fonts") == os.path.join(ROOT, "fonts")
+
+# ...and a frozen build writes logs to the per-user data dir instead of
+# next to the (read-only) executable.
+assert mot_control.logs_dir() == os.path.join(ROOT, "logs")
+sys.frozen = True
+try:
+    frozen_logs = mot_control.logs_dir()
+finally:
+    del sys.frozen
+assert frozen_logs != os.path.join(ROOT, "logs")
+appdata = QtCore.QStandardPaths.writableLocation(
+    QtCore.QStandardPaths.AppDataLocation
+)
+assert frozen_logs == os.path.join(appdata, "logs"), frozen_logs
+
+
 try:
     window = mot_control.OpenQuantumControlsWindow()
     window.show()
