@@ -1739,20 +1739,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mod_phase_edit,
         )
 
+        # Stored and sent in mV; shown in volts peak-to-peak, which is how
+        # the modulation depth is specified. 1 mV of slider resolution.
         self.mod_strength_slider, self.mod_strength_edit = add_slider_row(
             layout,
-            "Mod Strength:",
+            "Mod Amplitude:",
             0,
             1000,
             self._int_setting("linien/mod_strength_mv", 0, 0, 1000),
             single=1,
             page=50,
-            suffix=" mV",
+            suffix=" Vpp",
+            decimals=3,
+            scale=1000.0,
         )
         self.mod_strength_slider.valueChanged.connect(self._on_mod_strength)
         self._tip(
-            "Modulation amplitude (mV) driving the current dither.\n"
-            "0 mV disables the dither (no error signal).",
+            "Modulation amplitude driving the current dither, 0-1 Vp-p.\n"
+            "0 disables the dither (no error signal).",
             self.mod_strength_slider,
             self.mod_strength_edit,
         )
@@ -2435,7 +2439,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_modulation_phase(value)
 
     def _on_mod_strength(self, value):
-        self.mod_strength_edit.setText(f"{value} mV")
+        self.mod_strength_edit.setText(f"{value / 1000.0:.3f} Vpp")
         self._settings.setValue("linien/mod_strength_mv", value)
         self._debounced_log(
             "mod_strength",
