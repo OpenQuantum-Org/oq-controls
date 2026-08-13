@@ -1149,7 +1149,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         # Statuses live in each card's header, not in a strip up here.
         self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
-        self._set_chip("usb", "USB --", self._CHIP_NEUTRAL)
+        self._set_chip("usb", "DEVICES --", self._CHIP_NEUTRAL)
         self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
         self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
 
@@ -2168,7 +2168,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Serial workers hold their ports open; release them for probing.
         self._stop_serial_workers()
 
-        self._set_chip("usb", "USB ...", "#ababab")
+        self._set_chip("usb", "DEVICES ...", "#ababab")
         for attr in self._USB_STATUS_ROWS:
             self._set_colored_text(getattr(self, attr), "Probing…", "#ababab")
 
@@ -2214,14 +2214,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 self._set_colored_text(getattr(self, attr), "Not found", "#b56a6a")
 
         if res.get("ok"):
-            self._set_chip("usb", "USB 3/3", "#6f9e7c")
+            self._set_chip("usb", "DEVICES 3/3", "#6f9e7c")
         else:
             n_ok = sum(
                 1
                 for key in ("laser", "mot_coil", "dispenser")
                 if status.get(key) == "verified"
             )
-            self._set_chip("usb", f"USB {n_ok}/3", "#b56a6a")
+            self._set_chip("usb", f"DEVICES {n_ok}/3", "#b56a6a")
             # Compact summary: the auto-expanded card's per-row statuses
             # show which device is missing.
             self.usb_card.set_expanded(True)

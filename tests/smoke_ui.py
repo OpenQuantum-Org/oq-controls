@@ -601,8 +601,8 @@ try:
     # Status rows mirror the edits, which remain the source of truth.
     assert window.laser_status_value.text() == "/dev/cu.fakeA"
     assert window.coil_status_value.text() == "/dev/cu.fakeB"
-    assert "USB 3/3" in window.usb_card.header_status.text()
-    assert window.chip_text("usb") == "USB 3/3"
+    assert "DEVICES 3/3" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "DEVICES 3/3"
     assert window.laser_usb_status.text() == "Verified"
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     assert hasattr(window, "laser_worker")  # serial workers were started
@@ -620,8 +620,8 @@ try:
         },
         startup=False,  # startup=True would open the modal dialog
     )
-    assert "USB 1/3" in window.usb_card.header_status.text()
-    assert window.chip_text("usb") == "USB 1/3"
+    assert "DEVICES 1/3" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "DEVICES 1/3"
     assert window.coil_usb_status.text() == "Not found"
     assert window.usb_card.content.isVisibleTo(window.usb_card)  # auto-expanded
     app.processEvents()
