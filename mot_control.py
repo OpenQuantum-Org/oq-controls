@@ -1463,7 +1463,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         manual_layout = manual.content_layout
 
         self.rp_edit = self._add_line_edit(
-            manual_layout, "Linien RP:", self._rp_host, "rp-XXXXXX.local"
+            manual_layout, "Red Pitaya:", self._rp_host, "rp-XXXXXX.local"
         )
         self._tip(
             "Red Pitaya hostname or IP running linien-server (also carries\n"
@@ -1475,28 +1475,28 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._tip("Koheron CTL200 serial port.", self.laser_edit)
         self.mot_coil_port_edit = self._add_port_select_row(
-            manual_layout, "Coil DPS5005:", self._mot_coil_port
+            manual_layout, "Coils PSU:", self._mot_coil_port
         )
         self._tip("MOT coil DPS5005 serial port.", self.mot_coil_port_edit)
         self.dispenser_port_edit = self._add_port_select_row(
-            manual_layout, "Disp DPS5020:", self._dispenser_port
+            manual_layout, "Dispenser PSU:", self._dispenser_port
         )
         self._tip("Dispenser DPS5020 serial port.", self.dispenser_port_edit)
 
         self.rp_status_value, self.rp_usb_status = self._add_device_status_row(
-            layout, "Linien RP:", self.rp_edit
+            layout, "Red Pitaya:", self.rp_edit
         )
         self.laser_status_value, self.laser_usb_status = (
             self._add_device_status_row(layout, "Koheron:", self.laser_edit)
         )
         self.coil_status_value, self.coil_usb_status = (
             self._add_device_status_row(
-                layout, "Coil DPS5005:", self.mot_coil_port_edit
+                layout, "Coils PSU:", self.mot_coil_port_edit
             )
         )
         self.dispenser_status_value, self.dispenser_usb_status = (
             self._add_device_status_row(
-                layout, "Disp DPS5020:", self.dispenser_port_edit
+                layout, "Dispenser PSU:", self.dispenser_port_edit
             )
         )
 
