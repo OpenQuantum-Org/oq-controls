@@ -1165,6 +1165,35 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         normal_layout.setContentsMargins(0, 0, 0, 0)
         normal_layout.setSpacing(6)
 
+        # Sweep speed sits with the sweep slider it belongs to, directly
+        # above the plot, rather than in the lock card.
+        sweep_row = QtWidgets.QHBoxLayout()
+        sweep_row.setContentsMargins(20, 0, 8, 0)
+        sweep_row.setSpacing(8)
+        sweep_row.addStretch()
+        sweep_row.addWidget(self._small_label("Sweep Speed:"))
+        self.sweep_speed_combo = QtWidgets.QComboBox()
+        _style_combo(self.sweep_speed_combo)
+        self.sweep_speed_combo.setFixedWidth(110)
+        for value, label in [
+            (0, "3800 Hz"), (1, "1900 Hz"), (2, "950 Hz"), (3, "475 Hz"),
+            (4, "237.5 Hz"), (5, "118.75 Hz"), (6, "59.4 Hz"), (7, "29.7 Hz"),
+            (8, "14.8 Hz"), (9, "7.4 Hz"), (10, "3.7 Hz"), (11, "1.86 Hz"),
+            (12, "0.93 Hz"), (13, "0.46 Hz"), (14, "0.23 Hz"), (15, "0.116 Hz"),
+        ]:
+            self.sweep_speed_combo.addItem(label, value)
+        self.sweep_speed_combo.setCurrentIndex(
+            self._int_setting("linien/sweep_speed_index", 8, 0, 15)
+        )
+        self.sweep_speed_combo.currentIndexChanged.connect(self._on_sweep_speed)
+        sweep_row.addWidget(self.sweep_speed_combo)
+        self._tip(
+            "Linien sweep repetition rate. Slower sweeps show narrower\n"
+            "features; faster sweeps update the trace more often.",
+            self.sweep_speed_combo,
+        )
+        normal_layout.addLayout(sweep_row)
+
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setStyleSheet("""
@@ -1679,6 +1708,40 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.lock_card = card
         layout = card.content_layout
 
+        # Modulation master switch. Linien has no separate enable, so off
+        # means amplitude 0 -- the slider keeps its value for when it is
+        # switched back on.
+        self.mod_enable_btn = QtWidgets.QPushButton("Modulation On")
+        self.mod_enable_btn.setCheckable(True)
+        self.mod_enable_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        layout.addWidget(self.mod_enable_btn)
+        self._tip(
+            "Turn the current dither on or off. Off drives the amplitude\n"
+            "to zero and greys out the modulation controls.",
+            self.mod_enable_btn,
+        )
+
+        # Stored and sent in mV; shown in volts peak-to-peak, which is how
+        # the modulation depth is specified. 1 mV of slider resolution.
+        self.mod_strength_slider, self.mod_strength_edit = add_slider_row(
+            layout,
+            "Mod Amplitude:",
+            0,
+            1000,
+            self._int_setting("linien/mod_strength_mv", 0, 0, 1000),
+            single=1,
+            page=50,
+            suffix=" Vpp",
+            decimals=3,
+            scale=1000.0,
+        )
+        self.mod_strength_slider.valueChanged.connect(self._on_mod_strength)
+        self._tip(
+            "Modulation amplitude driving the current dither, 0-1 Vp-p.",
+            self.mod_strength_slider,
+            self.mod_strength_edit,
+        )
+
         self.mod_freq_slider, self.mod_freq_edit = add_slider_row(
             layout,
             "Mod Freq:",
@@ -1707,7 +1770,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._int_setting("linien/mod_phase_deg", 0, 0, 360),
             single=1,
             page=10,
-            suffix="\N{DEGREE SIGN}",
+            suffix="°",
         )
         self.mod_phase_slider.valueChanged.connect(self._on_mod_phase)
         self._tip(
@@ -1716,68 +1779,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mod_phase_edit,
         )
 
-        # Stored and sent in mV; shown in volts peak-to-peak, which is how
-        # the modulation depth is specified. 1 mV of slider resolution.
-        self.mod_strength_slider, self.mod_strength_edit = add_slider_row(
-            layout,
-            "Mod Amplitude:",
-            0,
-            1000,
-            self._int_setting("linien/mod_strength_mv", 0, 0, 1000),
-            single=1,
-            page=50,
-            suffix=" Vpp",
-            decimals=3,
-            scale=1000.0,
+        self.mod_enable_btn.toggled.connect(self._on_mod_enabled)
+        self.mod_enable_btn.setChecked(
+            self._bool_setting("linien/mod_enabled", True)
         )
-        self.mod_strength_slider.valueChanged.connect(self._on_mod_strength)
-        self._tip(
-            "Modulation amplitude driving the current dither, 0-1 Vp-p.\n"
-            "0 disables the dither (no error signal).",
-            self.mod_strength_slider,
-            self.mod_strength_edit,
-        )
+        self._apply_mod_enabled(self.mod_enable_btn.isChecked())
 
-        speed_row = QtWidgets.QHBoxLayout()
-        speed_row.setSpacing(8)
-        speed_row.addWidget(self._small_label("Sweep Speed:"))
-        self.sweep_speed_combo = QtWidgets.QComboBox()
-        _style_combo(self.sweep_speed_combo)
-        for value, label in [
-            (0, "3800 Hz"),
-            (1, "1900 Hz"),
-            (2, "950 Hz"),
-            (3, "475 Hz"),
-            (4, "237.5 Hz"),
-            (5, "118.75 Hz"),
-            (6, "59.4 Hz"),
-            (7, "29.7 Hz"),
-            (8, "14.8 Hz"),
-            (9, "7.4 Hz"),
-            (10, "3.7 Hz"),
-            (11, "1.86 Hz"),
-            (12, "0.93 Hz"),
-            (13, "0.46 Hz"),
-            (14, "0.23 Hz"),
-            (15, "0.116 Hz"),
-        ]:
-            self.sweep_speed_combo.addItem(label, value)
-        self.sweep_speed_combo.setCurrentIndex(
-            self._int_setting("linien/sweep_speed_index", 8, 0, 15)
-        )
-        self.sweep_speed_combo.currentIndexChanged.connect(self._on_sweep_speed)
-        speed_row.addWidget(self.sweep_speed_combo, stretch=1)
-        layout.addLayout(speed_row)
-        self._tip(
-            "Linien sweep repetition rate. Slower sweeps show narrower\n"
-            "features; faster sweeps update the trace more often.",
-            self.sweep_speed_combo,
-        )
+        self._add_filter_section(layout)
 
         self.lock_readout = add_readout_row(layout, "Laser:", "Unlocked")
         self._tip(
-            "Lock state reported by Linien. Use the plot's Lock Laser\n"
-            "button after selecting a lock region on the trace.",
+            "Lock state reported by Linien. Lock after selecting a region\n"
+            "on the error signal trace.",
             self.lock_readout,
             help_cursor=True,
         )
@@ -1812,8 +1825,37 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.psd_mode_btn,
         )
         layout.addLayout(lock_button_row)
-        self._add_filter_section(layout)
         parent.addWidget(card)
+
+    def _apply_mod_enabled(self, on):
+        """Grey out the modulation controls when the dither is off."""
+        self.mod_enable_btn.setText(
+            "Modulation On" if on else "Modulation Off"
+        )
+        for slider in (
+            self.mod_strength_slider,
+            self.mod_freq_slider,
+            self.mod_phase_slider,
+        ):
+            slider.setEnabled(on)
+        # Read-only rather than disabled: disabling these edits segfaults
+        # Qt on teardown, and the value should stay legible either way.
+        for edit in (
+            self.mod_strength_edit,
+            self.mod_freq_edit,
+            self.mod_phase_edit,
+        ):
+            edit.setReadOnly(not on)
+
+    def _on_mod_enabled(self, on):
+        self._apply_mod_enabled(on)
+        self._settings.setValue("linien/mod_enabled", bool(on))
+        self._event_log.log("setpoint", name="mod_enabled", value=bool(on))
+        worker = self._get_lock_worker()
+        if worker is not None:
+            worker.set_modulation_amplitude(
+                self.mod_strength_slider.value() if on else 0
+            )
 
     def _add_laser_card(self, parent):
         card = CollapsibleCard("Laser Setpoints", collapsed=False)
