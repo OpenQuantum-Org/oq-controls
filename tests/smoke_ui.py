@@ -361,19 +361,19 @@ try:
     # Dispenser fire-state UI: button, label, chip, and progress bar.
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 15.0})
     assert "Abort Fire" in window.dispenser_fire_btn.text()
-    assert window.chip_text("disp") == "DISP FIRING"
+    assert window.chip_text("disp") == "DISPENSER FIRING"
     assert window.dispenser_progress.isVisibleTo(window)
     assert window.dispenser_progress.value() == 500  # 15 s of 30 s left
     window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
     assert not window.dispenser_fire_btn.isEnabled()
     assert "14:32" in window.dispenser_fire_btn.text()
-    assert window.chip_text("disp") == "DISP 14:32"
+    assert window.chip_text("disp") == "DISPENSER 14:32"
     assert window.dispenser_progress.value() == 969  # 872 s of 900 s left
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     assert window.dispenser_fire_btn.isEnabled()
     assert "Fire Dispenser (30 s)" == window.dispenser_fire_btn.text()
     assert not window.dispenser_progress.isVisibleTo(window)
-    assert window.chip_text("disp") == "DISP IDLE"
+    assert window.chip_text("disp") == "DISPENSER IDLE"
 
     # No readback rows on the supply cards: a DPS protection trip has to
     # reach the header chip and the event log instead.

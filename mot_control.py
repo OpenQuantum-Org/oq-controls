@@ -1197,7 +1197,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
         self._set_chip("usb", "DEVICES --", self._CHIP_NEUTRAL)
         self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
-        self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
+        self._set_chip("disp", "DISPENSER IDLE", self._CHIP_NEUTRAL)
         self._set_chip("repump", "REPUMP OFF", self._CHIP_NEUTRAL)
         self._set_chip("laser", "LASER OFF", self._CHIP_NEUTRAL)
 
@@ -2731,18 +2731,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
-            self._set_chip("disp", "DISP FIRING", "#b9924f")
+            self._set_chip("disp", "DISPENSER FIRING", "#b9924f")
         elif phase == "cooldown":
             minutes, seconds = divmod(int(round(remaining)), 60)
             self.dispenser_fire_btn.setEnabled(False)
             self.dispenser_fire_btn.setText(f"Cooldown {minutes:d}:{seconds:02d}")
-            self._set_chip("disp", f"DISP {minutes:d}:{seconds:02d}", "#c4c4c4")
+            self._set_chip("disp", f"DISPENSER {minutes:d}:{seconds:02d}", "#c4c4c4")
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
-            self._set_chip("disp", "DISP IDLE", "#ababab")
+            self._set_chip("disp", "DISPENSER IDLE", "#ababab")
 
     def _update_dispenser_progress(self, phase, remaining):
         if phase == "firing":
