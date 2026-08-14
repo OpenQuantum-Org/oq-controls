@@ -20,12 +20,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from styles import (
-    UI_FONT_FAMILY,
-    UI_FONT_PX,
-    make_card,
-    make_section_title,
-)
+from styles import UI_FONT_FAMILY, UI_FONT_PX, make_section_title
 
 # Same explicit combo styling the main window uses; unstyled combos fall
 # back to the platform palette and render white on this dark theme.
@@ -403,6 +398,7 @@ class PsdWindow(QtWidgets.QMainWindow):
 
         root.addLayout(self._build_settings_row())
         root.addWidget(self._build_run_controls())
+        root.addSpacing(2)
 
         # Plot and curve list side by side: the table is a legend for the
         # plot, so it belongs next to it rather than stacked underneath.
@@ -470,37 +466,42 @@ class PsdWindow(QtWidgets.QMainWindow):
         return row
 
     def _build_run_controls(self):
-        card = make_card()
-        layout = card.layout()
+        """Start when idle, status + Stop when running.
+
+        A stack rather than two stacked containers, so the row keeps one
+        height and nothing below it shifts when the state changes.
+        """
+        stack = QtWidgets.QStackedWidget()
+        stack.setFixedHeight(34)
 
         self.not_running_container = QtWidgets.QWidget()
-        idle = QtWidgets.QVBoxLayout(self.not_running_container)
+        idle = QtWidgets.QHBoxLayout(self.not_running_container)
         idle.setContentsMargins(0, 0, 0, 0)
-        idle.setSpacing(6)
-        idle.addWidget(make_section_title("Single PSD measurement"))
         self.start_btn = QtWidgets.QPushButton("Start single PSD measurement")
         self.start_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.start_btn.clicked.connect(self.start_psd)
         idle.addWidget(self.start_btn)
-        layout.addWidget(self.not_running_container)
+        stack.addWidget(self.not_running_container)
 
         self.running_container = QtWidgets.QWidget()
-        busy = QtWidgets.QVBoxLayout(self.running_container)
+        busy = QtWidgets.QHBoxLayout(self.running_container)
         busy.setContentsMargins(0, 0, 0, 0)
-        busy.setSpacing(6)
-        self.running_label = QtWidgets.QLabel("PSD measurement running!")
+        busy.setSpacing(8)
+        self.running_label = QtWidgets.QLabel("PSD measurement running")
         self.running_label.setStyleSheet(
             f"color: #b9924f; font-size: {UI_FONT_PX}px; font-weight: 700;"
             " border: none;"
         )
         busy.addWidget(self.running_label)
+        busy.addStretch()
         self.stop_btn = QtWidgets.QPushButton("Stop PSD measurement")
         self.stop_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.stop_btn.clicked.connect(self.stop_psd)
         busy.addWidget(self.stop_btn)
-        layout.addWidget(self.running_container)
-        self.running_container.hide()
-        return card
+        stack.addWidget(self.running_container)
+
+        self._run_stack = stack
+        return stack
 
     def _build_trace_buttons(self):
         column = QtWidgets.QVBoxLayout()
@@ -543,8 +544,7 @@ class PsdWindow(QtWidgets.QMainWindow):
         """Swap the run controls, as linien does on psd_acquisition_running."""
         self._locked = bool(status.get("locked"))
         busy = bool(status.get("acquiring") or status.get("optimizing"))
-        self.running_container.setVisible(busy)
-        self.not_running_container.setVisible(not busy)
+        self._run_stack.setCurrentIndex(1 if busy else 0)
 
     # --- linien's PSDWindow methods ---
 
