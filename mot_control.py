@@ -253,7 +253,46 @@ def add_slider_row(*args, **kwargs):
             slider.setValue(raw)
 
     edit.editingFinished.connect(commit)
+    _ARROW_STEPPER.attach(edit)
     return slider, edit
+
+
+class ArrowStepper(QtCore.QObject):
+    """Up/Down in a value box nudge it by one displayed decimal place.
+
+    The value boxes are QLineEdits, so arrow keys only moved the text
+    cursor: you would click into a number, press Up, and nothing would
+    happen. Every slider's singleStep is already exactly one visible
+    increment, so stepping the slider is the same nudge the arrow keys
+    give when the slider itself has focus. PageUp/PageDown use pageStep.
+    """
+
+    def attach(self, edit):
+        edit.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() != QtCore.QEvent.KeyPress:
+            return False
+        slider = getattr(obj, "slider", None)
+        if slider is None:
+            return False
+        steps = {
+            QtCore.Qt.Key_Up: slider.singleStep(),
+            QtCore.Qt.Key_Down: -slider.singleStep(),
+            QtCore.Qt.Key_PageUp: slider.pageStep(),
+            QtCore.Qt.Key_PageDown: -slider.pageStep(),
+        }
+        delta = steps.get(event.key())
+        if delta is None:
+            return False
+        # Step from what is typed, not from the slider: an edited but
+        # uncommitted box would otherwise jump back to the old value.
+        obj.editingFinished.emit()
+        slider.setValue(slider.value() + delta)
+        return True
+
+
+_ARROW_STEPPER = ArrowStepper()
 
 
 class WheelGuard(QtCore.QObject):
@@ -1154,17 +1193,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             except (TypeError, ValueError):
                 pass
         # The camera is an occasional check, not a default view, so it
-        # always starts off rather than restoring its last state.
-        self.usb_card.set_expanded(
-            self._bool_setting("ui/usb_card_expanded", False)
-        )
-        # Persist the USB card's expansion; the event log deliberately
-        # always starts collapsed.
-        self.usb_card.toggle_btn.toggled.connect(
-            lambda expanded: self._settings.setValue(
-                "ui/usb_card_expanded", bool(expanded)
-            )
-        )
+        # always starts off rather than restoring its last state. The
+        # Devices card is the same: it used to reopen however it was left,
+        # which made it the one card whose state looked random next to
+        # every other card starting collapsed.
 
     def _save_ui_state(self):
         self._settings.setValue("ui/geometry", self.saveGeometry())
@@ -1862,10 +1894,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # under the three rows it governs.
         layout.addWidget(self.mod_enable_btn)
 
-        self.mod_enable_btn.toggled.connect(self._on_mod_enabled)
+        # Restored before the signal is connected, so bringing the UI back
+        # cannot actuate: connecting first made setChecked() fire
+        # _on_mod_enabled, which writes the dither amplitude to the laser.
+        # Restoring persisted state sets the UI only (CLAUDE.md), and the
+        # default is off -- starting a session by dithering the laser is
+        # not something to do without being asked.
         self.mod_enable_btn.setChecked(
-            self._bool_setting("linien/mod_enabled", True)
+            self._bool_setting("linien/mod_enabled", False)
         )
+        self.mod_enable_btn.toggled.connect(self._on_mod_enabled)
         self._apply_mod_enabled(self.mod_enable_btn.isChecked())
 
         self._add_filter_section(layout)
@@ -2373,6 +2411,34 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Serial workers start once the USB probe has decided which port
         # hosts which device (see _on_probe_result).
         self._run_usb_probe(startup=True)
+        # Outputs survive this app. The repump gate is a Red Pitaya GPIO
+        # bit and the dither a linien parameter the server restores, so
+        # an exit that skipped teardown -- a crash, a kill -- leaves them
+        # running and the next launch simply adopts them. Give the
+        # workers time to report, then say what was found rather than
+        # leaving it to be noticed.
+        QtCore.QTimer.singleShot(4000, self._report_startup_outputs)
+
+    def _report_startup_outputs(self):
+        """Name anything that was already energised when we connected.
+
+        Reports only; nothing is actuated. Switching an output off at
+        startup would be an actuation nobody asked for, and it would
+        stomp a state left on deliberately.
+        """
+        live = self.live_outputs()
+        if not live:
+            return
+        self._event_log.fault(
+            "startup_outputs_live",
+            outputs=[o.key for o in live],
+            detail="; ".join(f"{o.label} {o.detail}" for o in live),
+        )
+        self._set_chip(
+            "lock",
+            f"{len(live)} OUTPUT{'S' if len(live) != 1 else ''} WERE ON",
+            "#b9924f",
+        )
 
     def _connect_lock_signal(self):
         try:

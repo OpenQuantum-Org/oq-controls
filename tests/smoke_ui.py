@@ -403,6 +403,40 @@ try:
     assert not window.dispenser_progress.isVisibleTo(window)
     assert window.chip_text("disp") == "DISPENSER IDLE"
 
+    # Arrow keys in a value box nudge it by one displayed decimal. The
+    # boxes are QLineEdits, so without this arrows only moved the text
+    # cursor -- you would click into a number, press Up, and nothing.
+    def _key(widget, key):
+        QtWidgets.QApplication.sendEvent(
+            widget,
+            QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier),
+        )
+
+    for slider, edit in (
+        (window.therm_slider, window.therm_edit),              # 0.1 C
+        (window.mot_coil_current_slider, window.mot_coil_current_edit),  # 0.1 A
+        (window.mod_strength_slider, window.mod_strength_edit),  # 0.001 Vpp
+    ):
+        start = slider.value()
+        _key(edit, QtCore.Qt.Key_Up)
+        assert slider.value() == start + slider.singleStep(), (
+            edit.text(), start, slider.value()
+        )
+        _key(edit, QtCore.Qt.Key_Down)
+        assert slider.value() == start
+        # One arrow press must move the *visible* number, not a digit
+        # below what is shown.
+        before = edit.text()
+        _key(edit, QtCore.Qt.Key_Up)
+        assert edit.text() != before, (before, edit.text())
+        _key(edit, QtCore.Qt.Key_Down)
+
+    # PageUp uses the coarser page step.
+    start = window.therm_slider.value()
+    _key(window.therm_edit, QtCore.Qt.Key_PageUp)
+    assert window.therm_slider.value() == start + window.therm_slider.pageStep()
+    window.therm_slider.setValue(start)
+
     assert window.laser_card.toggle_btn.text() == "LASER", (
         window.laser_card.toggle_btn.text()
     )
@@ -588,6 +622,34 @@ try:
         window.rp_usb_status, "connecting:rp.local", "rp"
     )
     assert not window._device_connected["rp"]
+
+    # Anything already energised when the app connects gets named. The
+    # repump gate is a Red Pitaya GPIO bit and the dither a linien
+    # parameter the server restores, so an exit that skipped teardown
+    # leaves them on and the next launch adopts them silently.
+    window.repump_gpio_btn.setChecked(True)
+    window._report_startup_outputs()
+    found = next(
+        r for r in reversed(_records()) if r["event"] == "startup_outputs_live"
+    )
+    assert found["kind"] == "fault"
+    assert "repump" in found["outputs"], found
+    assert "Repump on" in found["detail"], found
+    assert "WERE ON" in window.chip_text("lock")
+    window.repump_gpio_btn.setChecked(False)
+
+    # Nothing energised: no report, no chip change.
+    window.mod_enable_btn.setChecked(False)
+    window.mot_coil_output_btn.setChecked(False)
+    window.laser_btn.setChecked(False)
+    window._set_chip("lock", "UNLOCKED", "#b56a6a")
+    assert window.live_outputs() == [], [
+        (o.key, o.detail) for o in window.live_outputs()
+    ]
+    before = len(_records())
+    window._report_startup_outputs()
+    assert len(_records()) == before
+    assert window.chip_text("lock") == "UNLOCKED"
 
     # A wedged server answers RPyC but its threads are dead, so the plot
     # just stops. Reconnecting does not help; only a restart does, and
@@ -1020,9 +1082,11 @@ try:
     w1 = mot_control.OpenQuantumControlsWindow()
     w1.show()
     app.processEvents()
-    # UI state restored from the same isolated settings file — except the
-    # event log, which always starts collapsed.
-    assert w1.usb_card.content.isVisibleTo(w1.usb_card)  # was left expanded
+    # UI state restored from the same isolated settings file. Cards are
+    # not part of that: every one of them starts collapsed, including
+    # Devices, which used to reopen however it was left and so looked
+    # random next to the rest.
+    assert not w1.usb_card.content.isVisibleTo(w1.usb_card)
     assert not w1.log_card.content.isVisibleTo(w1.log_card)
     assert w1._settings.value("ui/geometry") is not None
     assert w1._settings.value("ui/splitter_sizes") is not None
@@ -1066,7 +1130,18 @@ try:
     assert w2._dispenser_fire_seconds == 20.0
     assert w2.dispenser_current_slider.value() == 9000
     assert w2.dispenser_fire_btn.text() == "Fire Dispenser (20 s)"
-    assert not w2.usb_card.content.isVisibleTo(w2.usb_card)  # collapsed again
+    assert not w2.usb_card.content.isVisibleTo(w2.usb_card)
+
+    # Restoring the UI must never actuate. Connecting the toggled signal
+    # before setChecked() made startup write a dither amplitude to the
+    # laser that nobody asked for, so restoring "on" must set the button
+    # without reaching a worker -- and with no setting at all the dither
+    # starts off rather than on.
+    w2._settings.remove("linien/mod_enabled")
+    w3 = mot_control.OpenQuantumControlsWindow()
+    assert not w3.mod_enable_btn.isChecked(), "dither defaulted on"
+    assert not any(o.key == "modulation" for o in w3.live_outputs())
+    w3.close()
     w2.close()
     app.processEvents()
 finally:
