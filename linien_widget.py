@@ -88,9 +88,9 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         style_plot_axes(self.plot)
 
-        self.plot.setLabel("left", "Volts", **plot_label_style())
-        # The error signal is a fraction of a volt; pyqtgraph would rescale
-        # the axis and append a "(x0.001)" multiplier to the label.
+        # No left-axis label; the tick values speak for themselves. The SI
+        # prefix stays off so pyqtgraph does not rescale the ticks and put
+        # a "(x0.001)" multiplier where the label would have been.
         self.plot.getAxis("left").enableAutoSIPrefix(False)
 
         if self._v_to_mhz is not None:

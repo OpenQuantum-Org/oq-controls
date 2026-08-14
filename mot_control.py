@@ -1212,10 +1212,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 background: #383838;
             }
         """)
-        self.linien_widget = LinienWidget(
-            linien_host=self._rp_host,
-            v_to_freq_ghz=V_TO_GHZ,
-        )
+        # No v_to_freq_ghz: the x axis stays in sweep volts, which is what
+        # the sweep slider and the lock region are actually set in.
+        self.linien_widget = LinienWidget(linien_host=self._rp_host)
         # Built by the Linien widget (it owns the range logic) but shown in
         # the header beside the camera toggle, with the other view controls.
         self._header_row.insertWidget(
