@@ -1081,8 +1081,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 self.main_splitter.setSizes([int(s) for s in splitter_sizes])
             except (TypeError, ValueError):
                 pass
-        if self._bool_setting("ui/camera_visible", False):
-            self.camera_toggle.setChecked(True)
+        # The camera is an occasional check, not a default view, so it
+        # always starts off rather than restoring its last state.
         self.usb_card.set_expanded(
             self._bool_setting("ui/usb_card_expanded", False)
         )
@@ -1578,6 +1578,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.log_card = card
         layout = card.content_layout
 
+        layout.addWidget(make_section_title("Config"))
         config_row = QtWidgets.QHBoxLayout()
         config_row.setSpacing(6)
         self.save_config_btn = QtWidgets.QPushButton("Save Config As...")
@@ -1601,6 +1602,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.load_config_btn,
         )
         layout.addLayout(config_row)
+
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setStyleSheet("color: #282828;")
+        layout.addWidget(separator)
+        layout.addWidget(make_section_title("Event Log"))
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -1708,6 +1715,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self._add_filter_section(layout)
 
+        # Everything above configures the error signal; everything below
+        # locks to it. The heading is what makes "Select target line" read
+        # as the first step rather than another setting.
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setStyleSheet("color: #282828;")
+        layout.addWidget(separator)
+        layout.addWidget(make_section_title("Lock"))
+
         # No lock readout row: the card header carries LOCKED/UNLOCKED.
 
         # Lock/Unlock are built by the Linien widget (they carry its lock
@@ -1738,6 +1754,22 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Select target line, then click and drag over the line you\n"
             "want to lock to.",
             self.linien_widget.lock_controls,
+        )
+
+        # linien's auto_mode_activated instruction: only on screen while a
+        # selection is actually running, so it reads as a prompt.
+        self.lock_hint_label = QtWidgets.QLabel(
+            "Click and drag over the line you want to lock to."
+        )
+        self.lock_hint_label.setWordWrap(True)
+        self.lock_hint_label.setStyleSheet(
+            "color: #b9924f; font-size: 13px; font-weight: 600;"
+            "border: none; padding: 2px 4px;"
+        )
+        self.lock_hint_label.setVisible(False)
+        layout.addWidget(self.lock_hint_label)
+        self.linien_widget.selection_state_changed.connect(
+            self.lock_hint_label.setVisible
         )
 
         lock_button_row = QtWidgets.QHBoxLayout()
@@ -2063,6 +2095,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_dispenser_voltage(self, millivolts):
         self._dispenser_fire_voltage = millivolts / 1000.0
+        self.dispenser_voltage_edit.setText(
+            f"{self._dispenser_fire_voltage:.3f} V"
+        )
         self._settings.setValue(
             "dispenser/fire_voltage_v", self._dispenser_fire_voltage
         )
@@ -2078,6 +2113,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_dispenser_current(self, milliamps):
         self._dispenser_fire_current = milliamps / 1000.0
+        self.dispenser_current_edit.setText(
+            f"{self._dispenser_fire_current:.3f} A"
+        )
         self._settings.setValue(
             "dispenser/fire_current_a", self._dispenser_fire_current
         )
@@ -2093,6 +2131,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_dispenser_time(self, seconds):
         self._dispenser_fire_seconds = float(seconds)
+        self.dispenser_time_edit.setText(f"{int(seconds)} s")
         self._settings.setValue(
             "dispenser/fire_seconds", self._dispenser_fire_seconds
         )
