@@ -546,6 +546,7 @@ class CameraViewWidget(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        self._layout = layout
 
         self.stack = QtWidgets.QStackedWidget()
         self.message_label = QtWidgets.QLabel("No USB camera found")
@@ -581,7 +582,9 @@ class CameraViewWidget(QtWidgets.QWidget):
         label.setStyleSheet(
             "color: #ababab; font-size: 13px; font-weight: 600; border: none;"
         )
-        label.setFixedWidth(60)
+        # Same label column width as add_slider_row, so this row sits
+        # on the same grid as every other labelled control.
+        label.setFixedWidth(120)
         controls.addWidget(label)
 
         self.camera_combo = QtWidgets.QComboBox()
@@ -605,6 +608,10 @@ class CameraViewWidget(QtWidgets.QWidget):
         layout.addLayout(controls)
 
         self.refresh(auto_start=False)
+
+    def set_insets(self, left, right):
+        """Indent to match the plot's data area (see _plot_content_inset)."""
+        self._layout.setContentsMargins(int(left), 0, int(right), 0)
 
     def _refresh_clicked(self):
         """Re-enumerate, keeping the selected camera if it is still there."""
@@ -1312,9 +1319,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._settings.setValue("ui/camera_visible", bool(visible))
         if visible:
             self.main_splitter.setSizes([650, 300])
+            self.camera_widget.set_insets(*self._plot_content_inset())
             self.camera_widget.activate()
         else:
             self.camera_widget.deactivate()
+
+    def _plot_content_inset(self):
+        """(left, right) insets of the spectroscopy plot's data area.
+
+        The y-axis pushes the plot content right by however wide its tick
+        labels currently are; the camera pane below has to match on both
+        edges or the two look shifted against each other.
+        """
+        try:
+            widget = self.linien_widget.pg_widget
+            box = self.linien_widget.view_box.sceneBoundingRect()
+            return int(box.left()), int(widget.width() - box.right())
+        except Exception:
+            return 0, 0
 
     def _build_control_column(self, root):
         scroll = QtWidgets.QScrollArea()
