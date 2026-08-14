@@ -1183,9 +1183,13 @@ class LaserSetpointWorker(QtCore.QThread):
 
     POLL_MS = 100
 
-    def __init__(self, port=None, baudrate=115200, event_log=None):
+    def __init__(self, port=None, baudrate=115200, event_log=None,
+                 disable_on_stop=True):
         super().__init__()
         self.event_log = event_log or NULL_LOG
+        # Cleared by the shutdown dialog when the operator chooses to
+        # leave the laser running past the app.
+        self.disable_on_stop = bool(disable_on_stop)
         self._port = port
         self._baudrate = baudrate
         self._ser = None
@@ -1227,14 +1231,18 @@ class LaserSetpointWorker(QtCore.QThread):
                     self.fault.emit(f"{kind} failed: {e}")
             self.msleep(self.POLL_MS)
 
-        # Invariant 7: the output goes safe before the thread dies.
-        try:
-            with self.event_log.command(
-                "laser.enable", on=False, reason="worker_stop"
-            ):
-                self._write("lason 0")
-        except Exception:
-            pass
+        # Invariant 7: the output goes safe before the thread dies, unless
+        # the operator explicitly chose to leave it running.
+        if self.disable_on_stop:
+            try:
+                with self.event_log.command(
+                    "laser.enable", on=False, reason="worker_stop"
+                ):
+                    self._write("lason 0")
+            except Exception:
+                pass
+        else:
+            self.event_log.log("laser_left_on", reason="operator_choice")
         if self._ser and self._ser.is_open:
             self._ser.close()
 

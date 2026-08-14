@@ -17,6 +17,13 @@ APP_STYLESHEET = """
         background-color: #0b0b0b;
     }
 
+    /* Dialogs are top-level windows, so they miss the rule above and
+       fall back to the platform palette -- a light panel in a dark app. */
+    QDialog {
+        background-color: #0b0b0b;
+        color: #e6e6e6;
+    }
+
     QScrollArea {
         border: none;
         background: transparent;

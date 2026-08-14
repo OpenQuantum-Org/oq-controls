@@ -40,60 +40,34 @@ temperature and MHz readouts in place of ohms and volts, and a spacing pass.
 
 Mod Strength is now **Mod Amplitude** (`mot_control.py:1612`).
 
-## [ ] 3. Logging substrate — the experimental record
+## [x] 3. Logging substrate — the experimental record
 
-Goes well beyond replacing the 38 `print()` calls. The log is not an ops
-convenience; it is the record of what the hardware actually did, and months
-later it is the only evidence of why a measurement looked the way it did.
-Build it to that standard:
+Done 2026-08-14. `mot_logging.py` carries categories (`session`/`user`/
+`command`/`readback`/`state`/`fault`), `EventLog.command()` for correlated
+transactions with `duration_ms`, a self-describing session header, an
+excepthook on both `sys` and `threading`, and 90-day retention. Transactions
+are logged in the workers, where the duration and outcome are known.
+`tests/test_logging.py` covers it.
 
-- **Every hardware transaction logged** — what was commanded, what read back,
-  how long it took, what the outcome was. Commands and their results are
-  correlated by ID, not left to be inferred from adjacency.
-- **Self-describing sessions.** Each log opens with app version, git SHA,
-  connected device identities and firmware, and resolved ports/hosts. A log
-  read in six months must stand alone.
-- **Stable structured fields**, so `logs/*.jsonl` is queryable. No prose
-  messages carrying the real information.
-- **Categories that support filtering:** user action, command, readback, state
-  change, fault.
-- **Faults can never be lost.** No fault path ends at stdout (CLAUDE.md
-  invariant 4). Install an unhandled-exception hook that logs before dying.
-- **Durations on device operations**, per the performance principles — this is
-  the app's only profiling infrastructure.
-- Define retention and rotation (currently one file per day).
+## [x] 4. Linien threading fix
 
-*Why before the threading fix:* 30 of the 38 prints are in `linien_worker.py`,
-the exact file step 4 rewrites, and today every linien fault is invisible in
-the JSONL. A threading fix cannot be verified at the bench when the failure
-mode scrolls past in a terminal. This step is what makes step 4 debuggable.
+Done 2026-08-14, and it grew to cover `LaserSetpointWorker`, which had the
+same bug against a serial port. Both now use `RidenDPSWorker`'s mutex +
+pending-queue pattern; reads return via signals; lock and unlock arm a
+deadline the loop checks instead of blocking (`lock_laser` used to freeze the
+GUI for up to 30 s). `tests/test_workers.py` covers it.
 
-## [ ] 4. Linien threading fix
+## [x] 5. Safe shutdown
 
-Convert GUI→worker calls to queued invocation, return reads via signals, end
-the shared-RPyC-connection race between `LinienWorker.run()` and the GUI thread.
-Apply the conflation and staleness rules from CLAUDE.md. Plan mode first, then
-bench verification.
+Done 2026-08-14. Closing with anything energised shows a per-item checklist —
+laser, lock, dither, coils, dispenser, repump gate — everything defaulted to
+off, so the safe path is the default path. Unchecking an item really leaves it
+energised: the choice reaches each worker's teardown through `disable_on_stop`
+/ `unlock_on_stop`. The dispenser is not offered as a choice. The
+worker-level teardown is the half that holds without a clean exit.
 
-*Why here:* top correctness bug, plausible root cause of the "linien randomly
-misbehaves" class. Establishes the pattern the remaining ~20 call sites get
-converted to, so everything after it is written correctly the first time.
-
-## [ ] 5. Safe shutdown
-
-Confirmation dialog on close that shows live state of every output — laser,
-coil DPS, dispenser DPS, repump gate, lock — and does not let the app exit with
-something energised unnoticed. Backed by worker-level teardown that drives
-outputs to a safe state (CLAUDE.md invariant 7), so the guarantee holds even
-when the app dies without a clean close.
-
-*Why after step 4:* a dialog querying live device state needs the queued read
-path to exist. The worker-side safe teardown is the more important half —
-the dialog only helps on a clean exit.
-
-*Open:* is "everything off" always right? Leaving the laser locked across an app
-restart may be desirable. Likely a per-item checklist showing state with
-choices, not a blanket kill.
+*Still open:* the answer to "is everything off always right?" turned out to be
+no, which is why this is a checklist rather than a blanket kill.
 
 ## [ ] 6. Headless hardware entry point
 
@@ -143,8 +117,12 @@ What is open now is all bench work, none of it answerable from the desk:
    Steinhart-Hart and VCO conversions are unverified against a real reading.
 3. **Is the 16-38 °C range right**, and is 0.1 V / 0.1 A too coarse for setting
    coil current?
-4. **Does everything actually turn off on close?** `_silence_modulation_on_exit`
-   is wired but only step 5 makes this a guarantee.
+4. **Does the shutdown checklist match reality?** It reads the UI's own state
+   rather than querying devices, deliberately — the close path must not block
+   on a device that has stopped answering. That is only right if the UI and the
+   hardware actually agree.
+5. **Does the queued command path still feel responsive?** Setpoints now reach
+   linien on the next 200 ms poll instead of immediately.
 
 ## Ordering rationale, in one line
 

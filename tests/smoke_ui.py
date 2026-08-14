@@ -23,6 +23,15 @@ TMP = tempfile.mkdtemp(prefix="mot-smoke-")
 LOG_DIR = os.path.join(TMP, "logs")
 INI = os.path.join(TMP, "smoke-settings.ini")
 
+
+def _records():
+    """Every event-log record written so far, oldest first."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(LOG_DIR, "*.jsonl"))):
+        with open(path, encoding="utf-8") as f:
+            out.extend(json.loads(line) for line in f)
+    return out
+
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -96,6 +105,10 @@ assert INPUT_BORDER in mot_control.COMBO_STYLE
 # Corners are square everywhere -- no rounded panels or controls. The
 # per-corner spellings count too: border-top-right-radius on the spinbox
 # buttons slipped past a check that only looked for "border-radius".
+# Dialogs are top-level windows, so they miss the QMainWindow rule and
+# render as a light panel in a dark app unless styled explicitly.
+assert "QDialog {" in stylesheet
+
 assert "border-radius: 0px" in stylesheet
 assert not re.search(r"[\w-]*border[\w-]*-?radius:\s*[1-9]", stylesheet)
 for sheet in (mot_control.COMBO_STYLE, mot_control.APP_STYLESHEET):
@@ -811,9 +824,55 @@ try:
     pixmap.save(out)
     print("saved", out)
 
-    # usb card ends expanded (auto-expand persisted), log card expanded.
-    window.close()  # closeEvent saves geometry/splitter/camera state
+    # --- Safe shutdown: nothing energised leaves quietly, anything
+    # energised has to be acknowledged first ---
+    # Earlier steps left the dither and the coils on; with everything off
+    # there is nothing to ask about and the app must close silently.
+    window.mod_strength_slider.setValue(0)
+    window.mot_coil_output_btn.setChecked(False)
+    window.repump_gpio_btn.setChecked(False)
+    window.laser_btn.setChecked(False)
+    assert window.live_outputs() == [], [
+        (o.key, o.detail) for o in window.live_outputs()
+    ]
+
+    window.mod_strength_slider.setValue(400)
+    window.mot_coil_output_btn.setChecked(True)
+    window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 30.0})
+    live = {o.key: o for o in window.live_outputs()}
+    assert set(live) == {"modulation", "coils", "dispenser"}, set(live)
+    # The dispenser is not the operator's to leave running.
+    assert live["dispenser"].mandatory
+    assert not live["coils"].mandatory
+    assert "0.400 Vpp" in live["modulation"].detail
+
+    # Every item defaults to being turned off, so the safe path is the
+    # default path -- but unchecking one really does leave it energised.
+    dialog = mot_control.ShutdownDialog(window, list(live.values()))
+    assert dialog.turn_off() == {"modulation", "coils", "dispenser"}
+    dialog._checks["coils"].setChecked(False)
+    assert dialog.turn_off() == {"modulation", "dispenser"}
+    # A mandatory item cannot be unchecked at all.
+    assert not dialog._checks["dispenser"].isEnabled()
+    dialog.reject()
+
+    # Cancelling the dialog must abort the close, not fall through it.
+    mot_control.ShutdownDialog.exec = lambda self: QtWidgets.QDialog.Rejected
+    window.close()
+    assert window.isVisible(), "cancelled shutdown still closed the window"
+
+    # Accepting drives the chosen outputs safe. "coils" is left out here,
+    # so its worker must be told not to force the output off on stop.
+    mot_control.ShutdownDialog.exec = lambda self: QtWidgets.QDialog.Accepted
+    mot_control.ShutdownDialog.turn_off = lambda self: {"modulation"}
+    window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
+    window.close()
     app.processEvents()
+    choice = next(
+        r for r in reversed(_records()) if r["event"] == "shutdown_choice"
+    )
+    assert "modulation" in choice["turned_off"]
+    assert "coils" in choice["left_on"]
 
     # --- Persistent UI state + parameter persistence round-trip ---
     w1 = mot_control.OpenQuantumControlsWindow()

@@ -65,8 +65,12 @@ class LinienWorker(QtCore.QThread):
         username="root",
         password="root",
         event_log=None,
+        unlock_on_stop=True,
     ):
         super().__init__()
+        # Cleared by the shutdown dialog when the operator chooses to
+        # leave the laser locked past the app.
+        self.unlock_on_stop = bool(unlock_on_stop)
         self.host = host
         self.username = username
         self.password = password
@@ -206,8 +210,20 @@ class LinienWorker(QtCore.QThread):
             self._emit_lock_state_best_effort()
             self.msleep(self.POLL_MS)
 
-        # Leave the laser sweeping rather than held at a lock point: an
-        # unattended lock drifts, and the sweep is the safe resting state.
+        # Commands queued just before stop() -- zeroing the dither, most
+        # importantly -- would otherwise never reach the device, because
+        # the loop tests self.running before draining.
+        self._process_pending()
+        self._teardown()
+        self.event_log.log("linien_loop_ended", host=self.host)
+
+    def _teardown(self):
+        """Leave the Red Pitaya in a safe resting state (invariant 7)."""
+        if not self.unlock_on_stop:
+            self.event_log.log("lock_left_engaged", reason="operator_choice")
+            return
+        # Sweeping rather than held at a lock point: an unattended lock
+        # drifts off the line with nothing watching it.
         try:
             with self.event_log.command("linien.unlock", reason="worker_stop"):
                 self.client.connection.root.start_sweep()
@@ -215,7 +231,6 @@ class LinienWorker(QtCore.QThread):
             self.event_log.fault(
                 "linien", message=f"could not start sweep on stop: {e}"
             )
-        self.event_log.log("linien_loop_ended", host=self.host)
 
     def _connect(self):
         try:

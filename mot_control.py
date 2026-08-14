@@ -845,6 +845,89 @@ class PidDialog(QtWidgets.QDialog):
         return self.p_spin.value(), self.i_spin.value(), self.d_spin.value()
 
 
+class LiveOutput:
+    """One thing the app can leave energised when it exits.
+
+    ``mandatory`` marks an output that is not the operator's to leave on
+    -- the dispenser at 7.5 A into a consumable is the only one.
+    """
+
+    __slots__ = ("key", "label", "detail", "mandatory")
+
+    def __init__(self, key, label, detail, mandatory=False):
+        self.key = key
+        self.label = label
+        self.detail = detail
+        self.mandatory = mandatory
+
+
+class ShutdownDialog(QtWidgets.QDialog):
+    """Per-output checklist shown when closing with something energised.
+
+    Deliberately not a blanket kill: leaving the laser locked across an
+    app restart is a legitimate thing to want, and a dialog that only
+    offers "everything off" gets dismissed without being read. Every item
+    defaults to being turned off, so the safe path is also the default
+    path.
+    """
+
+    def __init__(self, parent, outputs):
+        super().__init__(parent)
+        self.setWindowTitle("Close OpenQuantum Controls")
+        apply_dark_titlebar(self)
+        self._checks = {}
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        heading = QtWidgets.QLabel(
+            f"{len(outputs)} output{'s' if len(outputs) != 1 else ''} "
+            "still energised. Choose what to turn off before closing:"
+        )
+        heading.setWordWrap(True)
+        heading.setStyleSheet(
+            f"color: {ACCENT}; font-size: {UI_FONT_PX}px; border: none;"
+        )
+        root.addWidget(heading)
+
+        for output in outputs:
+            check = QtWidgets.QCheckBox(f"{output.label} — {output.detail}")
+            check.setChecked(True)
+            if output.mandatory:
+                # Not a choice: firing draws 7.5 A through a consumable
+                # and nothing would be left running to stop it.
+                check.setEnabled(False)
+                check.setText(f"{check.text()}  (always off)")
+            root.addWidget(check)
+            self._checks[output.key] = check
+
+        note = QtWidgets.QLabel(
+            "Unchecked outputs stay energised after the app exits, with "
+            "nothing monitoring them."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color: #969696; border: none; font-size: {UI_FONT_PX}px;"
+        )
+        root.addWidget(note)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch()
+        cancel_btn = QtWidgets.QPushButton("Keep Running")
+        cancel_btn.clicked.connect(self.reject)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(close_btn)
+        root.addLayout(button_row)
+
+    def turn_off(self):
+        """Keys the operator wants driven safe."""
+        return {key for key, check in self._checks.items() if check.isChecked()}
+
+
 class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # Worker threads log directly (a fault that must reach the GUI thread
     # to be recorded is lost when the GUI is what broke), so records reach
@@ -3368,22 +3451,96 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
         )
 
-    def _silence_modulation_on_exit(self):
-        """Drive the dither to zero before the linien worker goes away.
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
 
-        Only reaches the device on a graceful close -- a crash or a kill
-        leaves the last value on the Red Pitaya.
+    def live_outputs(self):
+        """Everything currently energised, newest hazard first.
+
+        Read from the UI's own state rather than by querying devices: the
+        close path must not block on a device that has stopped answering,
+        which is exactly when you most want to be told what is still on.
         """
-        worker = self._get_lock_worker()
-        if worker is None:
-            return
-        try:
-            worker.set_modulation_amplitude(0)
+        outputs = []
+        if self._dispenser_phase == "firing":
+            outputs.append(LiveOutput(
+                "dispenser", "Dispenser",
+                f"firing at {self._dispenser_fire_current:.1f} A",
+                mandatory=True,
+            ))
+        if self.laser_btn.isChecked():
+            outputs.append(LiveOutput(
+                "laser", "Laser diode",
+                f"{self.current_slider.value()} mA",
+            ))
+        if self.chip_text("lock") == "LOCKED":
+            outputs.append(LiveOutput(
+                "lock", "Laser lock", "engaged, will drift unwatched",
+            ))
+        if self.mod_strength_slider.value() > 0:
+            outputs.append(LiveOutput(
+                "modulation", "Modulation dither",
+                f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp",
+            ))
+        if self.mot_coil_output_btn.isChecked():
+            outputs.append(LiveOutput(
+                "coils", "MOT coils",
+                f"{self.mot_coil_current_slider.value() / 1000.0:.1f} A",
+            ))
+        if self.repump_gpio_btn.isChecked():
+            outputs.append(LiveOutput("repump", "Repump gate", "open"))
+        return outputs
+
+    def _drive_outputs_safe(self, keys):
+        """Turn off what the operator chose, and let the rest survive us.
+
+        Each worker already drives its own output safe on stop; the flags
+        here are how an explicit "leave it on" reaches that teardown.
+        """
+        lock_worker = self._get_lock_worker()
+        laser_worker = getattr(self, "laser_worker", None)
+
+        if "modulation" in keys and lock_worker is not None:
+            # A linien parameter, not a worker output, so nothing else
+            # would zero it -- it would keep dithering after we exit.
+            lock_worker.set_modulation_amplitude(0)
             self._event_log.log("modulation_auto_off", reason="app_exit")
-        except Exception as e:
-            self._log_fault("linien", f"could not zero modulation on exit: {e}")
+        if lock_worker is not None:
+            lock_worker.unlock_on_stop = "lock" in keys
+        if laser_worker is not None:
+            laser_worker.disable_on_stop = "laser" in keys
+        for key, attr in (
+            ("coils", "mot_coil_worker"),
+            ("repump", "repump_gpio_worker"),
+        ):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                worker.disable_on_stop = key in keys
+
+        self._event_log.log(
+            "shutdown_choice",
+            turned_off=sorted(keys),
+            left_on=sorted(
+                o.key for o in self.live_outputs() if o.key not in keys
+            ),
+        )
 
     def closeEvent(self, event):
+        outputs = self.live_outputs()
+        if outputs:
+            dialog = ShutdownDialog(self, outputs)
+            if dialog.exec() != QtWidgets.QDialog.Accepted:
+                self._event_log.user("close_cancelled")
+                event.ignore()
+                return
+            # Mandatory items are not the operator's to leave on.
+            keys = dialog.turn_off() | {
+                o.key for o in outputs if o.mandatory
+            }
+        else:
+            keys = set()
+
         self._save_ui_state()
         self._event_log.log("app_stop")
         if self._dispenser_phase == "firing":
@@ -3394,11 +3551,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "dispenser/cooldown_until",
                 time.time() + DispenserWorker.COOLDOWN_SECONDS,
             )
-        # The workers each drive their own output safe on stop (laser
-        # lason 0, both DPS outputs off, repump gate low). Modulation is
-        # the exception: it is a linien parameter, not a worker output, so
-        # it would otherwise keep dithering the laser after we exit.
-        self._silence_modulation_on_exit()
+        self._drive_outputs_safe(keys)
 
         self.camera_widget.stop()
         self.linien_widget.stop()
