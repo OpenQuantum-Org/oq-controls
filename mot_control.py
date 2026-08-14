@@ -780,78 +780,6 @@ class CameraViewWidget(QtWidgets.QWidget):
         self.stack.setCurrentWidget(self.message_label)
 
 
-class DispenserOverrideDialog(QtWidgets.QDialog):
-    """Change the dispenser fire current/duration (confirmed afterwards)."""
-
-    def __init__(self, parent, current_a, fire_seconds):
-        super().__init__(parent)
-        self.setWindowTitle("Dispenser Override")
-
-        from mot_workers import DPS_MODELS
-
-        max_current = DPS_MODELS["DPS5020"]["max_current"]
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(10)
-
-        form = QtWidgets.QFormLayout()
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
-
-        self.current_spin = QtWidgets.QDoubleSpinBox()
-        self.current_spin.setRange(0.1, max_current)
-        self.current_spin.setDecimals(2)
-        self.current_spin.setSingleStep(0.1)
-        self.current_spin.setSuffix(" A")
-        self.current_spin.setValue(float(current_a))
-
-        self.duration_spin = QtWidgets.QDoubleSpinBox()
-        self.duration_spin.setRange(1.0, 120.0)
-        self.duration_spin.setDecimals(0)
-        self.duration_spin.setSingleStep(1.0)
-        self.duration_spin.setSuffix(" s")
-        self.duration_spin.setValue(float(fire_seconds))
-
-        form.addRow("Fire current:", self.current_spin)
-        form.addRow("Fire duration:", self.duration_spin)
-        root.addLayout(form)
-
-        note = QtWidgets.QLabel(
-            "The dispenser runs constant-current; the default of "
-            f"{DispenserWorker.DISPENSE_CURRENT_A:.1f} A for "
-            f"{DispenserWorker.FIRE_SECONDS:.0f} s is the safe operating "
-            "point. Higher settings risk burning out the dispenser or "
-            "overloading the pump."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #cc8830; border: none; font-size: 13px;")
-        root.addWidget(note)
-
-        button_row = QtWidgets.QHBoxLayout()
-        defaults_btn = QtWidgets.QPushButton(
-            f"Defaults ({DispenserWorker.DISPENSE_CURRENT_A:.1f} A / "
-            f"{DispenserWorker.FIRE_SECONDS:.0f} s)"
-        )
-        defaults_btn.clicked.connect(self._fill_defaults)
-        button_row.addWidget(defaults_btn)
-        button_row.addStretch()
-        cancel_btn = QtWidgets.QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        apply_btn = QtWidgets.QPushButton("Apply...")
-        apply_btn.setDefault(True)
-        apply_btn.clicked.connect(self.accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(apply_btn)
-        root.addLayout(button_row)
-
-    def _fill_defaults(self):
-        self.current_spin.setValue(DispenserWorker.DISPENSE_CURRENT_A)
-        self.duration_spin.setValue(DispenserWorker.FIRE_SECONDS)
-
-    def values(self):
-        return self.current_spin.value(), self.duration_spin.value()
-
-
 class PidDialog(QtWidgets.QDialog):
     """Set the Linien lock PID gains (each 0-8191)."""
 
@@ -960,6 +888,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._filters_syncing = False
 
         self._chip_state = {}
+        self._device_connected = {}
         self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
         self._readback_log_output = {}
@@ -1566,10 +1495,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             enabled = QtWidgets.QCheckBox(f"Filter {index}")
             enabled.setCursor(QtCore.Qt.PointingHandCursor)
             enabled.setFixedWidth(120)
-            enabled.setStyleSheet(
-                "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
-                "QCheckBox::indicator { width: 14px; height: 14px; }"
-            )
             type_combo = QtWidgets.QComboBox()
             _style_combo(type_combo)
             type_combo.addItem("Low pass", 0)
@@ -1608,7 +1533,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(make_section_title("Config"))
         config_row = QtWidgets.QHBoxLayout()
-        config_row.setSpacing(6)
+        config_row.setSpacing(8)
         self.save_config_btn = QtWidgets.QPushButton("Save Config As...")
         self.save_config_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.save_config_btn.clicked.connect(self._save_config_dialog)
@@ -1761,10 +1686,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Determine signal offset"
         )
         self.auto_offset_check.setCursor(QtCore.Qt.PointingHandCursor)
-        self.auto_offset_check.setStyleSheet(
-            "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; }"
-        )
         self.auto_offset_check.setChecked(
             self._bool_setting("linien/determine_offset", True)
         )
@@ -1801,7 +1722,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
 
         lock_button_row = QtWidgets.QHBoxLayout()
-        lock_button_row.setSpacing(6)
+        lock_button_row.setSpacing(8)
         self.pid_btn = QtWidgets.QPushButton("Set PID...")
         self.pid_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.pid_btn.clicked.connect(self._open_pid_dialog)
@@ -1887,10 +1808,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         lock_row.setSpacing(8)
         self.laser_unlock_box = QtWidgets.QCheckBox("Unlock setpoints")
         self.laser_unlock_box.setCursor(QtCore.Qt.PointingHandCursor)
-        self.laser_unlock_box.setStyleSheet(
-            "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; }"
-        )
         self.laser_unlock_box.toggled.connect(self._on_laser_unlock)
         lock_row.addWidget(self.laser_unlock_box)
         lock_row.addStretch()
@@ -1963,12 +1880,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mot_coil_readback,
             help_cursor=True,
         )
-        self.mot_coil_output_btn = QtWidgets.QPushButton("Coils Off")
-        self.mot_coil_output_btn.setCheckable(True)
-        self.mot_coil_output_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.mot_coil_output_btn.toggled.connect(self._toggle_mot_coils)
-        layout.addWidget(self.mot_coil_output_btn)
-        self._tip("Toggle the MOT coil supply output.", self.mot_coil_output_btn)
         self.mot_coil_voltage_slider, self.mot_coil_voltage_edit = add_slider_row(
             layout,
             "Voltage:",
@@ -2007,6 +1918,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mot_coil_current_slider,
             self.mot_coil_current_edit,
         )
+
+        # The action goes under the settings it acts on, as in the Laser
+        # and Repump cards.
+        self.mot_coil_output_btn = QtWidgets.QPushButton("Coils Off")
+        self.mot_coil_output_btn.setCheckable(True)
+        self.mot_coil_output_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.mot_coil_output_btn.toggled.connect(self._toggle_mot_coils)
+        layout.addWidget(self.mot_coil_output_btn)
+        self._tip("Toggle the MOT coil supply output.", self.mot_coil_output_btn)
 
         parent.addWidget(card)
 
@@ -2082,7 +2002,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
 
         fire_row = QtWidgets.QHBoxLayout()
-        fire_row.setSpacing(6)
+        fire_row.setSpacing(8)
         self.dispenser_fire_btn = QtWidgets.QPushButton(
             f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
         )
@@ -2093,17 +2013,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Run the dispenser at the fixed operating point, then auto-off.\n"
             "Click again mid-fire to abort (cooldown still applies).",
             self.dispenser_fire_btn,
-        )
-        self.dispenser_override_btn = QtWidgets.QPushButton("Override...")
-        self.dispenser_override_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.dispenser_override_btn.clicked.connect(
-            self._open_dispenser_override_dialog
-        )
-        fire_row.addWidget(self.dispenser_override_btn)
-        self._tip(
-            "Change the fire current/duration (confirmation required;\n"
-            "locked while firing).",
-            self.dispenser_override_btn,
         )
         layout.addLayout(fire_row)
 
@@ -2359,17 +2268,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             else:
                 self._set_colored_text(getattr(self, attr), "Not found", "#b56a6a")
 
-        if res.get("ok"):
-            self._set_chip("usb", "DEVICES 3/3", "#6f9e7c")
-        else:
-            n_ok = sum(
-                1
-                for key in ("laser", "mot_coil", "dispenser")
-                if status.get(key) == "verified"
-            )
-            # The card is left as the user had it; the header count and
-            # the per-row statuses inside say which device is missing.
-            self._set_chip("usb", f"DEVICES {n_ok}/3", "#b56a6a")
+        # Seed the same state the live handlers use, so a probe result and
+        # a worker reconnect can never disagree about the count.
+        for key in ("laser", "mot_coil", "dispenser"):
+            self._device_connected[key] = status.get(key) == "verified"
+        self._refresh_device_count()
 
         self._save_connection_settings()
 
@@ -2428,7 +2331,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             lambda status: self._set_status_label(self.laser_status, status)
         )
         self.laser_worker.connection_status.connect(
-            lambda status: self._set_usb_status_label(self.laser_usb_status, status)
+            lambda status: self._set_usb_status_label(
+                self.laser_usb_status, status, "laser"
+            )
         )
         self.laser_worker.connection_status.connect(
             lambda status: self._log_connection("laser", status)
@@ -2442,7 +2347,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             model="DPS5005",
         )
         self.mot_coil_worker.connection_status.connect(
-            lambda status: self._set_usb_status_label(self.coil_usb_status, status)
+            lambda status: self._set_usb_status_label(
+                self.coil_usb_status, status, "mot_coil"
+            )
         )
         self.mot_coil_worker.connection_status.connect(
             lambda status: self._log_connection("coil", status)
@@ -2463,7 +2370,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             dispense_voltage_v=self._dispenser_fire_voltage,
         )
         self.dispenser_worker.connection_status.connect(
-            lambda status: self._set_usb_status_label(self.dispenser_usb_status, status)
+            lambda status: self._set_usb_status_label(
+                self.dispenser_usb_status, status, "dispenser"
+            )
         )
         self.dispenser_worker.connection_status.connect(
             lambda status: self._log_connection("dispenser", status)
@@ -2708,29 +2617,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         else:
             worker.fire()
 
-    def _open_dispenser_override_dialog(self):
-        dialog = DispenserOverrideDialog(
-            self, self._dispenser_fire_current, self._dispenser_fire_seconds
-        )
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        current_a, seconds = dialog.values()
-        confirm = QtWidgets.QMessageBox.question(
-            self,
-            "Confirm Dispenser Override",
-            f"Set the dispenser fire to {current_a:.2f} A for "
-            f"{seconds:.0f} s?\n\n"
-            f"The safe default is {DispenserWorker.DISPENSE_CURRENT_A:.1f} A "
-            f"for {DispenserWorker.FIRE_SECONDS:.0f} s. Excessive current or "
-            "duration can burn out the dispenser or overload the pump.",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
-            QtWidgets.QMessageBox.Cancel,
-        )
-        if confirm != QtWidgets.QMessageBox.Yes:
-            return
-        self._apply_dispenser_override(current_a, seconds)
-
-    def _apply_dispenser_override(self, current_a, seconds):
+    def _set_dispenser_fire(self, current_a, seconds):
         self._dispenser_fire_current = float(current_a)
         self._dispenser_fire_seconds = float(seconds)
         self._settings.setValue(
@@ -2739,8 +2626,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._settings.setValue(
             "dispenser/fire_seconds", self._dispenser_fire_seconds
         )
-        # Keep the current slider showing what the override set, without
-        # bouncing back through _on_dispenser_current.
+        # Drive the sliders without bouncing back through their handlers.
         self.dispenser_current_slider.blockSignals(True)
         self.dispenser_current_slider.setValue(
             int(round(self._dispenser_fire_current * 1000))
@@ -2759,7 +2645,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.dispenser_time_slider.blockSignals(False)
         self._push_dispenser_fire_parameters()
         self._event_log.log(
-            "dispenser_override",
+            "dispenser_setpoint",
             current_a=self._dispenser_fire_current,
             seconds=self._dispenser_fire_seconds,
         )
@@ -2860,7 +2746,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             elif phase == "idle" and self._dispenser_phase == "cooldown":
                 self._event_log.log("dispenser_ready")
         self._dispenser_phase = phase
-        self.dispenser_override_btn.setEnabled(phase != "firing")
         self._update_dispenser_progress(phase, remaining)
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
@@ -3045,7 +2930,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_filters_ui(filters)
 
     def _on_linien_connection(self, status):
-        self._set_usb_status_label(self.rp_usb_status, status)
+        self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
@@ -3297,7 +3182,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Cancel,
             )
             if confirm == QtWidgets.QMessageBox.Yes:
-                self._apply_dispenser_override(new_current, new_seconds)
+                self._set_dispenser_fire(new_current, new_seconds)
 
         self._event_log.log(
             "config_loaded",
@@ -3370,8 +3255,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 uuid=payload.get("uuid"),
             )
 
-    @staticmethod
-    def _set_usb_status_label(label, status):
+    def _set_usb_status_label(self, label, status, key=None):
         """Compact status for the fixed-width USB card rows.
 
         The full status string (port path, error detail) goes in the
@@ -3389,6 +3273,31 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         label.setToolTip(status)
         label.setStyleSheet(
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
+        )
+        if key is not None:
+            self._device_connected[key] = text == "OK"
+            self._refresh_device_count()
+
+    # Every device with a status row, so the count matches what is listed.
+    _DEVICE_KEYS = ("rp", "laser", "mot_coil", "dispenser")
+
+    def _refresh_device_count(self):
+        """Header count, derived from live connection state.
+
+        It used to be set only by the USB probe, which meant it latched
+        whatever startup found -- usually before anything had connected --
+        and never revised, so the header could read 1/3 while the rows
+        below it all said OK.
+        """
+        total = len(self._DEVICE_KEYS)
+        n_ok = sum(
+            1 for key in self._DEVICE_KEYS if self._device_connected.get(key)
+        )
+        self._set_chip(
+            "usb",
+            f"DEVICES {n_ok}/{total}",
+            "#6f9e7c" if n_ok == total else
+            self._CHIP_NEUTRAL if n_ok == 0 else "#b9924f",
         )
 
     @staticmethod

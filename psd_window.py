@@ -429,7 +429,7 @@ class PsdWindow(QtWidgets.QMainWindow):
         """Two labelled rows, stacked: the side column is too narrow to
         put both settings on one line."""
         column = QtWidgets.QVBoxLayout()
-        column.setSpacing(6)
+        column.setSpacing(8)
 
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(8)
@@ -512,14 +512,14 @@ class PsdWindow(QtWidgets.QMainWindow):
 
     def _build_trace_buttons(self):
         column = QtWidgets.QVBoxLayout()
-        column.setSpacing(6)
+        column.setSpacing(8)
         self.delete_btn = QtWidgets.QPushButton("Delete selected")
         self.delete_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.delete_btn.clicked.connect(self.delete_curve)
         column.addWidget(self.delete_btn)
 
         row = QtWidgets.QHBoxLayout()
-        row.setSpacing(6)
+        row.setSpacing(8)
         self.import_btn = QtWidgets.QPushButton("Import traces")
         self.import_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.import_btn.clicked.connect(self.import_psd)

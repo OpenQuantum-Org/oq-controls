@@ -349,7 +349,6 @@ try:
     # Dispenser fire-state UI: button, label, chip, and progress bar.
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 15.0})
     assert "Abort Fire" in window.dispenser_fire_btn.text()
-    assert not window.dispenser_override_btn.isEnabled()  # locked while firing
     assert window.chip_text("disp") == "DISP FIRING"
     assert window.dispenser_progress.isVisibleTo(window)
     assert window.dispenser_progress.value() == 500  # 15 s of 30 s left
@@ -360,7 +359,6 @@ try:
     assert window.dispenser_progress.value() == 969  # 872 s of 900 s left
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     assert window.dispenser_fire_btn.isEnabled()
-    assert window.dispenser_override_btn.isEnabled()
     assert "Fire Dispenser (30 s)" == window.dispenser_fire_btn.text()
     assert not window.dispenser_progress.isVisibleTo(window)
     assert window.chip_text("disp") == "DISP IDLE"
@@ -571,27 +569,19 @@ try:
     psd.close()  # hides rather than destroys, so traces survive
     assert not psd.isVisible()
 
-    # --- Dispenser override dialog + apply flow (modal exec skipped) ---
-    dlg = mot_control.DispenserOverrideDialog(window, 7.5, 30.0)
-    assert dlg.values() == (7.5, 30.0)
-    dlg.current_spin.setValue(12.5)
-    dlg.duration_spin.setValue(60.0)
-    assert dlg.values() == (12.5, 60.0)
-    dlg._fill_defaults()
-    assert dlg.values() == (7.5, 30.0)
-
-    # An override drives the current slider, which is now the setpoint
-    # display as well as the control.
+    # --- Dispenser setpoints ---
+    # There is no override dialog: the sliders are the setpoints, and
+    # _set_dispenser_fire (used by config load) drives them.
     assert window.dispenser_current_slider.value() == 7500
-    window._apply_dispenser_override(10.0, 45.0)
+    window._set_dispenser_fire(10.0, 45.0)
     assert window.dispenser_current_slider.value() == 10000
     assert window.dispenser_current_edit.text() == "10.000 A"
     assert window.dispenser_fire_btn.text() == "Fire Dispenser (45 s)"
-    window._apply_dispenser_override(7.5, 30.0)
+    window._set_dispenser_fire(7.5, 30.0)
     assert window.dispenser_current_slider.value() == 7500
 
     # Log pane mirrored the events, and the header shows the last one.
-    assert "dispenser_override" in window.log_view.toPlainText()
+    assert "dispenser_setpoint" in window.log_view.toPlainText()
     assert "dispenser_fire_end" in window.log_view.toPlainText()
     assert window.log_card.header_status.text() != ""
 
@@ -608,7 +598,6 @@ try:
         window.current_slider,
         window.vtune_slider,
         window.dispenser_fire_btn,
-        window.dispenser_override_btn,
         window.mot_coil_output_btn,
         window.repump_gpio_btn,
         window.sweep_speed_combo,
@@ -676,7 +665,7 @@ try:
     window.vtune_slider.setValue(28100)
     window._settings.setValue("psd/max_decimation", 14)
     window._set_filters_ui({"automatic": False, "filter_1_frequency": 777})
-    window._apply_dispenser_override(12.0, 40.0)
+    window._set_dispenser_fire(12.0, 40.0)
     orig_question = QtWidgets.QMessageBox.question
     QtWidgets.QMessageBox.question = (
         lambda *a, **k: QtWidgets.QMessageBox.Yes
@@ -716,8 +705,20 @@ try:
     # Status rows mirror the edits, which remain the source of truth.
     assert window.laser_status_value.text() == "/dev/cu.fakeA"
     assert window.coil_status_value.text() == "/dev/cu.fakeB"
-    assert "DEVICES 3/3" in window.usb_card.header_status.text()
-    assert window.chip_text("usb") == "DEVICES 3/3"
+    assert "DEVICES 3/4" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "DEVICES 3/4"
+    # ...and the count follows live connection state, not just the probe:
+    # this is what used to latch at whatever startup found.
+    window._on_linien_connection("connected:rp-test.local")
+    assert window.chip_text("usb") == "DEVICES 4/4"
+    window._set_usb_status_label(
+        window.coil_usb_status, "error:port gone", "mot_coil"
+    )
+    assert window.chip_text("usb") == "DEVICES 3/4"
+    window._set_usb_status_label(
+        window.coil_usb_status, "connected:COM5", "mot_coil"
+    )
+    assert window.chip_text("usb") == "DEVICES 4/4"
     assert window.laser_usb_status.text() == "Verified"
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     assert hasattr(window, "laser_worker")  # serial workers were started
@@ -735,8 +736,8 @@ try:
         },
         startup=False,  # startup=True would open the modal dialog
     )
-    assert "DEVICES 1/3" in window.usb_card.header_status.text()
-    assert window.chip_text("usb") == "DEVICES 1/3"
+    assert "DEVICES 2/4" in window.usb_card.header_status.text()
+    assert window.chip_text("usb") == "DEVICES 2/4"
     assert window.coil_usb_status.text() == "Not found"
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     app.processEvents()
@@ -752,7 +753,7 @@ try:
         {"v_out": 50.0, "i_out": 5.0, "power": 250.0, "output_enabled": True,
          "cv_cc": 0, "protection": 3}
     )
-    window._apply_dispenser_override(10.0, 45.0)
+    window._set_dispenser_fire(10.0, 45.0)
     window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
     window.log_card.set_expanded(True)
     # Manual setup expanded too: the port dropdowns carry the longest
@@ -768,7 +769,7 @@ try:
         scroll.viewport().width(),
     )
     assert not scroll.horizontalScrollBar().isVisible()
-    window._apply_dispenser_override(7.5, 30.0)
+    window._set_dispenser_fire(7.5, 30.0)
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     # Back to the default shape so the reference screenshot shows what the
     # app actually opens with: every card collapsed.
@@ -809,7 +810,7 @@ try:
     w1.mot_coil_current_slider.setValue(2500)
     w1.vtune_slider.setValue(29000)
     w1.sweep_speed_combo.setCurrentIndex(4)
-    w1._apply_dispenser_override(9.0, 20.0)
+    w1._set_dispenser_fire(9.0, 20.0)
     w1._settings.sync()
     w1.close()
     app.processEvents()
@@ -848,7 +849,7 @@ for expected in (
     "protection_trip",
     "dispenser_fire_start",
     "dispenser_fire_end",
-    "dispenser_override",
+    "dispenser_setpoint",
     "vtune",
     "lock",
     "psd_window",

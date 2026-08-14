@@ -73,6 +73,19 @@ APP_STYLESHEET = """
         border-color: #262626;
     }
 
+    /* --- Checkboxes --- */
+    QCheckBox {
+        color: #e6e6e6;
+        font-size: 13px;
+        border: none;
+        padding: 4px 2px;
+        spacing: 8px;          /* gap between the box and its label */
+    }
+    QCheckBox::indicator {
+        width: 14px;
+        height: 14px;
+    }
+
     /* --- Sliders --- */
     QSlider::groove:horizontal {
         height: 4px;
