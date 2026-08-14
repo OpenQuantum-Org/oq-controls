@@ -36,7 +36,7 @@ COMBO_STYLE = """
         border: 1px solid #404040;
         border-radius: 0px;
         padding: 2px 6px;
-        font-size: 13px;
+        font-size: %(px)dpx;
     }
     QComboBox:focus { color: white; border-color: #949494; }
     QComboBox::drop-down { border: none; width: 18px; }
@@ -47,7 +47,7 @@ COMBO_STYLE = """
         selection-color: white;
         outline: none;
     }
-"""
+""" % {"px": UI_FONT_PX}
 
 # linien reports PSD amplitudes in ADC counts; its GUI divides by this to
 # plot volts (linien_gui.ui.plot_widget.V in 2.1.0).
@@ -145,13 +145,18 @@ class PsdPlotWidget(pg.PlotWidget):
         self.curves = {}
 
         self.setLogMode(x=True, y=True)
-        self.setLabel("left", "PSD", units="V / Sqrt[Hz]")
-        self.setLabel("bottom", "Frequency", units="Hz")
+        label_style = {
+            "font-size": f"{UI_FONT_PX}px",
+            "font-family": UI_FONT_FAMILY,
+            "color": "#969696",
+        }
+        self.setLabel("left", "PSD", units="V / Sqrt[Hz]", **label_style)
+        self.setLabel("bottom", "Frequency", units="Hz", **label_style)
         self.getAxis("left").enableAutoSIPrefix(False)
         self.getAxis("bottom").enableAutoSIPrefix(False)
         self.showGrid(x=True, y=True, alpha=0.15)
 
-        font = QtGui.QFont()
+        font = QtGui.QFont(UI_FONT_FAMILY)
         font.setPixelSize(UI_FONT_PX)
         for side in ("left", "bottom"):
             self.getAxis(side).setTickFont(font)
@@ -302,6 +307,12 @@ class PsdTableWidget(QtWidgets.QTableWidget):
             " border: 0px; }"
             % {"px": UI_FONT_PX}
         )
+        # Every column sizes to its content except Time, which takes the
+        # slack so the table fills its column without truncating a
+        # timestamp into "2023-1...".
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.uuids = []
 
     def add_curve(self, uuid, data, color):
@@ -340,7 +351,6 @@ class PsdTableWidget(QtWidgets.QTableWidget):
         self.setItem(row, 4, create_item(data["i"]))
         self.setItem(row, 5, create_item(data["d"]))
         self.setItem(row, 6, create_item(f"{data['fitness']:.4f}"))
-        self.resizeColumnsToContents()
 
     def delete_selected_curve(self):
         current = self.currentRow()
