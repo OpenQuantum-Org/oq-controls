@@ -86,9 +86,16 @@ class LinienWorker(QtCore.QThread):
         self._last_ui_lock_state = None  # debounce UI lock-state updates
         self._mutex = QtCore.QMutex()
         self._pending = []
+        # Woken by _queue so a command starts immediately instead of
+        # waiting out the poll period.
+        self._wake = QtCore.QWaitCondition()
         # Armed by lock/unlock; checked each pass so the loop keeps
         # acquiring while the transition settles.
         self._await_lock = None  # (want_locked, deadline_monotonic)
+        # Lock reading taken during acquisition, so the 2048-point
+        # to_plot pickle is fetched once per poll rather than twice.
+        self._locked_now = None
+        self._lock_candidate = None  # see _observe_lock_state
 
     # ------------------------------------------------------------------
     # Public API -- all called from the GUI thread, none of it blocking
@@ -154,6 +161,7 @@ class LinienWorker(QtCore.QThread):
 
     def stop(self):
         self.running = False
+        self._wake.wakeAll()  # do not sit out the poll period on the way out
         self.wait()
 
     # ------------------------------------------------------------------
@@ -165,6 +173,10 @@ class LinienWorker(QtCore.QThread):
             if kind in self.CONFLATE:
                 self._pending = [p for p in self._pending if p[0] != kind]
             self._pending.append((kind, args))
+            # Cut the loop's idle wait short: without this every control
+            # waits out the rest of the poll period before anything
+            # reaches the device, which reads as the whole app lagging.
+            self._wake.wakeAll()
 
     def _pop_pending(self):
         with QtCore.QMutexLocker(self._mutex):
@@ -208,7 +220,7 @@ class LinienWorker(QtCore.QThread):
                 self._fault(f"acquisition failed: {e}")
             self._check_lock_transition()
             self._emit_lock_state_best_effort()
-            self.msleep(self.POLL_MS)
+            self._idle()
 
         # Commands queued just before stop() -- zeroing the dither, most
         # importantly -- would otherwise never reach the device, because
@@ -216,6 +228,15 @@ class LinienWorker(QtCore.QThread):
         self._process_pending()
         self._teardown()
         self.event_log.log("linien_loop_ended", host=self.host)
+
+    def _idle(self):
+        """Wait out the poll period, or until a command arrives."""
+        self._mutex.lock()
+        try:
+            if not self._pending:
+                self._wake.wait(self._mutex, self.POLL_MS)
+        finally:
+            self._mutex.unlock()
 
     def _teardown(self):
         """Leave the Red Pitaya in a safe resting state (invariant 7)."""
@@ -280,8 +301,17 @@ class LinienWorker(QtCore.QThread):
         return True
 
     def _acquire_once(self):
+        self._locked_now = None  # invalidated if the fetch below throws
         fetched = pickle.loads(self.client.parameters.to_plot.value)
         self.to_plot = fetched if isinstance(fetched, dict) else {}
+        # Take the lock reading from the copy we already have. to_plot is
+        # a pickled 2048-point array over RPyC -- the dominant cost in
+        # this loop -- and fetching it a second time for the lock check
+        # doubled it, delaying queued writes as well as frames.
+        self._locked_now = (
+            "error_signal" in self.to_plot
+            or bool(self.client.parameters.lock.value)
+        )
 
         err_key = next(
             (k for k in ("error_signal_1", "error_signal") if k in self.to_plot),
@@ -512,6 +542,16 @@ class LinienWorker(QtCore.QThread):
     # ------------------------------------------------------------------
 
     def _read_locked(self):
+        """The lock reading for this poll.
+
+        linien names the signal ``error_signal`` only while locked and
+        ``error_signal_1`` while sweeping (linien_server/acquisition.py),
+        so the presence of the key is as good a source as the parameter.
+        Served from the acquisition fetch; falls back to its own read
+        only if acquisition has not run yet.
+        """
+        if self._locked_now is not None:
+            return self._locked_now
         t = pickle.loads(self.client.parameters.to_plot.value)
         return "error_signal" in t or bool(self.client.parameters.lock.value)
 
@@ -557,15 +597,41 @@ class LinienWorker(QtCore.QThread):
             )
             self._emit_lock_state_best_effort()
 
+    def _observe_lock_state(self, reading):
+        """Report a lock change only once two polls agree.
+
+        The two sources behind a reading -- the signal name in to_plot
+        and the ``lock`` parameter -- disagree for a poll or so while an
+        autolock engages. The UI answers a change by showing and hiding
+        the Lock/Unlock buttons, so an unconfirmed reading flickers them
+        and reflows the row. One extra poll of latency buys a steady UI.
+        """
+        if reading == self._last_ui_lock_state:
+            self._lock_candidate = None
+            return False
+        if self._last_ui_lock_state is None:
+            return True  # first reading: no previous state to flicker from
+        if self._lock_candidate != reading:
+            self._lock_candidate = reading  # first sighting: wait for a second
+            return False
+        self._lock_candidate = None
+        return True
+
     def _emit_lock_state_best_effort(self, force_value=None):
         if self.client is None:
             return
         try:
-            locked = (
-                bool(force_value) if force_value is not None
-                else self._read_locked()
-            )
-            if locked != self._last_ui_lock_state:
+            # A confirmed lock/unlock reports at once: the transition
+            # check has already established it, so there is nothing to
+            # second-guess.
+            if force_value is not None:
+                locked = bool(force_value)
+                self._lock_candidate = None
+                changed = locked != self._last_ui_lock_state
+            else:
+                locked = self._read_locked()
+                changed = self._observe_lock_state(locked)
+            if changed:
                 self._last_ui_lock_state = locked
                 # Logged on every transition, not just the ones we asked
                 # for: a lock that drops on its own is the interesting

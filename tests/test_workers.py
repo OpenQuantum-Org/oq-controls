@@ -273,6 +273,111 @@ def test_run_loop_reports_a_failed_autolock_instead_of_timing_out():
     assert not fake.parameters.autolock_failed.value
 
 
+def test_queued_command_wakes_the_idle_loop():
+    """A control must not wait out the poll period before acting.
+
+    Without the wake condition a command queued just after a poll sits
+    idle for the rest of POLL_MS, which is what made the app feel laggy
+    once writes moved off the GUI thread. Timed against _idle directly
+    rather than through the running loop: waiting on a live loop lands
+    at a random point in its period and passes half the time by luck.
+    """
+    import threading
+    import time
+
+    worker = LinienWorker(host="fake.local")
+
+    # Nothing queued: _idle waits out the full period.
+    t0 = time.perf_counter()
+    worker._idle()
+    idle_ms = (time.perf_counter() - t0) * 1000
+    assert idle_ms >= worker.POLL_MS * 0.8, idle_ms
+
+    # A command arriving mid-wait cuts it short.
+    threading.Timer(0.02, lambda: worker.set_sweep_speed(9)).start()
+    t0 = time.perf_counter()
+    worker._idle()
+    woken_ms = (time.perf_counter() - t0) * 1000
+    assert woken_ms < worker.POLL_MS * 0.5, woken_ms
+    assert worker._pending, "the command was lost"
+
+    # Already-queued work does not wait at all.
+    t0 = time.perf_counter()
+    worker._idle()
+    assert (time.perf_counter() - t0) * 1000 < 20
+
+
+def test_to_plot_is_fetched_once_per_poll():
+    """to_plot is the loop's dominant cost -- do not pay it twice.
+
+    Acquisition unpickles a 2048-point array over RPyC; the lock check
+    used to fetch and unpickle it all over again.
+    """
+    worker = LinienWorker(host="fake.local")
+    fake = FakeClient()
+    reads = []
+
+    class CountingParam:
+        def __init__(self, value):
+            self._value = value
+
+        @property
+        def value(self):
+            reads.append(1)
+            return self._value
+
+        @value.setter
+        def value(self, v):
+            self._value = v
+
+    fake.parameters._params["to_plot"] = CountingParam(_sweeping())
+    fake.parameters.lock.value = 0
+
+    worker.client = fake
+    worker._acquire_once()
+    before = len(reads)
+    worker._read_locked()
+    worker._read_locked()
+    assert len(reads) == before, "lock check re-fetched to_plot"
+
+
+def test_lock_state_needs_two_agreeing_reads():
+    """One disagreeing poll must not flicker the Lock/Unlock buttons.
+
+    The signal name in to_plot and the lock parameter disagree for a poll
+    or so while an autolock engages, and the UI answers a change by
+    showing and hiding buttons.
+    """
+    worker = LinienWorker(host="fake.local")
+    worker.client = FakeClient()
+    seen = []
+    worker.lock_state.connect(seen.append)
+
+    # First reading reports at once -- there is no prior state to flap from.
+    worker._locked_now = False
+    worker._emit_lock_state_best_effort()
+    assert seen == [False]
+
+    # A single contrary reading is held back...
+    worker._locked_now = True
+    worker._emit_lock_state_best_effort()
+    assert seen == [False], "unconfirmed reading reached the UI"
+    # ...and reverting cleanly leaves nothing behind.
+    worker._locked_now = False
+    worker._emit_lock_state_best_effort()
+    assert seen == [False]
+
+    # Two in a row is a real transition.
+    worker._locked_now = True
+    worker._emit_lock_state_best_effort()
+    worker._emit_lock_state_best_effort()
+    assert seen == [False, True], seen
+
+    # A confirmed lock/unlock still reports immediately.
+    worker._emit_lock_state_best_effort(force_value=False)
+    assert seen == [False, True, False]
+
+
 def test_laser_setters_only_enqueue_and_conflate():
     worker = LaserSetpointWorker(port=None)
     writes = []

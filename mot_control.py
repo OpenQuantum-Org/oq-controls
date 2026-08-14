@@ -906,14 +906,16 @@ class ShutdownDialog(QtWidgets.QDialog):
         )
         root.addWidget(note)
 
+        # No explicit cancel button: the checkboxes already decide what
+        # survives, so a second "don't close" control read as a third
+        # answer to the same question. Esc and the title-bar close still
+        # reject the dialog, so backing out of an accidental close is
+        # still possible.
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch()
-        cancel_btn = QtWidgets.QPushButton("Keep Running")
-        cancel_btn.clicked.connect(self.reject)
         close_btn = QtWidgets.QPushButton("Close")
         close_btn.setDefault(True)
         close_btn.clicked.connect(self.accept)
-        button_row.addWidget(cancel_btn)
         button_row.addWidget(close_btn)
         root.addLayout(button_row)
 
@@ -990,6 +992,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._readback_log_output = {}
         self._readback_log_protection = {}
         self._log_debounce = {}
+        self._push_debounce = {}
         self._last_logged_vtune = None
         # Last PID the worker reported. Reads are asynchronous now, so
         # the modal PID dialog and the config snapshot use this rather
@@ -1178,6 +1181,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """Mirror an event-log record into the collapsible log pane."""
         if not hasattr(self, "log_view"):
             return
+        # Only the end of a transaction goes in the pane: the start half
+        # carries no outcome, and pairing them here would halve what fits
+        # on screen. Both stay in the file, where the "op" id is what
+        # correlates them.
+        if record.get("phase") == "start":
+            return
         timestamp = record.get("t", "")[11:19]
         # "traceback" belongs in the file, not the pane -- it is many
         # lines and would push everything else out of view.
@@ -1190,6 +1199,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if extras:
             line += f"  {extras}"
         self.log_view.appendPlainText(line[:300])
+        # The card header rebuilds on every set_status, so routine device
+        # traffic must not drive it -- during a slider drag that is the
+        # GUI doing layout work several times a second for a chip nobody
+        # is reading. Faults and state changes still surface there.
+        if record.get("kind") in ("command", "readback"):
+            return
         summary = f"{timestamp} {record.get('event', '?')}"
         if len(summary) > 28:
             summary = summary[:27] + "\N{HORIZONTAL ELLIPSIS}"
@@ -1237,6 +1252,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _log_fault(self, device, message):
         self._event_log.fault("fault", device=device, message=str(message))
+
+    def _debounced_push(self, key, push_fn, delay_ms=250):
+        """Coalesce a burst of control changes into one hardware write.
+
+        A slider drag emits valueChanged per step. Each one used to reach
+        the device, and since the worker now shares one RPyC connection
+        between writes and acquisition, that made the plot stutter for as
+        long as the drag lasted. The UI text and the saved setting still
+        update per step -- only the device write waits for the value to
+        settle.
+        """
+        timer = self._push_debounce.get(key)
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(push_fn)
+            self._push_debounce[key] = timer
+        timer.start(delay_ms)
 
     def _debounced_log(self, key, event, payload_fn, delay_ms=1500):
         """Log once after a burst of changes (e.g. a slider drag) settles."""
@@ -2613,9 +2646,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "setpoint",
             lambda: {"name": "mod_freq_khz", "value": self.mod_freq_slider.value()},
         )
+        self._debounced_push("mod_freq", self._push_mod_freq)
+
+    def _push_mod_freq(self):
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_frequency(value)
+            worker.set_modulation_frequency(self.mod_freq_slider.value())
 
     def _on_mod_phase(self, value):
         self.mod_phase_edit.setText(f"{value}\N{DEGREE SIGN}")
@@ -2625,9 +2661,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "setpoint",
             lambda: {"name": "mod_phase_deg", "value": self.mod_phase_slider.value()},
         )
+        self._debounced_push("mod_phase", self._push_mod_phase)
+
+    def _push_mod_phase(self):
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_phase(value)
+            worker.set_modulation_phase(self.mod_phase_slider.value())
 
     def _on_mod_strength(self, value):
         self.mod_strength_edit.setText(f"{value / 1000.0:.3f} Vpp")
@@ -2640,13 +2679,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "value": self.mod_strength_slider.value(),
             },
         )
+        self._debounced_push("mod_strength", self._push_mod_strength)
+
+    def _push_mod_strength(self):
         # With modulation off the device stays at zero regardless; the
         # slider only records what to restore when it is switched on.
         if not self.mod_enable_btn.isChecked():
             return
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_amplitude(value)
+            worker.set_modulation_amplitude(self.mod_strength_slider.value())
 
     def _on_sweep_speed(self, combo_index):
         self._settings.setValue("linien/sweep_speed_index", combo_index)
@@ -3099,13 +3141,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             lambda: {"name": "error_filters", **self._filters_from_ui()},
         )
         # Coalesce bursts (typing a frequency) into one hardware write.
-        timer = self._log_debounce.get("_filter_push")
-        if timer is None:
-            timer = QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._push_filters)
-            self._log_debounce["_filter_push"] = timer
-        timer.start(400)
+        self._debounced_push("filters", self._push_filters, 400)
 
     def _push_filters(self):
         worker = self._get_lock_worker()
