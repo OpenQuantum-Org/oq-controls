@@ -575,6 +575,20 @@ try:
     })
     assert not lw._plot_paused, "orphaned pause never cleared"
 
+    # Connecting takes seconds; the row must say so rather than sitting
+    # at "--", and a connect that never succeeds must read as an error
+    # rather than the same "--".
+    window._set_usb_status_label(window.rp_usb_status, "connecting:rp.local")
+    assert window.rp_usb_status.text() == "..."
+    window._set_usb_status_label(window.rp_usb_status, "error:no route to host")
+    assert window.rp_usb_status.text() == "Error"
+    assert "no route" in window.rp_usb_status.toolTip()
+    # An attempt in flight is not a connected device.
+    window._set_usb_status_label(
+        window.rp_usb_status, "connecting:rp.local", "rp"
+    )
+    assert not window._device_connected["rp"]
+
     # A wedged server answers RPyC but its threads are dead, so the plot
     # just stops. Reconnecting does not help; only a restart does, and
     # the UI has to say which failure this is.
@@ -955,6 +969,12 @@ try:
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 30.0})
     live = {o.key: o for o in window.live_outputs()}
     assert set(live) == {"modulation", "coils", "dispenser"}, set(live)
+    # Labels are the operator's words, not the wiring's: the repump is
+    # "on", not "gate open".
+    window.repump_gpio_btn.setChecked(True)
+    repump = next(o for o in window.live_outputs() if o.key == "repump")
+    assert (repump.label, repump.detail) == ("Repump", "on")
+    window.repump_gpio_btn.setChecked(False)
     # The dispenser is not the operator's to leave running.
     assert live["dispenser"].mandatory
     assert not live["coils"].mandatory

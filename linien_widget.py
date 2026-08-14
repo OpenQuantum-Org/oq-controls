@@ -288,6 +288,9 @@ class LinienWidget(QtWidgets.QWidget):
             self.fault.emit(f"linien_worker not importable, plot is static: {e}")
             return
 
+        # Connecting takes seconds (RPyC handshake, possibly an SSH
+        # server start). Say so, or the row reads "--" and looks broken.
+        self.connection_status_changed.emit(f"connecting:{self._linien_host}")
         self.linien_thread = LinienWorker(
             host=self._linien_host, event_log=self._event_log
         )

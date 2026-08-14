@@ -878,7 +878,7 @@ class ShutdownDialog(QtWidgets.QDialog):
 
         heading = QtWidgets.QLabel(
             f"{len(outputs)} output{'s' if len(outputs) != 1 else ''} "
-            "still energised. Choose what to turn off before closing:"
+            "still on. Uncheck anything to leave running:"
         )
         heading.setWordWrap(True)
         heading.setStyleSheet(
@@ -893,13 +893,12 @@ class ShutdownDialog(QtWidgets.QDialog):
                 # Not a choice: firing draws 7.5 A through a consumable
                 # and nothing would be left running to stop it.
                 check.setEnabled(False)
-                check.setText(f"{check.text()}  (always off)")
+                check.setText(f"{check.text()} — always off")
             root.addWidget(check)
             self._checks[output.key] = check
 
         note = QtWidgets.QLabel(
-            "Unchecked outputs stay energised after the app exits, with "
-            "nothing monitoring them."
+            "Anything left on runs unmonitored after the app exits."
         )
         note.setWordWrap(True)
         note.setStyleSheet(
@@ -3570,6 +3569,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """
         if status.startswith("connected"):
             text, color = "OK", "#6f9e7c"
+        elif status.startswith("connecting"):
+            # Amber, not green: an attempt in progress is not a device.
+            text, color = "...", "#b9924f"
         elif status in ("no_port", "no_host"):
             text, color = "No port", "#ababab"
         elif status.startswith("error"):
@@ -3638,30 +3640,30 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if self._dispenser_phase == "firing":
             outputs.append(LiveOutput(
                 "dispenser", "Dispenser",
-                f"firing at {self._dispenser_fire_current:.1f} A",
+                f"firing, {self._dispenser_fire_current:.1f} A",
                 mandatory=True,
             ))
         if self.laser_btn.isChecked():
             outputs.append(LiveOutput(
-                "laser", "Laser diode",
+                "laser", "Laser",
                 f"{self.current_slider.value()} mA",
             ))
         if self.chip_text("lock") == "LOCKED":
             outputs.append(LiveOutput(
-                "lock", "Laser lock", "engaged, will drift unwatched",
+                "lock", "Lock", "engaged",
             ))
         if self.mod_strength_slider.value() > 0:
             outputs.append(LiveOutput(
-                "modulation", "Modulation dither",
+                "modulation", "Dither",
                 f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp",
             ))
         if self.mot_coil_output_btn.isChecked():
             outputs.append(LiveOutput(
-                "coils", "MOT coils",
+                "coils", "Coils",
                 f"{self.mot_coil_current_slider.value() / 1000.0:.1f} A",
             ))
         if self.repump_gpio_btn.isChecked():
-            outputs.append(LiveOutput("repump", "Repump gate", "open"))
+            outputs.append(LiveOutput("repump", "Repump", "on"))
         return outputs
 
     def _drive_outputs_safe(self, keys):

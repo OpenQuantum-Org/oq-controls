@@ -133,7 +133,10 @@ class LinienWorker(QtCore.QThread):
 
         except Exception as e:
             self._log(f"connect failed ({self.host}): {e}")
-            self.connection_status.emit("disconnected")
+            # "error:" rather than "disconnected": never having reached
+            # the device is a different thing from losing it, and only
+            # the first one means check the host and the cabling.
+            self.connection_status.emit(f"error:{e}")
             return
 
         # Main acquisition loop
