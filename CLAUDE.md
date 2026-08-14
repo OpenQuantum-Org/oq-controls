@@ -100,6 +100,20 @@ MCP4921 patch applied on the device). Client pinned to 2.1.0 to match.
 - Fallback host in `linien_widget.py:42` and `linien_worker.py:25` is
   `rp-F0C6AD.local` — wrong device. Known TODO.
 
+**Reference source: `C:\Users\kostu\Desktop\linien` (v2.1.0, commit 6caa6a9).**
+Match it when changing linien-facing behaviour — PSD mode is a direct port of
+its noise-analysis window. Do **not** read `klab-linien-relocking_stable`: it is
+2.2.0.dev0 and differs where it matters, renaming the RPCs
+(`exposed_start_psd_acquisition` vs `start_psd_acquisition`) and the counts→volts
+constant (`VOLTS_TO_COUNTS_FACTOR` vs `V`). Both of its spellings are wrong for
+our pinned 2.1.0 client and patched server.
+
+Unit constants come from `linien_common.common`, never a local literal: `Vpp`
+(4095.75) per volt peak-to-peak for `modulation_amplitude`, `MHz`
+(`0x10000000/8`) per MHz for `modulation_frequency`, and `V = 8192` counts per
+volt for PSD amplitudes. Writing physical units straight into these parameters
+is silently wrong by 3-4 orders of magnitude.
+
 ## Landmines
 
 - **DPS scaling is per-model.** DPS5005 = 0.001 A/LSB, DPS5020 = 0.01 A/LSB.

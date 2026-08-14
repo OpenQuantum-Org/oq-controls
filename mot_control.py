@@ -41,6 +41,7 @@ from styles import (
 )
 
 from mot_logging import EventLog
+from psd_window import PsdWindow
 from mot_workers import (
     DacClickWorker,
     DispenserWorker,
@@ -918,9 +919,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
-        self._psd_runs = {}
-        self._psd_complete_uids = set()
-        self._psd_color_index = 0
+        self._psd_window = None
+        self._psd_prev_status = {}
         self._psd_prev_status = {}
         self._filters_syncing = False
 
@@ -1300,48 +1300,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.main_splitter.setSizes([700, 260])
         normal_layout.addWidget(self.main_splitter, stretch=1)
 
-        # PSD view: swapped in when measuring lock noise.
-        psd_view = QtWidgets.QWidget()
-        psd_layout = QtWidgets.QVBoxLayout(psd_view)
-        psd_layout.setContentsMargins(0, 0, 0, 0)
-        psd_layout.setSpacing(6)
-        psd_bar = QtWidgets.QHBoxLayout()
-        psd_bar.setSpacing(8)
-        psd_title = QtWidgets.QLabel("Lock Noise PSD")
-        psd_title.setStyleSheet(
-            f"color: {NEON_BLUE}; font-size: 13px; font-weight: 700;"
-            "letter-spacing: 1px; border: none; padding: 4px 6px;"
-            f'font-family: "{TITLE_FONT_FAMILY}";'
-        )
-        psd_bar.addWidget(psd_title)
-        psd_bar.addStretch()
-        self.psd_view_status = QtWidgets.QLabel("")
-        self.psd_view_status.setStyleSheet(
-            "color: #ababab; font-size: 13px; font-weight: 700;"
-            "border: none; padding: 4px 6px;"
-        )
-        psd_bar.addWidget(self.psd_view_status)
-        psd_layout.addLayout(psd_bar)
-
-        self.psd_plot = pg.PlotWidget(background="#0b0b0b")
-        self.psd_plot.setLogMode(True, True)
-        self.psd_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.psd_plot.setLabel("bottom", "Frequency (Hz)")
-        self.psd_plot.setLabel(
-            "left", "Error signal ASD (V/\N{SQUARE ROOT}Hz)"
-        )
-        self._psd_legend = self.psd_plot.addLegend()
-        self._tip(
-            "Error-signal amplitude spectral density per measurement run;\n"
-            "colors distinguish runs (see legend for their PID settings).",
-            self.psd_plot,
-        )
-        psd_layout.addWidget(self.psd_plot, stretch=1)
-
-        self.view_stack = QtWidgets.QStackedWidget()
-        self.view_stack.addWidget(normal_view)
-        self.view_stack.addWidget(psd_view)
-        left.addWidget(self.view_stack, stretch=1)
+        left.addWidget(normal_view, stretch=1)
 
         root.addLayout(left, stretch=3)
 
@@ -1385,130 +1344,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # measurement panel. Wide enough that no card ever needs
         # horizontal scrolling; the smoke test asserts the content fits
         # at the minimum width.
-        self.sidebar_stack = QtWidgets.QStackedWidget()
-        self.sidebar_stack.setMinimumWidth(460)
-        self.sidebar_stack.setMaximumWidth(600)
-        self.sidebar_stack.addWidget(scroll)
-        self.sidebar_stack.addWidget(self._build_psd_sidebar())
-        root.addWidget(self.sidebar_stack, stretch=1)
-
-    def _build_psd_sidebar(self):
-        container = QtWidgets.QWidget()
-        outer = QtWidgets.QVBoxLayout(container)
-        outer.setAlignment(QtCore.Qt.AlignTop)
-        outer.setSpacing(8)
-        outer.setContentsMargins(0, 0, 4, 0)
-
-        card = make_card()
-        layout = card.layout()
-        layout.addWidget(make_section_title("Lock PSD Measurement"))
-
-        self.psd_status_label = add_readout_row(layout, "Status:", "Idle")
-        self._tip(
-            "PSD acquisition state. A measurement steps through\n"
-            "decimations; each stage takes ~16x longer than the last.",
-            self.psd_status_label,
-            help_cursor=True,
-        )
-        self.psd_lock_label = add_readout_row(layout, "Laser:", "--")
-        self._tip(
-            "Measure while locked — the point is error-signal noise\n"
-            "under lock.",
-            self.psd_lock_label,
-            help_cursor=True,
-        )
-
-        algo_row = QtWidgets.QHBoxLayout()
-        algo_row.setSpacing(8)
-        algo_row.addWidget(self._small_label("Algorithm:"))
-        self.psd_algo_combo = QtWidgets.QComboBox()
-        _style_combo(self.psd_algo_combo)
-        self.psd_algo_combo.addItem("LPSD", 1)
-        self.psd_algo_combo.addItem("Welch", 0)
-        saved_algo = self._int_setting("psd/algorithm", 1, 0, 1)
-        index = self.psd_algo_combo.findData(saved_algo)
-        self.psd_algo_combo.setCurrentIndex(max(0, index))
-        self.psd_algo_combo.currentIndexChanged.connect(self._on_psd_algorithm)
-        algo_row.addWidget(self.psd_algo_combo, stretch=1)
-        layout.addLayout(algo_row)
-        self._tip(
-            "PSD estimator: LPSD gives log-spaced frequency bins (best\n"
-            "for wide spans); Welch is the classic linear-bin estimate.",
-            self.psd_algo_combo,
-        )
-
-        decim_row = QtWidgets.QHBoxLayout()
-        decim_row.setSpacing(8)
-        decim_row.addWidget(self._small_label("Max Decimation:"))
-        self.psd_decimation_spin = QtWidgets.QSpinBox()
-        self.psd_decimation_spin.setRange(1, 32)
-        self.psd_decimation_spin.setValue(
-            self._int_setting("psd/max_decimation", 18, 1, 32)
-        )
-        self.psd_decimation_spin.valueChanged.connect(self._on_psd_decimation)
-        decim_row.addWidget(self.psd_decimation_spin)
-        decim_row.addStretch()
-        layout.addLayout(decim_row)
-        self._tip(
-            "How deep the decimation ladder goes: higher reaches lower\n"
-            "Fourier frequencies but takes much longer (~16x per +4).\n"
-            "Default 18; try 10-14 for quick checks.",
-            self.psd_decimation_spin,
-        )
-
-        self.psd_fitness_label = add_readout_row(layout, "Fitness:", "--")
-        self._tip(
-            "Integrated error-signal noise of the last completed run —\n"
-            "lower is better; use it to compare PID settings.",
-            self.psd_fitness_label,
-            help_cursor=True,
-        )
-        self.psd_pid_label = add_readout_row(layout, "PID (P/I/D):", "--")
-        self._tip(
-            "Live PID parameters on the Linien server (the optimizer\n"
-            "changes these while it runs).",
-            self.psd_pid_label,
-            help_cursor=True,
-        )
-
-        self.psd_run_btn = QtWidgets.QPushButton("Run PSD Measurement")
-        self.psd_run_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.psd_run_btn.clicked.connect(self._run_psd)
-        layout.addWidget(self.psd_run_btn)
-        self._tip(
-            "Record one PSD with the current settings. The spectroscopy\n"
-            "trace pauses while the raw acquisition runs.",
-            self.psd_run_btn,
-        )
-
-        self.psd_opt_btn = QtWidgets.QPushButton("Optimize PID")
-        self.psd_opt_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.psd_opt_btn.clicked.connect(self._run_pid_optimization)
-        layout.addWidget(self.psd_opt_btn)
-        self._tip(
-            "Run linien's PID optimizer: repeated PSD measurements while\n"
-            "actively changing the lock's P/I gains (confirmed first).",
-            self.psd_opt_btn,
-        )
-
-        self.psd_clear_btn = QtWidgets.QPushButton("Clear Plot")
-        self.psd_clear_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.psd_clear_btn.clicked.connect(self._clear_psd_plot)
-        layout.addWidget(self.psd_clear_btn)
-
-        self.psd_exit_btn = QtWidgets.QPushButton("Exit PSD Mode")
-        self.psd_exit_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.psd_exit_btn.clicked.connect(self._exit_psd_mode)
-        layout.addWidget(self.psd_exit_btn)
-        self._tip(
-            "Return to the normal spectroscopy view. An in-flight\n"
-            "acquisition finishes on the server by itself.",
-            self.psd_exit_btn,
-        )
-
-        outer.addWidget(card)
-        outer.addStretch()
-        return container
+        scroll.setMinimumWidth(460)
+        scroll.setMaximumWidth(600)
+        root.addWidget(scroll, stretch=1)
 
     def _add_connection_card(self, parent):
         card = CollapsibleCard("Devices", collapsed=True)
@@ -1866,7 +1704,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.psd_mode_btn = QtWidgets.QPushButton("Measure Lock PSD...")
         self.psd_mode_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.psd_mode_btn.clicked.connect(self._enter_psd_mode)
+        self.psd_mode_btn.clicked.connect(self._open_psd_window)
         lock_button_row.addWidget(self.psd_mode_btn)
         self._tip(
             "Switch to the lock-noise PSD view: measure the error-signal\n"
@@ -3168,8 +3006,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "cooldown_until_epoch": self._dispenser_cooldown_until,
             },
             "psd": {
-                "algorithm": int(self.psd_algo_combo.currentData()),
-                "max_decimation": self.psd_decimation_spin.value(),
+                "algorithm": self._int_setting("psd/algorithm", 1, 0, 1),
+                "max_decimation": self._int_setting(
+                    "psd/max_decimation", 18, 12, 32
+                ),
             },
         }
 
@@ -3289,13 +3129,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 int(round(float(coils["current_a"]) * 1000))
             )
 
+        # PSD settings live in the noise-analysis window, which may not be
+        # open; write them to QSettings so it picks them up when built, and
+        # push them into it if it already exists.
         psd = config.get("psd", {})
         if "algorithm" in psd:
-            index = self.psd_algo_combo.findData(int(psd["algorithm"]))
-            if index >= 0:
-                self.psd_algo_combo.setCurrentIndex(index)
+            self._settings.setValue("psd/algorithm", int(psd["algorithm"]))
         if "max_decimation" in psd:
-            self.psd_decimation_spin.setValue(int(psd["max_decimation"]))
+            self._settings.setValue(
+                "psd/max_decimation", int(psd["max_decimation"])
+            )
+        if psd and self._psd_window is not None:
+            self._psd_window.apply_settings()
 
         dispenser = config.get("dispenser", {})
         new_current = float(
@@ -3331,122 +3176,58 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # Lock PSD mode
     # ------------------------------------------------------------------
 
-    def _enter_psd_mode(self):
-        if self.view_stack.currentIndex() == 1:
-            return
-        self.view_stack.setCurrentIndex(1)
-        self.sidebar_stack.setCurrentIndex(1)
-        # The header no longer swaps with the view, so hide the controls
-        # that do not apply to the PSD page.
-        self._set_view_controls_visible(False)
-        self._psd_prev_status = {}
-        self._event_log.log("psd_mode", entered=True)
+    def _open_psd_window(self):
+        """Show linien's noise-analysis window, connecting a worker for it."""
+        if self._psd_window is None:
+            self._psd_window = PsdWindow(
+                self, settings=self._settings, event_log=self._event_log
+            )
+            self._psd_window.setStyleSheet(self.styleSheet())
 
-        self.psd_worker = PsdWorker(host=self.rp_edit.text().strip())
-        self.psd_worker.connection_status.connect(self._on_psd_connection)
-        self.psd_worker.status.connect(self._on_psd_status)
-        self.psd_worker.psd_data.connect(self._on_psd_data)
-        self.psd_worker.fault.connect(lambda msg: self._log_fault("psd", msg))
-        # Queued settings apply once the worker connects.
-        self.psd_worker.set_algorithm(self.psd_algo_combo.currentData())
-        self.psd_worker.set_max_decimation(self.psd_decimation_spin.value())
-        self.psd_worker.start()
-
-    def _exit_psd_mode(self):
-        worker = getattr(self, "psd_worker", None)
-        if worker is not None:
-            worker.stop()
-            self.psd_worker = None
-        self.view_stack.setCurrentIndex(0)
-        self.sidebar_stack.setCurrentIndex(0)
-        self._set_view_controls_visible(True)
-        self._event_log.log("psd_mode", entered=False)
-
-    def _set_view_controls_visible(self, visible):
-        """Show/hide the header controls that only apply to the plot view."""
-        self.camera_toggle.setVisible(visible)
-        self.linien_widget.autozoom_check.setVisible(visible)
-
-    def _run_psd(self):
         worker = getattr(self, "psd_worker", None)
         if worker is None:
-            return
-        worker.set_algorithm(self.psd_algo_combo.currentData())
-        worker.set_max_decimation(self.psd_decimation_spin.value())
-        worker.start_psd()
-        self._event_log.log(
-            "psd_start",
-            algorithm=int(self.psd_algo_combo.currentData()),
-            max_decimation=self.psd_decimation_spin.value(),
+            self._psd_prev_status = {}
+            self.psd_worker = PsdWorker(host=self.rp_edit.text().strip())
+            self.psd_worker.connection_status.connect(self._on_psd_connection)
+            self.psd_worker.status.connect(self._on_psd_status)
+            self.psd_worker.psd_data.connect(self._on_psd_data)
+            self.psd_worker.fault.connect(
+                lambda msg: self._log_fault("psd", msg)
+            )
+            self.psd_worker.start()
+        self._psd_window.set_worker(self.psd_worker)
+        # Push the window's current settings so the server matches the UI.
+        self._psd_window._on_algorithm_changed(
+            self._psd_window.algo_combo.currentIndex()
         )
-        self._set_colored_text(self.psd_status_label, "Starting...", "#b9924f")
+        self._psd_window._on_time_changed(
+            self._psd_window.time_combo.currentIndex()
+        )
 
-    def _run_pid_optimization(self):
-        worker = getattr(self, "psd_worker", None)
-        if worker is None:
-            return
-        confirm = QtWidgets.QMessageBox.question(
-            self,
-            "Optimize PID",
-            "Run linien's PID optimization?\n\n"
-            "This actively changes the lock's P/I gains on the Red Pitaya "
-            "while it measures — the lock must be engaged, and it can take "
-            "several minutes.",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
-            QtWidgets.QMessageBox.Cancel,
-        )
-        if confirm != QtWidgets.QMessageBox.Yes:
-            return
-        worker.start_pid_optimization()
-        self._event_log.log("pid_opt_start")
-        self._set_colored_text(self.psd_status_label, "Starting...", "#b9924f")
+        self._psd_window.show()
+        apply_dark_titlebar(self._psd_window)
+        self._psd_window.raise_()
+        self._psd_window.activateWindow()
+        self._event_log.log("psd_window", opened=True)
 
     def _on_psd_connection(self, status):
         self._log_connection("psd", status)
-        if status == "no_host":
-            self._set_colored_text(
-                self.psd_status_label, "No RP host set", "#b56a6a"
-            )
-        elif status.startswith("error"):
-            self._set_colored_text(self.psd_status_label, "Error", "#b56a6a")
-            self.psd_status_label.setToolTip(status)
 
     def _on_psd_status(self, state):
-        acquiring = bool(state.get("acquiring"))
-        optimizing = bool(state.get("optimizing"))
-        busy = acquiring or optimizing
-        if optimizing:
-            self._set_colored_text(
-                self.psd_status_label, "Optimizing PID...", "#b9924f"
-            )
-        elif acquiring:
-            self._set_colored_text(
-                self.psd_status_label, "Acquiring PSD...", "#b9924f"
-            )
-        else:
-            self._set_colored_text(self.psd_status_label, "Idle", "#ababab")
-        self.psd_view_status.setText(
-            "OPTIMIZING" if optimizing else "ACQUIRING" if acquiring else ""
-        )
-        self.psd_run_btn.setEnabled(not busy)
-        self.psd_opt_btn.setEnabled(not busy)
-        self._set_lock_label(self.psd_lock_label, bool(state.get("locked")))
-        self.psd_pid_label.setText(
-            f"{state.get('p', 0)} / {state.get('i', 0)} / {state.get('d', 0)}"
-        )
+        if self._psd_window is not None:
+            self._psd_window.on_status(state)
         previous = self._psd_prev_status
-        if previous.get("optimizing") and not optimizing:
+        if previous.get("optimizing") and not state.get("optimizing"):
             self._event_log.log(
                 "pid_opt_done", p=state.get("p"), i=state.get("i")
             )
         self._psd_prev_status = state
 
     def _on_psd_data(self, payload):
-        fitness = payload.get("fitness")
-        if fitness is not None:
-            self.psd_fitness_label.setText(f"{fitness:.3e}")
-        self._plot_psd_run(payload)
+        if self._psd_window is not None:
+            self._psd_window.psd_data_received(payload)
         if payload.get("complete"):
+            fitness = payload.get("fitness")
             self._event_log.log(
                 "psd_complete",
                 fitness=float(fitness) if fitness is not None else None,
@@ -3455,107 +3236,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 d=payload.get("d"),
                 uuid=payload.get("uuid"),
             )
-
-    def _plot_psd_run(self, payload):
-        """Plot one acquisition, stitching the decimation stages.
-
-        Ported from linien-gui's PSDPlotWidget.plot_curve. Each decimation
-        covers a different band and they overlap, so the stages are walked
-        from the highest decimation (lowest frequencies) upward and each
-        one contributes only the points above what has already been drawn;
-        the previous segment's last point is prepended so the joins are
-        continuous. Plotting every stage in full instead draws the
-        overlapping bands on top of each other.
-        """
-        uuid = payload.get("uuid") or "run"
-        if uuid in self._psd_complete_uids:
-            # On a slow link a partial payload can arrive after the
-            # complete one; never overwrite a finished curve with it.
-            return
-        if payload.get("complete"):
-            self._psd_complete_uids.add(uuid)
-
-        run = self._psd_runs.get(uuid)
-        if run is None:
-            color = PSD_RUN_COLORS[self._psd_color_index % len(PSD_RUN_COLORS)]
-            self._psd_color_index += 1
-            run = {"color": color, "curves": [], "legend_added": False}
-            self._psd_runs[uuid] = run
-        for curve in run["curves"]:
-            self.psd_plot.removeItem(curve)
-        run["curves"] = []
-
-        pen = pg.mkPen(run["color"], width=2)
-        # Highest decimation first: that stage holds the lowest frequencies.
-        psds_sorted = sorted(payload.get("psds", {}).items(), key=lambda kv: -kv[0])
-        highest_f = 0.0
-        highest_psd = None
-        first = True
-        for _decimation, (freqs, asd) in psds_sorted:
-            freqs = np.asarray(freqs, dtype=float)
-            asd = np.asarray(asd, dtype=float)
-            keep = freqs > highest_f
-            freqs, asd = freqs[keep], asd[keep]
-            if freqs.size == 0:
-                continue
-            if highest_psd is not None:
-                # Join this segment to the previous one.
-                freqs = np.concatenate(([highest_f], freqs))
-                asd = np.concatenate(([highest_psd], asd))
-            highest_f = float(freqs[-1])
-            highest_psd = float(asd[-1])
-
-            # Counts to volts, as linien plots it.
-            volts = asd / PSD_VOLTS_TO_COUNTS
-            valid = (freqs > 0) & (volts > 0)  # log-log axes
-            if not valid.any():
-                continue
-            name = None
-            if first and not run["legend_added"]:
-                name = f"P={payload.get('p')} I={payload.get('i')}"
-                run["legend_added"] = True
-            curve = self.psd_plot.plot(
-                freqs[valid], volts[valid], pen=pen, name=name
-            )
-            run["curves"].append(curve)
-            first = False
-
-    def _clear_psd_plot(self):
-        for run in self._psd_runs.values():
-            for curve in run["curves"]:
-                self.psd_plot.removeItem(curve)
-        self._psd_runs = {}
-        self._psd_complete_uids = set()
-        self._psd_color_index = 0
-        if self._psd_legend is not None:
-            self._psd_legend.clear()
-        self.psd_fitness_label.setText("--")
-
-    def _on_psd_algorithm(self, _index):
-        value = int(self.psd_algo_combo.currentData())
-        self._settings.setValue("psd/algorithm", value)
-        self._event_log.log("setpoint", name="psd_algorithm", value=value)
-        worker = getattr(self, "psd_worker", None)
-        if worker is not None:
-            worker.set_algorithm(value)
-
-    def _on_psd_decimation(self, value):
-        self._settings.setValue("psd/max_decimation", value)
-        self._debounced_log(
-            "psd_decimation",
-            "setpoint",
-            lambda: {
-                "name": "psd_max_decimation",
-                "value": self.psd_decimation_spin.value(),
-            },
-        )
-        worker = getattr(self, "psd_worker", None)
-        if worker is not None:
-            worker.set_max_decimation(value)
-
-    # ------------------------------------------------------------------
-    # Shared status helpers / cleanup
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _set_usb_status_label(label, status):

@@ -28,6 +28,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 import mot_control
 import mot_logging
+import psd_window
 
 # Keep the smoke test inert: never start hardware workers (they would read
 # real saved QSettings ports/hosts on this machine), log to a temp dir,
@@ -430,22 +431,21 @@ try:
     assert not window.mod_enable_btn.isChecked()
     window.laser_btn.setChecked(False)
 
-    # --- Lock PSD mode: view/sidebar swap, status, plotting, exit ---
+    # --- Lock PSD: linien's noise-analysis window ---
     import numpy as np
 
-    assert window.view_stack.currentIndex() == 0
-    assert window.sidebar_stack.currentIndex() == 0
-    window._enter_psd_mode()  # rp host empty -> worker exits with no_host
-    assert window.view_stack.currentIndex() == 1
-    assert window.sidebar_stack.currentIndex() == 1
+    window._open_psd_window()  # rp host empty -> worker exits with no_host
+    psd = window._psd_window
+    assert psd is not None and psd.isVisible()
+
+    # Run controls swap on acquisition state, as linien's containers do.
     window._on_psd_status(
         {"acquiring": True, "optimizing": False, "locked": True,
          "p": 100, "i": 50, "d": 0}
     )
-    assert "Acquiring" in window.psd_status_label.text()
-    assert not window.psd_run_btn.isEnabled()
-    assert not window.psd_opt_btn.isEnabled()
-    assert window.psd_pid_label.text() == "100 / 50 / 0"
+    assert psd.running_container.isVisibleTo(psd)
+    assert not psd.not_running_container.isVisibleTo(psd)
+
     payload = {
         "uuid": "run1", "time": 1.0, "p": 100, "i": 50, "d": 0,
         "signals": {},
@@ -456,40 +456,67 @@ try:
         "fitness": 0.0111, "complete": True,
     }
     window._on_psd_data(payload)
-    assert window.psd_fitness_label.text() == "1.110e-02"
-    assert len(window._psd_runs) == 1
-    assert len(window._psd_runs["run1"]["curves"]) == 2
+    assert len(psd.plot.curves) == 1
+    assert len(psd.plot.curves["run1"]) == 2
+    assert psd.table.rowCount() == 1
+    assert psd.table.item(0, 6).text() == "0.0111"
+
     # Decimation stages are stitched, not overlaid: the high-decimation
-    # stage supplies the low frequencies, and the next stage picks up
-    # above it with the join point prepended. Counts are shown as volts.
-    # The plot is in log mode, so getData returns log10 of the values.
-    lo_x, lo_y = window._psd_runs["run1"]["curves"][0].getData()
-    hi_x, _hi_y = window._psd_runs["run1"]["curves"][1].getData()
+    # stage supplies the low frequencies and the next picks up above it,
+    # with the join point prepended. Counts are shown as volts. The plot
+    # is in log mode, so getData returns log10 of the values.
+    lo_x, lo_y = psd.plot.curves["run1"][0].getData()
+    hi_x, _hi_y = psd.plot.curves["run1"][1].getData()
     assert np.allclose(10**lo_x, [1e1, 5e1])  # decimation 5 first
-    assert np.isclose(10**lo_y[0], 1e-2 / mot_control.PSD_VOLTS_TO_COUNTS)
+    assert np.isclose(10**lo_y[0], 1e-2 / psd_window.V)
     assert hi_x[0] == lo_x[-1]  # segments join, no gap and no overlap
     assert (np.diff(np.concatenate([lo_x, hi_x[1:]])) > 0).all()
 
     # A late partial payload must not overwrite a completed curve.
-    stale = dict(payload, psds={1: (np.array([1e2]), np.array([9e9]))},
-                 complete=False)
-    window._on_psd_data(stale)
-    assert len(window._psd_runs["run1"]["curves"]) == 2  # unchanged
-
-    window._on_psd_data(dict(payload, uuid="run2", p=200))  # second run overlays
-    assert len(window._psd_runs) == 2
-    window._on_psd_status(
-        {"acquiring": False, "optimizing": False, "locked": True,
-         "p": 100, "i": 50, "d": 0}
+    window._on_psd_data(
+        dict(payload, psds={1: (np.array([1e2]), np.array([9e9]))},
+             complete=False)
     )
-    assert window.psd_run_btn.isEnabled()
-    window._clear_psd_plot()
-    assert len(window._psd_runs) == 0
-    assert window.psd_fitness_label.text() == "--"
-    window._exit_psd_mode()
-    assert window.view_stack.currentIndex() == 0
-    assert window.sidebar_stack.currentIndex() == 0
-    assert getattr(window, "psd_worker", None) is None
+    assert len(psd.plot.curves["run1"]) == 2  # unchanged
+
+    window._on_psd_data(dict(payload, uuid="run2", p=200))  # second run
+    assert len(psd.plot.curves) == 2
+    assert psd.table.rowCount() == 2
+
+    # The Display checkbox hides that run's curves.
+    psd.table.cellWidget(0, 0).setChecked(False)
+    assert not psd.plot.curves["run1"][0].isVisible()
+    psd.table.cellWidget(0, 0).setChecked(True)
+    assert psd.plot.curves["run1"][0].isVisible()
+
+    # Delete removes the selected run from both plot and table.
+    psd.table.setCurrentCell(0, 0)
+    psd.delete_curve()
+    assert "run1" not in psd.plot.curves
+    assert psd.table.rowCount() == 1
+
+    # Starting unlocked is refused with a dialog rather than a silent no-op.
+    orig_critical = QtWidgets.QMessageBox.critical
+    refusals = []
+    QtWidgets.QMessageBox.critical = lambda *a, **k: refusals.append(a)
+    try:
+        window._on_psd_status(
+            {"acquiring": False, "optimizing": False, "locked": False,
+             "p": 100, "i": 50, "d": 0}
+        )
+        psd.start_psd()
+    finally:
+        QtWidgets.QMessageBox.critical = orig_critical
+    assert len(refusals) == 1
+    assert psd.not_running_container.isVisibleTo(psd)
+
+    # Measurement time maps to decimation 12 + index, as in linien's .ui.
+    psd.time_combo.setCurrentIndex(6)
+    assert int(window._settings.value("psd/max_decimation")) == 18
+    psd.clear_curves()
+    assert psd.table.rowCount() == 0
+    psd.close()  # hides rather than destroys, so traces survive
+    assert not psd.isVisible()
 
     # --- Dispenser override dialog + apply flow (modal exec skipped) ---
     dlg = mot_control.DispenserOverrideDialog(window, 7.5, 30.0)
@@ -573,7 +600,9 @@ try:
     assert config["laser"]["current_ma"] == 85
     assert config["coils"]["current_a"] == 2.2
     assert config["dispenser"]["fire_current_a"] == 7.5
-    assert config["psd"]["max_decimation"] == window.psd_decimation_spin.value()
+    assert config["psd"]["max_decimation"] == int(
+        window._settings.value("psd/max_decimation")
+    )
     assert config["repump"]["vco_mhz"] == round(
         mot_control.vtune_to_vco_mhz(window.vtune_slider.value() / 1000.0), 1
     )
@@ -592,7 +621,7 @@ try:
     window.current_slider.setValue(60)
     window.mot_coil_current_slider.setValue(500)
     window.vtune_slider.setValue(1000)
-    window.psd_decimation_spin.setValue(9)
+    window._settings.setValue("psd/max_decimation", 14)
     window._set_filters_ui({"automatic": False, "filter_1_frequency": 777})
     window._apply_dispenser_override(12.0, 40.0)
     orig_question = QtWidgets.QMessageBox.question
@@ -605,7 +634,9 @@ try:
         QtWidgets.QMessageBox.question = orig_question
     assert window.current_slider.value() == 85
     assert window.mot_coil_current_slider.value() == 2200
-    assert window.psd_decimation_spin.value() == loaded["psd"]["max_decimation"]
+    assert int(window._settings.value("psd/max_decimation")) == (
+        loaded["psd"]["max_decimation"]
+    )
     assert window.filter1_freq_spin.value() == 12000
     assert window._dispenser_fire_current == 7.5  # confirm-gated restore
     assert window._dispenser_fire_seconds == 30.0
@@ -767,7 +798,7 @@ for expected in (
     "dispenser_override",
     "vtune",
     "lock",
-    "psd_mode",
+    "psd_window",
     "psd_complete",
     "config_saved",
     "config_loaded",

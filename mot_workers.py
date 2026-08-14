@@ -832,8 +832,8 @@ class PsdWorker(QtCore.QThread):
 
     The acquisition steps through decimations (each stage ~16x longer
     than the last); ``psd_acquisition_max_decimation`` bounds how low in
-    frequency (and how long) it runs. There is no server-side abort —
-    an in-flight acquisition finishes on its own.
+    frequency (and how long) it runs. ``stop_psd()`` aborts a run in
+    flight, the way linien's Stop button does.
     """
 
     connection_status = QtCore.pyqtSignal(str)
@@ -904,6 +904,10 @@ class PsdWorker(QtCore.QThread):
     def start_pid_optimization(self):
         self._queue(("start_pid_opt", None))
 
+    def stop_psd(self):
+        """Abort a running acquisition, as linien's Stop button does."""
+        self._queue(("stop_psd", None))
+
     def set_algorithm(self, value: int):
         self._queue(("algorithm", int(value)))
 
@@ -930,6 +934,11 @@ class PsdWorker(QtCore.QThread):
                 self._client.connection.root.start_psd_acquisition()
             elif kind == "start_pid_opt":
                 self._client.connection.root.start_pid_optimization()
+            elif kind == "stop_psd":
+                # linien's PSDWindow.stop_psd, verbatim.
+                if params.task.value is not None:
+                    params.task.value.stop()
+                    params.task.value = None
             elif kind == "algorithm":
                 params.psd_algorithm.value = value
             elif kind == "max_decimation":
