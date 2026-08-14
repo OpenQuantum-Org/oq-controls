@@ -83,9 +83,9 @@ no, which is why this is a checklist rather than a blanket kill.
 and the probe functions are already GUI-free; the rest is pulling protocol code
 out of the QThread wrappers.
 
-*Why after step 4:* the threading fix establishes worker-owns-client, giving
-the CLI a clean seam. By then you will have hand-verified at the bench and know
-which checks are worth automating.
+*Note:* this used to say "after step 4, which gives the CLI a clean seam". Step
+4 is reverted, so there is no seam — the CLI would have to pull the protocol out
+of the QThread wrappers itself.
 
 ## [~] 7. Structural UI, done as the module split
 
@@ -129,8 +129,11 @@ What is open now is all bench work, none of it answerable from the desk:
    rather than querying devices, deliberately — the close path must not block
    on a device that has stopped answering. That is only right if the UI and the
    hardware actually agree.
-5. **Does the queued command path still feel responsive?** Setpoints now reach
-   linien on the next 200 ms poll instead of immediately.
+5. **Is the linien lock/unlock path actually working?** Reported broken on
+   2026-08-14 and not reproducible from the desk — the logic tests clean against
+   a fake client, and the detection matches linien's own signal naming. The
+   event log records `linien.lock` with its outcome, which is where the answer
+   will be.
 
 ## Ordering rationale, in one line
 
