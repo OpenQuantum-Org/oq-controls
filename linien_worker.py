@@ -292,15 +292,55 @@ class LinienWorker(QtCore.QThread):
             sleep(1)
         return False
 
-    def lock_laser(self, x0, x1, spectrum):
+    def lock_laser(self, x0, x1, n_points):
         """Start the autolock over a selected index range.
 
-        ``x0``/``x1`` are indices into the error signal the caller selected
-        on, and ``spectrum`` is that same signal -- both passed straight
-        through to the server, as linien's plot widget does. Converting to
-        volts and back would only lose precision.
+        ``x0``/``x1`` are indices into the plotted trace and ``n_points``
+        its length. The spectrum itself is re-read here in **raw ADC
+        counts**: the plotted copy is divided by 8192 for display, and the
+        autolock's peak finding and line-width estimate work in counts, so
+        handing it volts degrades the lock badly. linien likewise sends
+        the unscaled signal and divides only when drawing.
         """
         params = self.client.parameters
+        try:
+            self.client.connection.root.start_sweep()
+        except Exception:
+            pass
+        sleep(0.4)  # let a full sweep land before sampling it
+
+        try:
+            to_plot = pickle.loads(params.to_plot.value)
+        except Exception as e:
+            self.fault.emit(f"could not read spectrum: {e}")
+            return
+        key = next(
+            (k for k in ("error_signal_1", "error_signal") if k in to_plot),
+            None,
+        )
+        if key is None:
+            self.fault.emit("no spectrum available to lock on")
+            return
+
+        raw = np.asarray(to_plot[key], dtype=np.int16)
+        n = raw.size
+        if n < 4:
+            self.fault.emit("spectrum too small to lock on")
+            return
+
+        # The selection was made against a trace of n_points samples; map
+        # it onto this spectrum in case the two differ.
+        if n_points and n_points != n:
+            scale = (n - 1) / float(n_points - 1)
+            x0 = int(round(x0 * scale))
+            x1 = int(round(x1 * scale))
+        i0, i1 = sorted((int(x0), int(x1)))
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+        if i1 - i0 < 2:
+            self.fault.emit("selected range too narrow to lock on")
+            return
+
         try:
             # SIMPLE is forced through the *preference*: the server builds
             # an AutolockAlgorithmSelector from autolock_mode_preference and
@@ -316,7 +356,7 @@ class LinienWorker(QtCore.QThread):
 
         try:
             self.client.connection.root.start_autolock(
-                int(x0), int(x1), pickle.dumps(spectrum)
+                i0, i1, pickle.dumps(raw)
             )
         except Exception as e:
             self.fault.emit(f"start_autolock failed: {e}")

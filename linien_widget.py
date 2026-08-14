@@ -513,12 +513,15 @@ class LinienWidget(QtWidgets.QWidget):
         self._start_autolock(*sorted((x0, x)))
 
     def _start_autolock(self, x_from, x_to):
-        """Map the selected display range to spectrum indices and lock."""
+        """Map the selected display range to spectrum indices and lock.
+
+        Only the indices travel to the worker: it re-reads the spectrum
+        itself in raw counts, which is what the autolock needs.
+        """
         spectrum = self._last_error_signal
         if self.linien_thread is None or spectrum is None:
             return
-        spectrum = np.asarray(spectrum)
-        n = spectrum.size
+        n = int(np.asarray(spectrum).size)
         if n < 4:
             return
         xmin, xmax = self._v_range_to_display(
@@ -533,7 +536,9 @@ class LinienWidget(QtWidgets.QWidget):
         i1 = max(0, min(n - 1, i1))
         if i1 - i0 < 2:
             return
-        self.linien_thread.lock_laser(i0, i1, spectrum)
+        # The worker re-reads the spectrum in raw counts; it only
+        # needs the selected indices and the length they refer to.
+        self.linien_thread.lock_laser(i0, i1, n)
 
     def _on_lock_state(self, locked: bool):
         self._set_locked_ui(locked)

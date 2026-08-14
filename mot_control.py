@@ -1318,7 +1318,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.camera_widget.setVisible(visible)
         self._settings.setValue("ui/camera_visible", bool(visible))
         if visible:
-            self.main_splitter.setSizes([650, 300])
+            # Equal split: the camera is as much the experiment as the
+            # spectrum is, so neither gets the larger half by default.
+            half = max(1, self.main_splitter.height() // 2)
+            self.main_splitter.setSizes([half, half])
             self.camera_widget.set_insets(*self._plot_content_inset())
             self.camera_widget.activate()
         else:
