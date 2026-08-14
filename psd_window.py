@@ -549,6 +549,15 @@ class PsdWindow(QtWidgets.QMainWindow):
     def set_worker(self, worker):
         self._worker = worker
 
+    def set_locked(self, locked):
+        """Seed the lock state the host already knows.
+
+        The PSD worker's first status arrives a moment after the window
+        opens, so without this the first Start click sees the initial
+        False and refuses -- and the second, by then updated, works.
+        """
+        self._locked = bool(locked)
+
     def on_status(self, status):
         """Swap the run controls, as linien does on psd_acquisition_running."""
         self._locked = bool(status.get("locked"))

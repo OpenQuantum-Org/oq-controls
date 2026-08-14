@@ -23,6 +23,15 @@ APP_STYLESHEET = """
         background-color: #0b0b0b;
         color: #e6e6e6;
     }
+    /* Form labels inside a dialog have no class of their own, so without
+       this they render in the platform's near-black on the dark panel --
+       the PID dialog's P/I/D captions were invisible. Scoped to QDialog
+       so the main window's classed labels keep their own colours. */
+    QDialog QLabel {
+        color: #e6e6e6;
+        font-size: 13px;
+        border: none;
+    }
 
     QScrollArea {
         border: none;

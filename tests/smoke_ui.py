@@ -106,8 +106,11 @@ assert INPUT_BORDER in mot_control.COMBO_STYLE
 # per-corner spellings count too: border-top-right-radius on the spinbox
 # buttons slipped past a check that only looked for "border-radius".
 # Dialogs are top-level windows, so they miss the QMainWindow rule and
-# render as a light panel in a dark app unless styled explicitly.
+# render as a light panel in a dark app unless styled explicitly. Their
+# plain QLabels need it too -- the PID dialog's P/I/D captions were
+# rendering in the platform's near-black, invisible on the dark panel.
 assert "QDialog {" in stylesheet
+assert "QDialog QLabel {" in stylesheet
 
 assert "border-radius: 0px" in stylesheet
 assert not re.search(r"[\w-]*border[\w-]*-?radius:\s*[1-9]", stylesheet)
@@ -388,6 +391,31 @@ try:
     assert not window.dispenser_progress.isVisibleTo(window)
     assert window.chip_text("disp") == "DISPENSER IDLE"
 
+    assert window.laser_card.toggle_btn.text() == "LASER", (
+        window.laser_card.toggle_btn.text()
+    )
+
+    # A readback must not overwrite a button the user just pressed. The
+    # write takes a poll or two to land, so a naive sync snaps the button
+    # back and then forward again -- the click reads as a lagging flicker.
+    window.mot_coil_output_btn.setChecked(True)
+    stale = {"v_out": 0.0, "i_out": 0.0, "power": 0.0, "output_enabled": False,
+             "cv_cc": 0, "protection": 0}
+    window._on_mot_coil_readback(stale)
+    assert window.mot_coil_output_btn.isChecked(), "stale readback won"
+    # Once the supply agrees, the readback drives the button again.
+    window._on_mot_coil_readback(dict(stale, output_enabled=True, i_out=1.0))
+    assert window.mot_coil_output_btn.isChecked()
+    window._on_mot_coil_readback(stale)
+    assert not window.mot_coil_output_btn.isChecked(), (
+        "readback ignored after the write settled"
+    )
+    # A write that never lands must surface, not be hidden forever.
+    window.mot_coil_output_btn.setChecked(True)
+    window._pending_output["coils"] = (True, 0.0)  # deadline already passed
+    window._on_mot_coil_readback(stale)
+    assert not window.mot_coil_output_btn.isChecked()
+
     # No readback rows on the supply cards: a DPS protection trip has to
     # reach the header chip and the event log instead.
     window._on_mot_coil_readback(
@@ -517,9 +545,19 @@ try:
     # --- Lock PSD: linien's noise-analysis window ---
     import numpy as np
 
+    # The PSD worker's first status arrives after the window opens, so
+    # the lock state has to be seeded from what the host already knows --
+    # otherwise the first Start click refuses and the second works.
+    window._set_chip("lock", "LOCKED", "#6f9e7c")
     window._open_psd_window()  # rp host empty -> worker exits with no_host
     psd = window._psd_window
     assert psd is not None and psd.isVisible()
+    assert psd._locked, "PSD opened believing the laser was unlocked"
+    window._set_chip("lock", "UNLOCKED", "#b56a6a")
+    window._open_psd_window()
+    assert not psd._locked
+    window._set_chip("lock", "LOCKED", "#6f9e7c")
+    window._open_psd_window()
 
     # Run controls swap on acquisition state, as linien's containers do.
     window._on_psd_status(
@@ -832,6 +870,7 @@ try:
     window.mot_coil_output_btn.setChecked(False)
     window.repump_gpio_btn.setChecked(False)
     window.laser_btn.setChecked(False)
+    window._set_chip("lock", "UNLOCKED", "#b56a6a")
     assert window.live_outputs() == [], [
         (o.key, o.detail) for o in window.live_outputs()
     ]

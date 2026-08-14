@@ -11,6 +11,7 @@ timed 10 s fire and a 15 min lockout cooldown.
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -797,8 +798,10 @@ class PidDialog(QtWidgets.QDialog):
     def __init__(self, parent, current=None):
         super().__init__(parent)
         self.setWindowTitle("Lock PID")
+        apply_dark_titlebar(self)
 
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
 
         form = QtWidgets.QFormLayout()
@@ -988,6 +991,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self._chip_state = {}
         self._device_connected = {}
+        # key -> (desired_state, deadline). Present only while a write is
+        # outstanding; see _sync_output_button.
+        self._pending_output = {}
         self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
         self._readback_log_output = {}
@@ -1009,6 +1015,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         for problem in _FONT_PROBLEMS:
             self._event_log.fault("font", message=problem)
+        self._capture_qt_messages()
 
         self.setWindowTitle("OpenQuantum Controls")
         self.resize(1540, 960)
@@ -1210,6 +1217,32 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             # connect/disconnect events is easy to miss, and for devices
             # with no status row the log is the only place it shows.
             self._log_fault(device, str(status).split(":", 1)[-1].strip())
+
+    def _capture_qt_messages(self):
+        """Send Qt's warnings to the event log instead of the console.
+
+        quiet_console() lowers what Qt prints; this makes that lossless.
+        Warnings and worse are recorded -- a Qt warning about a failed
+        camera or a bad stylesheet is a real diagnostic and should be in
+        the file with everything else, not in scrollback.
+        """
+        levels = {
+            QtCore.QtMsgType.QtWarningMsg: "warning",
+            QtCore.QtMsgType.QtCriticalMsg: "critical",
+            QtCore.QtMsgType.QtFatalMsg: "fatal",
+        }
+        log = self._event_log
+
+        def handler(mode, context, message):
+            level = levels.get(mode)
+            if level is None:
+                return  # debug/info: not worth a record
+            log.fault(
+                "qt", level=level, message=message,
+                category=getattr(context, "category", None),
+            )
+
+        QtCore.qInstallMessageHandler(handler)
 
     def _log_fault(self, device, message):
         self._event_log.fault("fault", device=device, message=str(message))
@@ -1919,7 +1952,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
 
     def _add_laser_card(self, parent):
-        card = CollapsibleCard("Laser Setpoints", collapsed=True)
+        card = CollapsibleCard("Laser", collapsed=True)
         self.laser_card = card
         layout = card.content_layout
 
@@ -2744,6 +2777,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_mot_coils(self, checked):
         self.mot_coil_output_btn.setText("Coils On" if checked else "Coils Off")
+        self._expect_output("coils", checked)
+        self._event_log.user("coil_output", on=bool(checked))
         worker = getattr(self, "mot_coil_worker", None)
         if worker is not None:
             worker.set_output(checked)
@@ -2830,7 +2865,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # No readback row: the header chip carries the current and the
         # trip state, and the measurements still reach the event log.
         self._sync_output_button(
-            self.mot_coil_output_btn, state, "Coils On", "Coils Off"
+            self.mot_coil_output_btn, state, "Coils On", "Coils Off", "coils"
         )
         if int(state.get("protection", 0) or 0):
             self._set_chip("coils", "COILS TRIP", "#b56a6a")
@@ -2845,12 +2880,43 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # chip carry the state. Protections still reach the event log.
         self._log_readback("dispenser", state)
 
-    @staticmethod
-    def _sync_output_button(button, state, on_text, off_text):
+    def _sync_output_button(self, button, state, on_text, off_text, key):
+        """Show the supply's actual output state, without fighting a click.
+
+        The write takes a poll or two to reach the supply and come back,
+        so a naive sync snaps the button back to the old state and then
+        forward again -- the click reads as a flicker with a lag. While a
+        write is outstanding the readback is ignored; once the device
+        agrees, or the grace period expires, it drives the button again.
+        Showing the truth after a failed write matters more than hiding
+        the lag, hence the timeout rather than a latch.
+        """
+        actual = bool(state["output_enabled"])
+        desired, deadline = self._pending_output.get(key, (None, 0.0))
+        if desired is not None:
+            if actual == desired:
+                self._pending_output.pop(key)  # the device caught up
+            elif time.monotonic() < deadline:
+                return  # write still in flight
+            else:
+                self._pending_output.pop(key)
+                self._log_fault(
+                    key, f"output did not reach {'on' if desired else 'off'}"
+                )
         button.blockSignals(True)
-        button.setChecked(bool(state["output_enabled"]))
-        button.setText(on_text if state["output_enabled"] else off_text)
+        button.setChecked(actual)
+        button.setText(on_text if actual else off_text)
         button.blockSignals(False)
+
+    # A supply write is applied on the worker's next poll (500 ms) and
+    # confirmed on the one after, so two polls plus slack.
+    OUTPUT_SETTLE_S = 2.0
+
+    def _expect_output(self, key, enabled):
+        """Record that the user asked for a state the device has not reached."""
+        self._pending_output[key] = (
+            bool(enabled), time.monotonic() + self.OUTPUT_SETTLE_S
+        )
 
     def _on_dispenser_fire_state(self, state):
         phase = state.get("phase", "idle")
@@ -2965,12 +3031,27 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_repump_gpio(self, checked):
         self._set_repump_ui(checked)
-        self._event_log.log("repump_gate", on=bool(checked))
+        self._expect_output("repump", checked)
+        self._event_log.user("repump_gate", on=bool(checked))
         worker = getattr(self, "repump_gpio_worker", None)
         if worker is not None:
             worker.set_output(checked)
 
     def _on_repump_gpio_state(self, enabled):
+        # Same rule as the supplies: a readback must not overwrite a
+        # button the user just pressed while the write is in flight.
+        desired, deadline = self._pending_output.get("repump", (None, 0.0))
+        if desired is not None:
+            if bool(enabled) == desired:
+                self._pending_output.pop("repump")
+            elif time.monotonic() < deadline:
+                return
+            else:
+                self._pending_output.pop("repump")
+                self._log_fault(
+                    "repump_gate",
+                    f"gate did not reach {'open' if desired else 'closed'}",
+                )
         self.repump_gpio_btn.blockSignals(True)
         self.repump_gpio_btn.setChecked(enabled)
         self._set_repump_ui(enabled)
@@ -3349,6 +3430,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
             self.psd_worker.start()
         self._psd_window.set_worker(self.psd_worker)
+        self._psd_window.set_locked(self.chip_text("lock") == "LOCKED")
         # Push the window's current settings so the server matches the UI.
         self._psd_window._on_algorithm_changed(
             self._psd_window.algo_combo.currentIndex()
@@ -3566,8 +3648,34 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 MOTControlWindow = OpenQuantumControlsWindow
 
 
+def quiet_console():
+    """Keep third-party chatter off the console.
+
+    Qt's multimedia backend announces its FFmpeg build on the first
+    camera query, and linien_client logs every connection attempt at
+    INFO. Neither is ours and neither is actionable, but the console is
+    where a real traceback shows up, so noise there costs something.
+
+    Nothing is discarded: Qt messages are re-emitted through the event
+    log once the window opens (see OpenQuantumControlsWindow), and this
+    only lowers what reaches stdout. Must run before QApplication --
+    the multimedia backend prints during its own initialisation.
+    """
+    os.environ.setdefault(
+        "QT_LOGGING_RULES",
+        "qt.multimedia.ffmpeg=false;qt.multimedia.ffmpeg.*=false",
+    )
+    # FFmpeg's own logger writes at the C level, beneath Qt's categories.
+    os.environ.setdefault("QT_FFMPEG_DEBUG", "0")
+    os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+    for name in ("linien_client", "linien_common", "rpyc"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main():
     import argparse
+
+    quiet_console()
 
     parser = argparse.ArgumentParser(description="OpenQuantum Controls UI")
     parser.add_argument("--rp-host", default=None, help="Linien Red Pitaya host")
