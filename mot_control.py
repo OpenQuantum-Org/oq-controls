@@ -963,6 +963,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget.connection_status_changed.connect(
             self._on_linien_connection
         )
+        self.linien_widget.fault.connect(
+            lambda msg: self._log_fault("linien", msg)
+        )
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1684,10 +1687,31 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         # Lock/Unlock are built by the Linien widget (they carry its lock
         # wiring) but belong here, not floating over the traces.
+        # linien's autoOffsetCheckbox, with its tooltip.
+        self.auto_offset_check = QtWidgets.QCheckBox(
+            "Determine signal offset"
+        )
+        self.auto_offset_check.setCursor(QtCore.Qt.PointingHandCursor)
+        self.auto_offset_check.setStyleSheet(
+            "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+        self.auto_offset_check.setChecked(
+            self._bool_setting("linien/determine_offset", True)
+        )
+        self.auto_offset_check.toggled.connect(self._on_auto_offset)
+        layout.addWidget(self.auto_offset_check)
+        self._tip(
+            "Adapt offset such that the lock is in the middle between\n"
+            "minimum and maximum. Note: this setting may reduce\n"
+            "reproducibility of absolute frequency.",
+            self.auto_offset_check,
+        )
+
         layout.addWidget(self.linien_widget.lock_controls)
         self._tip(
-            "Engage or release the laser lock. Locking uses the two\n"
-            "positions picked on the error signal.",
+            "Select target line, then click and drag over the line you\n"
+            "want to lock to.",
             self.linien_widget.lock_controls,
         )
 
@@ -1733,6 +1757,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mod_phase_edit,
         ):
             edit.setReadOnly(not on)
+
+    def _on_auto_offset(self, enabled):
+        self._settings.setValue("linien/determine_offset", bool(enabled))
+        self._event_log.log(
+            "setpoint", name="autolock_determine_offset", value=bool(enabled)
+        )
+        worker = self._get_lock_worker()
+        if worker is not None:
+            worker.set_determine_offset(enabled)
 
     def _on_mod_enabled(self, on):
         self._apply_mod_enabled(on)
@@ -2931,6 +2964,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
+            # Push the saved offset preference; the server default is True
+            # and we must not silently disagree with the checkbox.
+            QtCore.QTimer.singleShot(
+                1500,
+                lambda: self._on_auto_offset(
+                    self.auto_offset_check.isChecked()
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lock PID / config snapshot

@@ -21,6 +21,7 @@ class LinienWorker(QtCore.QThread):
     initial = QtCore.pyqtSignal(object)
     lock_state = QtCore.pyqtSignal(bool)  # True if locked, False otherwise
     connection_status = QtCore.pyqtSignal(str)  # "connected:<host>" or "disconnected"
+    fault = QtCore.pyqtSignal(str)  # anything that would otherwise be silent
 
     def __init__(self, host="rp-F0C6AD.local", username="root", password="root"):
         super().__init__()
@@ -50,16 +51,18 @@ class LinienWorker(QtCore.QThread):
                 {"center": self.current_center, "amplitude": self.current_amplitude}
             )
 
-            # Configure simple autolock preference
+            # Force the SIMPLE autolock. This must be the *preference*:
+            # the server derives autolock_mode from it when a lock starts,
+            # so setting autolock_mode here would be overwritten.
+            # autolock_determine_offset is left alone -- it is a user
+            # setting the UI owns.
             try:
                 p = self.client.parameters
                 p.fetch_additional_signals.value = False
-                p.autolock_mode.value = AutolockMode.SIMPLE
-                if hasattr(p, "autolock_determine_offset"):
-                    p.autolock_determine_offset.value = False
+                p.autolock_mode_preference.value = AutolockMode.SIMPLE
                 self.client.connection.root.write_registers()
             except Exception as e:
-                print("Could not set autolock parameters:", e)
+                self.fault.emit(f"autolock setup failed: {e}")
 
             print(f"Linien initialized and running (host: {self.host})")
             self.connection_status.emit(f"connected:{self.host}")
@@ -289,65 +292,54 @@ class LinienWorker(QtCore.QThread):
             sleep(1)
         return False
 
-    def lock_laser(self, selected_positions):
+    def lock_laser(self, x0, x1, spectrum):
+        """Start the autolock over a selected index range.
+
+        ``x0``/``x1`` are indices into the error signal the caller selected
+        on, and ``spectrum`` is that same signal -- both passed straight
+        through to the server, as linien's plot widget does. Converting to
+        volts and back would only lose precision.
+        """
+        params = self.client.parameters
         try:
-            self.client.connection.root.start_sweep()
-        except Exception:
-            pass
-        sleep(0.4)
-
-        to_plot = pickle.loads(self.client.parameters.to_plot.value)
-        if "error_signal_1" not in to_plot:
-            print("No spectrum available to lock on.")
-            return
-
-        raw_err = np.asarray(to_plot["error_signal_1"], dtype=np.int16)
-        N = raw_err.size
-        if N < 4:
-            print("Spectrum too small.")
-            return
-
-        cen = float(self.client.parameters.sweep_center.value)
-        amp = float(self.client.parameters.sweep_amplitude.value)
-        voltages = np.linspace(cen - amp, cen + amp, N)
-
-        x0_pos, x1_pos = selected_positions
-        i0 = int(np.argmin(np.abs(voltages - x0_pos)))
-        i1 = int(np.argmin(np.abs(voltages - x1_pos)))
-        if i0 > i1:
-            i0, i1 = i1, i0
-
-        if i0 == i1 or (i1 - i0) < 2:
-            i0 = max(0, i0 - 1)
-            i1 = min(N - 1, i1 + 1)
-        if not (0 <= i0 < i1 < N):
-            print(f"Invalid index window: ({i0}, {i1}) for N={N}")
-            return
-
-        payload = pickle.dumps(np.array(raw_err, dtype=np.int16))
-
-        try:
-            p = self.client.parameters
-            p.autolock_mode.value = AutolockMode.SIMPLE
-            if hasattr(p, "autolock_determine_offset"):
-                p.autolock_determine_offset.value = False
+            # SIMPLE is forced through the *preference*: the server builds
+            # an AutolockAlgorithmSelector from autolock_mode_preference and
+            # assigns autolock_mode from it, so writing autolock_mode here
+            # would just be overwritten. A non-AUTO_DETECT preference
+            # short-circuits the selector.
+            params.autolock_mode_preference.value = AutolockMode.SIMPLE
+            params.fetch_additional_signals.value = False
+            params.autolock_target_position.value = 0
             self.client.connection.root.write_registers()
         except Exception as e:
-            print("Autolock parameter set warning:", e)
+            self.fault.emit(f"autolock parameter set failed: {e}")
 
-        print(f"Calling start_autolock(i0={i0}, i1={i1}, N={N})")
         try:
-            self.client.connection.root.start_autolock(i0, i1, payload)
+            self.client.connection.root.start_autolock(
+                int(x0), int(x1), pickle.dumps(spectrum)
+            )
         except Exception as e:
-            print(f"start_autolock raised: {e}")
+            self.fault.emit(f"start_autolock failed: {e}")
             return
 
         if self._wait_for_lock(True, timeout_s=30):
-            print("Lock engaged.")
             self._emit_lock_state_best_effort(force_value=True)
         else:
-            print("! Lock did not engage in time.")
+            self.fault.emit("lock did not engage within 30 s")
             self._emit_lock_state_best_effort()
+
+    def set_determine_offset(self, enabled: bool):
+        """linien's "Determine signal offset" checkbox.
+
+        The server reads this parameter inside exposed_start_autolock, so
+        it only has to be set before a lock starts.
+        """
+        try:
+            self.client.parameters.autolock_determine_offset.value = bool(
+                enabled
+            )
+        except Exception as e:
+            self.fault.emit(f"determine-offset update failed: {e}")
 
     def unlock_laser(self):
         print("Attempting to unlock laser...")

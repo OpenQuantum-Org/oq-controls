@@ -431,6 +431,50 @@ try:
     assert not window.mod_enable_btn.isChecked()
     window.laser_btn.setChecked(False)
 
+    # --- Autolock line selection ---
+    # The bug this replaced: each selection added marker lines that were
+    # never removed, so they piled up on the plot across lock/unlock. The
+    # overlays are now created once and shown/hidden, so the plot's item
+    # count must be identical before and after any number of selections.
+    lw = window.linien_widget
+    baseline = len(lw.plot.items)
+
+    assert not lw.selection_running
+    assert lw.lock_button.isVisibleTo(lw.lock_controls)
+    assert not lw.abort_button.isVisibleTo(lw.lock_controls)
+
+    lw.start_selection()
+    assert lw.selection_running
+    assert lw._plot_paused  # trace held still while selecting
+    assert not lw.lock_button.isVisibleTo(lw.lock_controls)
+    assert lw.abort_button.isVisibleTo(lw.lock_controls)
+    assert all(o.isVisible() for o in lw.boundary_overlays)
+
+    lw.abort_selection()
+    assert not lw.selection_running
+    assert not lw._plot_paused
+    assert not lw.overlay.isVisible()
+    assert not any(o.isVisible() for o in lw.boundary_overlays)
+    assert len(lw.plot.items) == baseline
+
+    # A full press/drag/release cycle, repeated: still no accumulation.
+    for _ in range(3):
+        lw.start_selection()
+        lo, hi = lw.selection_boundaries
+        lw._touch_start = lo
+        lw.overlay.setRegion((lo, hi))
+        lw.overlay.setVisible(True)
+        lw._disable_area_selection()
+        lw._resume_plot()
+        assert not lw.overlay.isVisible()
+        assert len(lw.plot.items) == baseline
+
+    # Determine signal offset defaults on, matching linien's server default.
+    assert window.auto_offset_check.isChecked()
+    window.auto_offset_check.setChecked(False)
+    assert window._settings.value("linien/determine_offset") in (False, "false")
+    window.auto_offset_check.setChecked(True)
+
     # --- Lock PSD: linien's noise-analysis window ---
     import numpy as np
 

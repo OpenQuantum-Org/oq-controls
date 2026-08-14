@@ -6,6 +6,7 @@ from the MOT GUI. The heavy linien_client import is deferred until start()
 is called to avoid slowing down UI construction.
 """
 
+import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 from superqt import QRangeSlider
@@ -36,6 +37,8 @@ class LinienWidget(QtWidgets.QWidget):
     """
     lock_state_changed = QtCore.pyqtSignal(bool)
     connection_status_changed = QtCore.pyqtSignal(str)
+    selection_state_changed = QtCore.pyqtSignal(bool)
+    fault = QtCore.pyqtSignal(str)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
                  show_stop_button=False, sweep_range=(-1.0, 1.0),
@@ -137,6 +140,37 @@ class LinienWidget(QtWidgets.QWidget):
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
 
+        # --- Autolock line selection (linien's PlotWidget overlays) ---
+        # Created once and shown/hidden. Adding items per selection is what
+        # previously left marker lines on the plot forever.
+        self.selection_running = False
+        self.selection_boundaries = (0, 0)
+        self._touch_start = None
+        self._plot_paused = False
+        self._last_error_signal = None
+
+        self.overlay = pg.LinearRegionItem(
+            values=(0, 0), movable=False,
+            brush=pg.mkBrush(92, 184, 255, 40),
+        )
+        self.overlay.setVisible(False)
+        self.plot.addItem(self.overlay, ignoreBounds=True)
+
+        self.boundary_overlays = [
+            pg.LinearRegionItem(
+                values=(0, 0), movable=False, brush=(0, 0, 0, 200)
+            )
+            for _ in range(2)
+        ]
+        for i, overlay in enumerate(self.boundary_overlays):
+            overlay.setVisible(False)
+            # Hide the inner edge line so the mask reads as a shaded band.
+            overlay.lines[i].setPen((0, 0, 0, 0))
+            self.plot.addItem(overlay, ignoreBounds=True)
+
+        self.plot.scene().sigMouseMoved.connect(self._selection_mouse_moved)
+        self.pg_widget.viewport().installEventFilter(self)
+
         # --- Overlay labels ---
         vb = self.plot.getViewBox()
         overlay_label_style = "color: #ababab; background: transparent; font-size: 13px; border: none;"
@@ -177,16 +211,26 @@ class LinienWidget(QtWidgets.QWidget):
         lock_row.setContentsMargins(0, 0, 0, 0)
         lock_row.setSpacing(6)
         if self._show_lock_buttons:
-            self.lock_button = QtWidgets.QPushButton("Lock Laser")
+            # linien's wording: you pick a line, the lock follows.
+            self.lock_button = QtWidgets.QPushButton("Select target line")
             self.lock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.lock_button.clicked.connect(self._run_lock)
             lock_row.addWidget(self.lock_button)
+
+            # Shown only while a selection is in progress, as linien swaps
+            # auto_mode_not_activated for auto_mode_activated.
+            self.abort_button = QtWidgets.QPushButton("Abort")
+            self.abort_button.setCursor(QtCore.Qt.PointingHandCursor)
+            self.abort_button.clicked.connect(self.abort_selection)
+            self.abort_button.setVisible(False)
+            lock_row.addWidget(self.abort_button)
 
             self.unlock_button = QtWidgets.QPushButton("Unlock")
             self.unlock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.unlock_button.clicked.connect(self._run_unlock)
             lock_row.addWidget(self.unlock_button)
 
+            self.selection_state_changed.connect(self._on_selection_state)
             self._set_locked_ui(False)
 
         if self._show_stop_button:
@@ -246,6 +290,7 @@ class LinienWidget(QtWidgets.QWidget):
         self.linien_thread.initial.connect(self._initialize_slider)
         self.linien_thread.lock_state.connect(self._on_lock_state)
         self.linien_thread.connection_status.connect(self.connection_status_changed.emit)
+        self.linien_thread.fault.connect(self.fault.emit)
         self.linien_thread.start()
 
     # --- Slots ---
@@ -263,11 +308,16 @@ class LinienWidget(QtWidgets.QWidget):
         self.xrange_slider.blockSignals(False)
 
     def _update_plot(self, data):
-        import numpy as np
         voltages = data["voltages"]
         err = data["error_signal"]
         mon = data["monitor_signal"]
         if voltages.size == 0:
+            return
+        # Keep the newest spectrum for the autolock even while paused.
+        self._last_error_signal = err
+        if self._plot_paused:
+            # Selecting a line: hold the trace still so it does not move
+            # under the cursor mid-drag (linien pauses the same way).
             return
         if self._v_to_mhz is not None:
             x = self._v_to_mhz(voltages)
@@ -338,63 +388,172 @@ class LinienWidget(QtWidgets.QWidget):
             self.plot.setYRange(*self.plot.viewRange()[1], padding=0)
 
     def _run_lock(self):
+        """Begin line selection. The lock starts when the drag completes."""
         if self.linien_thread is None:
             return
-        selected_display = self._pick_x_positions()
-        if len(selected_display) >= 2:
-            # Convert display coordinates back to voltage for the lock logic
-            selected_v = [self._display_to_v(x) for x in selected_display]
-            selected_v.sort()
-            self.linien_thread.lock_laser(selected_v)
+        self.start_selection()
 
     def _run_unlock(self):
+        self.abort_selection()
         if self.linien_thread is not None:
             self.linien_thread.unlock_laser()
 
-    def _pick_x_positions(self):
-        """Interactive: user clicks two x positions on the plot to define lock region."""
-        vb = self.plot.getViewBox()
-        orange_line = pg.InfiniteLine(
-            pos=0, angle=90,
-            pen=pg.mkPen(color=(255, 165, 0, 180), style=QtCore.Qt.DashLine, width=1.5),
+    # --- Line selection, ported from linien's PlotWidget ---
+
+    def start_selection(self):
+        """Enable area selection over the trace (linien: selectable 0.99)."""
+        if self.selection_running:
+            return
+        self._enable_area_selection(selectable_width=0.99)
+        self._pause_plot()
+        self.selection_state_changed.emit(True)
+
+    def abort_selection(self):
+        if not self.selection_running:
+            return
+        self._disable_area_selection()
+        self._resume_plot()
+        self.selection_state_changed.emit(False)
+
+    def _enable_area_selection(self, selectable_width=0.99):
+        self.selection_running = True
+        xmin, xmax = self.plot.viewRange()[0]
+        span = xmax - xmin
+        # A little wider than exact: linien notes glitches otherwise.
+        extra = span / 100.0
+        boundary = (span * (1 - selectable_width)) / 2.0
+        self.selection_boundaries = (xmin + boundary, xmax - boundary)
+
+        self.boundary_overlays[0].setRegion(
+            (xmin - extra, xmin + boundary)
         )
-        self.plot.addItem(orange_line)
-        selected = []
+        self.boundary_overlays[1].setRegion(
+            (xmax - boundary, xmax + extra)
+        )
+        for overlay in self.boundary_overlays:
+            overlay.setVisible(True)
+        # Panning would fight the drag-select.
+        self.view_box.setMouseEnabled(x=False, y=False)
 
-        def mouse_move(pos):
-            if vb.sceneBoundingRect().contains(pos):
-                orange_line.setPos(vb.mapSceneToView(pos).x())
+    def _disable_area_selection(self):
+        self.selection_running = False
+        self._touch_start = None
+        self.overlay.setVisible(False)
+        for overlay in self.boundary_overlays:
+            overlay.setVisible(False)
+        self.view_box.setMouseEnabled(x=True, y=True)
 
-        def mouse_click(evt):
-            if evt.button() == QtCore.Qt.LeftButton:
-                pos = evt.scenePos()
-                if vb.sceneBoundingRect().contains(pos):
-                    x_val = vb.mapSceneToView(pos).x()
-                    selected.append(x_val)
-                    marker = pg.InfiniteLine(
-                        pos=x_val, angle=90,
-                        pen=pg.mkPen(color=(255, 165, 0, 140), width=1),
-                    )
-                    self.plot.addItem(marker)
-                    if len(selected) >= 2:
-                        loop.quit()
+    def _pause_plot(self):
+        """Hold the trace still so the line does not move while selecting."""
+        self._plot_paused = True
 
-        vb.scene().sigMouseMoved.connect(mouse_move)
-        vb.scene().sigMouseClicked.connect(mouse_click)
-        loop = QtCore.QEventLoop()
-        loop.exec_()
-        self.plot.removeItem(orange_line)
-        selected.sort()
-        return selected
+    def _resume_plot(self):
+        self._plot_paused = False
+
+    def _within_boundaries(self, x):
+        lo, hi = self.selection_boundaries
+        return min(max(x, lo), hi)
+
+    def _selection_mouse_moved(self, pos):
+        if not self.selection_running or self._touch_start is None:
+            return
+        if not self.view_box.sceneBoundingRect().contains(pos):
+            return
+        x = self._within_boundaries(self.view_box.mapSceneToView(pos).x())
+        x0 = self._touch_start
+        self.overlay.setRegion((min(x0, x), max(x0, x)))
+
+    def eventFilter(self, obj, event):
+        """Drag-select on the plot viewport.
+
+        The plot's mouse events reach the graphics view, not this widget,
+        so press/release are filtered there rather than overridden here.
+        """
+        if not self.selection_running:
+            return False
+        kind = event.type()
+        if kind == QtCore.QEvent.MouseButtonPress:
+            self._on_selection_press(event)
+            return True
+        if kind == QtCore.QEvent.MouseButtonRelease:
+            self._on_selection_release(event)
+            return True
+        return False
+
+    def _event_x(self, event):
+        scene_pos = self.pg_widget.mapToScene(event.pos())
+        return self._within_boundaries(
+            self.view_box.mapSceneToView(scene_pos).x()
+        )
+
+    def _on_selection_press(self, event):
+        x = self._event_x(event)
+        self._touch_start = x
+        self.overlay.setRegion((x, x))
+        self.overlay.setVisible(True)
+
+    def _on_selection_release(self, event):
+        if self._touch_start is None:
+            return
+        x = self._event_x(event)
+        x0 = self._touch_start
+        lo, hi = self.selection_boundaries
+        span = hi - lo
+        self.overlay.setVisible(False)
+        self._touch_start = None
+
+        # A drag under 1% of the span is a click, not a selection: this is
+        # what stops a stray click starting a lock.
+        if span <= 0 or abs(x - x0) / span < 0.01:
+            return
+
+        self._disable_area_selection()
+        self._resume_plot()
+        self.selection_state_changed.emit(False)
+        self._start_autolock(*sorted((x0, x)))
+
+    def _start_autolock(self, x_from, x_to):
+        """Map the selected display range to spectrum indices and lock."""
+        spectrum = self._last_error_signal
+        if self.linien_thread is None or spectrum is None:
+            return
+        spectrum = np.asarray(spectrum)
+        n = spectrum.size
+        if n < 4:
+            return
+        xmin, xmax = self._v_range_to_display(
+            self._sweep_min_v, self._sweep_max_v
+        )
+        span = xmax - xmin
+        if span == 0:
+            return
+        i0 = int(round((x_from - xmin) / span * (n - 1)))
+        i1 = int(round((x_to - xmin) / span * (n - 1)))
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+        if i1 - i0 < 2:
+            return
+        self.linien_thread.lock_laser(i0, i1, spectrum)
 
     def _on_lock_state(self, locked: bool):
         self._set_locked_ui(locked)
         self.lock_state_changed.emit(locked)
 
+    def _on_selection_state(self, selecting: bool):
+        """Swap Select for Abort while a drag-selection is running."""
+        if not self._show_lock_buttons:
+            return
+        self.lock_button.setVisible(not selecting)
+        self.abort_button.setVisible(selecting)
+
     def _set_locked_ui(self, locked: bool):
         if not self._show_lock_buttons:
             return
-        self.lock_button.setVisible(not locked)
+        if locked:
+            # A lock engaging ends any selection still in progress.
+            self.abort_selection()
+        self.lock_button.setVisible(not locked and not self.selection_running)
+        self.abort_button.setVisible(self.selection_running)
         self.unlock_button.setVisible(locked)
 
     def _stop_sweep(self):
