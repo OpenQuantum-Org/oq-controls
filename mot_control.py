@@ -2597,13 +2597,21 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
             worker.laser_on(checked)
-        # The repump is only meaningful with the laser running, so it
-        # follows the laser off. It does not follow the laser back on --
-        # turning it on is always a deliberate act.
-        repump_btn = getattr(self, "repump_gpio_btn", None)
-        if not checked and repump_btn is not None and repump_btn.isChecked():
-            self._event_log.log("repump_gate_auto_off", reason="laser_off")
-            repump_btn.setChecked(False)
+        # The repump gate and the current dither are both meaningless with
+        # the laser off, so they follow it off. Neither follows the laser
+        # back on -- switching those on stays a deliberate act.
+        if not checked:
+            self._follow_laser_off()
+
+    def _follow_laser_off(self):
+        for attr, reason_key in (
+            ("repump_gpio_btn", "repump_gate_auto_off"),
+            ("mod_enable_btn", "modulation_auto_off"),
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None and btn.isChecked():
+                self._event_log.log(reason_key, reason="laser_off")
+                btn.setChecked(False)
 
     def _on_current(self, value):
         self.current_edit.setText(f"{value} mA")

@@ -412,16 +412,22 @@ try:
     window._on_repump_gpio_state(False)
     assert window.repump_gpio_btn.text() == "Repump Off"
 
-    # The repump follows the laser off -- it is meaningless without it.
+    # The repump gate and the dither both follow the laser off -- they are
+    # meaningless without it.
     window.laser_btn.setChecked(True)
     window.repump_gpio_btn.setChecked(True)
+    window.mod_enable_btn.setChecked(True)
     assert window.repump_gpio_btn.isChecked()
+    assert window.mod_enable_btn.isChecked()
     window.laser_btn.setChecked(False)
     assert not window.repump_gpio_btn.isChecked()
+    assert not window.mod_enable_btn.isChecked()
     assert window.chip_text("repump") == "REPUMP OFF"
-    # ...but does not follow it back on: that stays a deliberate act.
+    assert window.mod_enable_btn.text() == "Modulation Off"
+    # ...but neither follows it back on: that stays a deliberate act.
     window.laser_btn.setChecked(True)
     assert not window.repump_gpio_btn.isChecked()
+    assert not window.mod_enable_btn.isChecked()
     window.laser_btn.setChecked(False)
 
     # --- Lock PSD mode: view/sidebar swap, status, plotting, exit ---
