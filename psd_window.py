@@ -394,15 +394,29 @@ class PsdWindow(QtWidgets.QMainWindow):
         root.addLayout(self._build_settings_row())
         root.addWidget(self._build_run_controls())
 
+        # Plot and curve list side by side: the table is a legend for the
+        # plot, so it belongs next to it rather than stacked underneath.
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(8)
+
         self.plot = PsdPlotWidget()
-        root.addWidget(self.plot, stretch=1)
+        body.addWidget(self.plot, stretch=1)
 
+        side = QtWidgets.QVBoxLayout()
+        side.setSpacing(6)
+        side.addWidget(make_section_title("Traces"))
         self.table = PsdTableWidget()
-        self.table.setFixedHeight(160)
         self.table.show_or_hide_curve.connect(self.plot.show_or_hide_curve)
-        root.addWidget(self.table)
+        side.addWidget(self.table, stretch=1)
+        side.addLayout(self._build_trace_buttons())
 
-        root.addLayout(self._build_trace_buttons())
+        side_box = QtWidgets.QWidget()
+        side_box.setLayout(side)
+        # Wide enough for all seven columns without a horizontal scrollbar.
+        side_box.setFixedWidth(470)
+        body.addWidget(side_box)
+
+        root.addLayout(body, stretch=1)
 
     # --- construction helpers ---
 
@@ -479,12 +493,15 @@ class PsdWindow(QtWidgets.QMainWindow):
         return card
 
     def _build_trace_buttons(self):
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(6)
+        column = QtWidgets.QVBoxLayout()
+        column.setSpacing(6)
         self.delete_btn = QtWidgets.QPushButton("Delete selected")
         self.delete_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.delete_btn.clicked.connect(self.delete_curve)
-        row.addWidget(self.delete_btn)
+        column.addWidget(self.delete_btn)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
         self.import_btn = QtWidgets.QPushButton("Import traces")
         self.import_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.import_btn.clicked.connect(self.import_psd)
@@ -493,8 +510,10 @@ class PsdWindow(QtWidgets.QMainWindow):
         self.export_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.export_btn.clicked.connect(self.export_psd)
         row.addWidget(self.export_btn)
-        row.addStretch()
-        return row
+        # No trailing stretch: the pair share the column width rather than
+        # bunching at the left.
+        column.addLayout(row)
+        return column
 
     @staticmethod
     def _label(text):
