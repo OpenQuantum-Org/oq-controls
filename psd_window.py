@@ -30,7 +30,7 @@ COMBO_STYLE = """
         color: #e4e4e7;
         border: 1px solid #404040;
         border-radius: 0px;
-        padding: 2px 6px;
+        padding: 4px 6px;
         font-size: %(px)dpx;
     }
     QComboBox:focus { color: white; border-color: #949494; }

@@ -103,7 +103,7 @@ APP_STYLESHEET = """
         /* Without this an editable value inherits the app default and
            renders larger than the read-only value beside it. */
         font-size: 13px;
-        padding: 2px 6px;
+        padding: 4px 6px;
         selection-background-color: #383838;
     }
     QLineEdit:focus {
@@ -198,7 +198,7 @@ def make_card() -> QtWidgets.QFrame:
         }
     """)
     layout = QtWidgets.QVBoxLayout(frame)
-    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setContentsMargins(14, 12, 14, 12)
     layout.setSpacing(6)
     return frame
 
@@ -220,7 +220,7 @@ def make_section_title(text: str) -> QtWidgets.QLabel:
     label.setAlignment(QtCore.Qt.AlignLeft)
     label.setStyleSheet(
         f"color: {ACCENT}; font-size: 13px; font-weight: 600;"
-        "letter-spacing: 1px; padding: 2px 4px; border: none;"
+        "letter-spacing: 1px; padding: 6px 4px 3px 4px; border: none;"
     )
     return label
 
@@ -229,7 +229,7 @@ def add_slider_row(parent_layout, label_text, min_val, max_val, init_val,
                    single=1, page=1, suffix="", decimals=0, scale=1.0):
     """Create a labeled slider row. Returns (slider, value_edit)."""
     row = QtWidgets.QHBoxLayout()
-    row.setContentsMargins(0, 2, 0, 2)
+    row.setContentsMargins(0, 3, 0, 3)
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)
@@ -270,7 +270,7 @@ def add_slider_row(parent_layout, label_text, min_val, max_val, init_val,
 def add_readout_row(parent_layout, label_text, initial_text="--", unit=""):
     """Read-only readout: label on left, value on right. Returns value QLabel."""
     row = QtWidgets.QHBoxLayout()
-    row.setContentsMargins(0, 2, 0, 2)
+    row.setContentsMargins(0, 3, 0, 3)
     row.setSpacing(8)
 
     label = QtWidgets.QLabel(label_text)

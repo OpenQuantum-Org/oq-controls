@@ -194,15 +194,17 @@ def build_app_stylesheet():
         "QAbstractSpinBox {"
         " background: #171717; color: #efefef; font-size: 13px;"
         " border: 1px solid #404040; border-radius: 0px;"
-        " padding: 2px 6px;"
+        " padding: 4px 6px;"
         " selection-background-color: #383838; }\n"
         "QAbstractSpinBox:focus { border-color: #949494; }\n"
+        # Square and neutral like every other control. These kept a purple
+        # tint and rounded corners: the palette sweep missed the colour,
+        # and the corner check only matches a plain "border-radius".
         "QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {"
-        " background: #5a5a70; border: none; width: 14px; }\n"
-        "QAbstractSpinBox::up-button { border-top-right-radius: 3px; }\n"
-        "QAbstractSpinBox::down-button { border-bottom-right-radius: 3px; }\n"
+        " background: #2e2e2e; border: none; border-radius: 0px;"
+        " width: 16px; }\n"
         "QAbstractSpinBox::up-button:hover,"
-        " QAbstractSpinBox::down-button:hover { background: #6a6a82; }\n"
+        " QAbstractSpinBox::down-button:hover { background: #454545; }\n"
         "QComboBox { border: 1px solid #404040; }\n"
     )
 
@@ -337,7 +339,7 @@ COMBO_STYLE = """
         color: #e6e6e6;
         border: 1px solid #404040;
         border-radius: 0px;
-        padding: 2px 6px;
+        padding: 4px 6px;
         font-size: 13px;
     }
     QComboBox:focus {
@@ -495,9 +497,9 @@ class CollapsibleCard(QtWidgets.QFrame):
                 QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum
             )
         outer = QtWidgets.QVBoxLayout(self)
-        margin = (12, 10, 12, 10) if framed else (0, 0, 0, 0)
+        margin = (14, 12, 14, 12) if framed else (0, 0, 0, 0)
         outer.setContentsMargins(*margin)
-        outer.setSpacing(6)
+        outer.setSpacing(8)
         # Cards size to their content. Without this the last card in a
         # top-aligned column absorbs the leftover height and shows a tall
         # blank area under a collapsed section.
@@ -1559,7 +1561,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             row = QtWidgets.QHBoxLayout()
             # Same margins and label width as add_slider_row, so these rows
             # sit on the same rhythm as every other control in the card.
-            row.setContentsMargins(0, 2, 0, 2)
+            row.setContentsMargins(0, 3, 0, 3)
             row.setSpacing(8)
             enabled = QtWidgets.QCheckBox(f"Filter {index}")
             enabled.setCursor(QtCore.Qt.PointingHandCursor)

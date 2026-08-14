@@ -93,9 +93,13 @@ assert "QAbstractSpinBox {" in stylesheet
 assert stylesheet.count(INPUT_BORDER) >= 3  # edit/spin/combo
 assert INPUT_BORDER in mot_control.COMBO_STYLE
 
-# Corners are square everywhere -- no rounded panels or controls.
+# Corners are square everywhere -- no rounded panels or controls. The
+# per-corner spellings count too: border-top-right-radius on the spinbox
+# buttons slipped past a check that only looked for "border-radius".
 assert "border-radius: 0px" in stylesheet
-assert not re.search(r"border-radius:\s*[1-9]", stylesheet)
+assert not re.search(r"[\w-]*border[\w-]*-?radius:\s*[1-9]", stylesheet)
+for sheet in (mot_control.COMBO_STYLE, mot_control.APP_STYLESHEET):
+    assert not re.search(r"[\w-]*border[\w-]*-?radius:\s*[1-9]", sheet)
 
 
 def resolved_family(widget):
