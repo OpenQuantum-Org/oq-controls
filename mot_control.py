@@ -1507,7 +1507,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         manual_layout.addWidget(self.connect_btn)
 
-        self.auto_discover_btn = QtWidgets.QPushButton("Autoconnect")
+        self.auto_discover_btn = QtWidgets.QPushButton("Auto-connect")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.auto_discover_btn.clicked.connect(
             lambda: self._run_usb_probe(startup=False)
@@ -1593,23 +1593,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             help_cursor=True,
         )
 
-        self.filter_auto_check = QtWidgets.QCheckBox(
-            "Automatic (two low-passes at half the modulation frequency)"
-        )
-        self.filter_auto_check.setChecked(True)
-        self.filter_auto_check.setCursor(QtCore.Qt.PointingHandCursor)
-        self.filter_auto_check.setStyleSheet(
-            "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; }"
-        )
-        self.filter_auto_check.toggled.connect(self._on_filter_changed)
-        layout.addWidget(self.filter_auto_check)
-        self._tip(
-            "When checked, Linien chooses the filters itself; uncheck to\n"
-            "configure the two stages manually below.",
-            self.filter_auto_check,
-        )
-
         for index in (1, 2):
             row = QtWidgets.QHBoxLayout()
             # Same margins and label width as add_slider_row, so these rows
@@ -1651,7 +1634,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 freq_spin,
             )
 
-        self._update_filter_rows_enabled()
 
     def _add_config_card(self, parent):
         card = CollapsibleCard("Config", collapsed=True)
@@ -2005,13 +1987,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.dispenser_card = card
         layout = card.content_layout
 
-        self.dispenser_readback = add_readout_row(layout, "Readback:", "--")
-        self._tip(
-            "Measured dispenser supply output (V / A / W) and CV/CC mode.\n"
-            "Turns red if the supply trips a protection.",
-            self.dispenser_readback,
-            help_cursor=True,
-        )
         self.dispenser_voltage_slider, self.dispenser_voltage_edit = (
             add_slider_row(
                 layout,
@@ -2058,6 +2033,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "for the fire duration.",
             self.dispenser_current_slider,
             self.dispenser_current_edit,
+        )
+        self.dispenser_time_slider, self.dispenser_time_edit = add_slider_row(
+            layout,
+            "Fire Time:",
+            int(DispenserWorker.MIN_FIRE_SECONDS),
+            120,
+            int(round(self._dispenser_fire_seconds)),
+            single=1,
+            page=5,
+            suffix=" s",
+        )
+        self.dispenser_time_slider.valueChanged.connect(
+            self._on_dispenser_time
+        )
+        self._tip(
+            "How long a fire runs before the supply is forced off.\n"
+            "A 15 min cooldown follows every fire.",
+            self.dispenser_time_slider,
+            self.dispenser_time_edit,
         )
 
         fire_row = QtWidgets.QHBoxLayout()
@@ -2129,6 +2123,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "value": self._dispenser_fire_current,
             },
         )
+        self._push_dispenser_fire_parameters()
+
+    def _on_dispenser_time(self, seconds):
+        self._dispenser_fire_seconds = float(seconds)
+        self._settings.setValue(
+            "dispenser/fire_seconds", self._dispenser_fire_seconds
+        )
+        self._debounced_log(
+            "dispenser_time",
+            "setpoint",
+            lambda: {
+                "name": "dispenser_fire_seconds",
+                "value": self._dispenser_fire_seconds,
+            },
+        )
+        if self._dispenser_phase == "idle":
+            self.dispenser_fire_btn.setText(
+                f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
+            )
         self._push_dispenser_fire_parameters()
 
     def _push_dispenser_fire_parameters(self):
@@ -2324,10 +2337,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 for key in ("laser", "mot_coil", "dispenser")
                 if status.get(key) == "verified"
             )
+            # The card is left as the user had it; the header count and
+            # the per-row statuses inside say which device is missing.
             self._set_chip("usb", f"DEVICES {n_ok}/3", "#b56a6a")
-            # Compact summary: the auto-expanded card's per-row statuses
-            # show which device is missing.
-            self.usb_card.set_expanded(True)
 
         self._save_connection_settings()
 
@@ -2687,6 +2699,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"{self._dispenser_fire_current:.3f} A"
         )
         self.dispenser_current_slider.blockSignals(False)
+        self.dispenser_time_slider.blockSignals(True)
+        self.dispenser_time_slider.setValue(
+            int(round(self._dispenser_fire_seconds))
+        )
+        self.dispenser_time_edit.setText(
+            f"{self._dispenser_fire_seconds:.0f} s"
+        )
+        self.dispenser_time_slider.blockSignals(False)
         self._push_dispenser_fire_parameters()
         self._event_log.log(
             "dispenser_override",
@@ -2744,9 +2764,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
-        # The fire button is driven by the worker's fire_state, not by the
-        # raw output flag, so only the numeric readback is updated here.
-        self._set_readback_text(self.dispenser_readback, state, show_mode=True)
+        # No readback row on this card -- the fire button and the header
+        # chip carry the state. Protections still reach the event log.
         self._log_readback("dispenser", state)
 
     def _set_readback_text(self, label, state, show_mode=False):
@@ -2910,7 +2929,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _filters_from_ui(self):
         return {
-            "automatic": self.filter_auto_check.isChecked(),
+            "automatic": False,
             "filter_1_enabled": self.filter1_enabled_check.isChecked(),
             "filter_1_type": int(self.filter1_type_combo.currentData()),
             "filter_1_frequency": self.filter1_freq_spin.value(),
@@ -2922,7 +2941,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _set_filters_ui(self, filters):
         self._filters_syncing = True
         try:
-            self.filter_auto_check.setChecked(bool(filters.get("automatic", True)))
             for index in (1, 2):
                 enabled = getattr(self, f"filter{index}_enabled_check")
                 type_combo = getattr(self, f"filter{index}_type_combo")
@@ -2938,18 +2956,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 )
         finally:
             self._filters_syncing = False
-        self._update_filter_rows_enabled()
-
-    def _update_filter_rows_enabled(self):
-        manual = not self.filter_auto_check.isChecked()
-        for index in (1, 2):
-            for name in ("enabled_check", "type_combo", "freq_spin"):
-                getattr(self, f"filter{index}_{name}").setEnabled(manual)
 
     def _on_filter_changed(self, *_args):
         if self._filters_syncing:
             return
-        self._update_filter_rows_enabled()
         self._debounced_log(
             "error_filters",
             "setpoint",

@@ -355,18 +355,8 @@ try:
     assert not window.dispenser_progress.isVisibleTo(window)
     assert window.chip_text("disp") == "DISP IDLE"
 
-    # Dispenser readback shows CC/CV only while the output is on, and DPS
-    # protection trips are surfaced in red on both supplies (and chips).
-    window._on_dispenser_readback(
-        {"v_out": 0.08, "i_out": 7.5, "power": 0.6, "output_enabled": True,
-         "cv_cc": 1, "protection": 0}
-    )
-    assert window.dispenser_readback.text().endswith("/ CC")
-    window._on_dispenser_readback(
-        {"v_out": 0.0, "i_out": 0.0, "power": 0.0, "output_enabled": False,
-         "cv_cc": 0, "protection": 1}
-    )
-    assert window.dispenser_readback.text().startswith("OVP TRIPPED")
+    # Coil readback shows CC/CV only while the output is on, and DPS
+    # protection trips are surfaced in red (and on the chips).
     window._on_mot_coil_readback(
         {"v_out": 0.0, "i_out": 0.0, "power": 0.0, "output_enabled": False,
          "cv_cc": 0, "protection": 2}
@@ -521,10 +511,8 @@ try:
     # --- Error signal filter card ---
     # Filters are inline in the Linien Lock card, not a nested dropdown.
     assert not hasattr(window, "filter_card")
-    assert window.filter_auto_check.isChecked()  # linien default: automatic
-    assert not window.filter1_freq_spin.isEnabled()  # manual rows locked
-    window.filter_auto_check.setChecked(False)
-    assert window.filter1_freq_spin.isEnabled()
+    assert not hasattr(window, "filter_auto_check")  # no automatic mode
+    assert window.filter1_freq_spin.isEnabled()  # stages are always live
     window.filter1_enabled_check.setChecked(True)
     window.filter1_type_combo.setCurrentIndex(1)  # high pass
     window.filter1_freq_spin.setValue(25000)
@@ -537,9 +525,8 @@ try:
     window._set_filters_ui(
         {"automatic": True, "filter_1_frequency": 12000}
     )  # partial sync from device
-    assert window.filter_auto_check.isChecked()
     assert window.filter1_freq_spin.value() == 12000
-    assert not window.filter1_freq_spin.isEnabled()  # auto re-locks rows
+    assert window.filter1_freq_spin.isEnabled()
     window._sync_filters_from_device()  # no linien connection: harmless no-op
 
     # --- Config snapshot + JSON export round-trip ---
@@ -583,7 +570,6 @@ try:
     assert window.mot_coil_current_slider.value() == 2200
     assert window.psd_decimation_spin.value() == loaded["psd"]["max_decimation"]
     assert window.filter1_freq_spin.value() == 12000
-    assert window.filter_auto_check.isChecked()
     assert window._dispenser_fire_current == 7.5  # confirm-gated restore
     assert window._dispenser_fire_seconds == 30.0
     # partial configs apply without touching anything else
@@ -631,7 +617,7 @@ try:
     assert "DEVICES 1/3" in window.usb_card.header_status.text()
     assert window.chip_text("usb") == "DEVICES 1/3"
     assert window.coil_usb_status.text() == "Not found"
-    assert window.usb_card.content.isVisibleTo(window.usb_card)  # auto-expanded
+    assert not window.usb_card.content.isVisibleTo(window.usb_card)
     app.processEvents()
 
     # With worst-case texts everywhere (card expanded, protection tripped,
