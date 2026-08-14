@@ -1159,15 +1159,29 @@ class LinienGpioWorker(QtCore.QThread):
 class LaserSetpointWorker(QtCore.QThread):
     """Controls a CTL200-0 laser diode controller for current and temperature.
 
-    Connects via serial, reads initial setpoints, then exposes methods
-    for the GUI thread to update current, thermistor, and on/off state.
+    Connects via serial, reads initial setpoints, then accepts setpoint
+    changes from the GUI thread.
+
+    **The worker owns the serial port.** ``serial.Serial`` is not
+    thread-safe, and a write from the GUI thread also blocks it on a
+    device that has stopped answering. Every setter below therefore only
+    queues; the run loop does the I/O. Same pattern as
+    ``RidenDPSWorker._queue``.
 
     Signals:
         initial_values(dict): {"current": int, "thermistor": int} on connect.
         connection_status(str): "connected:<port>", "no_port", or "error:<msg>".
+        fault(str): a command that failed after connecting.
     """
     initial_values = QtCore.pyqtSignal(dict)
     connection_status = QtCore.pyqtSignal(str)
+    fault = QtCore.pyqtSignal(str)
+
+    # Setpoints conflate to the latest value; enable/disable keeps its
+    # ordering, so a rapid off/on cannot collapse into just one of them.
+    COALESCE_KINDS = ("current", "thermistor")
+
+    POLL_MS = 100
 
     def __init__(self, port=None, baudrate=115200, event_log=None):
         super().__init__()
@@ -1175,6 +1189,9 @@ class LaserSetpointWorker(QtCore.QThread):
         self._port = port
         self._baudrate = baudrate
         self._ser = None
+        self.running = False
+        self._mutex = QtCore.QMutex()
+        self._pending = []
 
     def run(self):
         import serial as _serial
@@ -1183,11 +1200,12 @@ class LaserSetpointWorker(QtCore.QThread):
             self.connection_status.emit("no_port")
             return
         try:
-            self._ser = _serial.Serial(
-                self._port, baudrate=self._baudrate, timeout=1.0
-            )
-            current = float(self._query("ilaser"))
-            thermistor = float(self._query("rtact"))
+            with self.event_log.command("laser.connect", port=self._port):
+                self._ser = _serial.Serial(
+                    self._port, baudrate=self._baudrate, timeout=1.0
+                )
+                current = float(self._query("ilaser"))
+                thermistor = float(self._query("rtact"))
             self.initial_values.emit({
                 "current": int(current),
                 "thermistor": int(thermistor),
@@ -1195,6 +1213,53 @@ class LaserSetpointWorker(QtCore.QThread):
             self.connection_status.emit(f"connected:{self._port}")
         except Exception as e:
             self.connection_status.emit(f"error:{e}")
+            return
+
+        # Anything queued while disconnected is stale.
+        self._pop_pending()
+
+        self.running = True
+        while self.running:
+            for kind, value in self._pop_pending():
+                try:
+                    self._apply(kind, value)
+                except Exception as e:
+                    self.fault.emit(f"{kind} failed: {e}")
+            self.msleep(self.POLL_MS)
+
+        # Invariant 7: the output goes safe before the thread dies.
+        try:
+            with self.event_log.command(
+                "laser.enable", on=False, reason="worker_stop"
+            ):
+                self._write("lason 0")
+        except Exception:
+            pass
+        if self._ser and self._ser.is_open:
+            self._ser.close()
+
+    def _apply(self, kind, value):
+        if kind == "current":
+            with self.event_log.command("laser.current", ma=value):
+                self._write(f"ilaser {value}")
+        elif kind == "thermistor":
+            with self.event_log.command("laser.thermistor", ohms=value):
+                self._write(f"rtset {value}")
+        elif kind == "enable":
+            with self.event_log.command("laser.enable", on=bool(value)):
+                self._write(f"lason {1 if value else 0}")
+
+    def _queue(self, kind, value):
+        with QtCore.QMutexLocker(self._mutex):
+            if kind in self.COALESCE_KINDS:
+                self._pending = [p for p in self._pending if p[0] != kind]
+            self._pending.append((kind, value))
+
+    def _pop_pending(self):
+        with QtCore.QMutexLocker(self._mutex):
+            items = self._pending
+            self._pending = []
+        return items
 
     def _query(self, cmd: str) -> str:
         self._ser.reset_input_buffer()
@@ -1202,34 +1267,30 @@ class LaserSetpointWorker(QtCore.QThread):
         self._ser.readline()  # discard echo
         return self._ser.readline().decode("ascii", errors="ignore").strip()
 
-    def _send(self, cmd: str):
+    def _write(self, cmd: str):
+        """Serial write. Worker thread only -- see the class docstring."""
         if self._ser and self._ser.is_open:
             self._ser.write(f"{cmd}\r\n".encode("ascii"))
 
+    # -- public API: called from the GUI thread, none of it blocking ----
+
     def set_current(self, current_mA: float):
         """Set laser diode current in mA."""
-        with self.event_log.command("laser.current", ma=current_mA):
-            self._send(f"ilaser {current_mA}")
+        self._queue("current", float(current_mA))
 
     def set_thermistor(self, resistance_ohms: float):
         """Set thermistor setpoint in Ohms."""
-        with self.event_log.command("laser.thermistor", ohms=resistance_ohms):
-            self._send(f"rtset {resistance_ohms}")
+        self._queue("thermistor", float(resistance_ohms))
 
     def laser_on(self, on: bool = True):
         """Enable or disable laser output."""
-        with self.event_log.command("laser.enable", on=bool(on)):
-            self._send(f"lason {1 if on else 0}")
+        self._queue("enable", bool(on))
 
     def stop(self):
-        try:
-            with self.event_log.command(
-                "laser.enable", on=False, reason="worker_stop"
-            ):
-                self._send("lason 0")
-        except Exception:
-            pass
+        self.running = False
+        self.wait()
+        # The run loop drives the output safe and closes the port on its
+        # way out; if it never started, there is nothing open to close.
         if self._ser and self._ser.is_open:
             self._ser.close()
-        self.wait()
 

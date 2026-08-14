@@ -53,11 +53,17 @@ class LinienWidget(QtWidgets.QWidget):
     connection_status_changed = QtCore.pyqtSignal(str)
     selection_state_changed = QtCore.pyqtSignal(bool)
     fault = QtCore.pyqtSignal(str)
+    # Device reads are asynchronous -- the worker owns the RPyC client,
+    # so these carry back what a blocking getter used to return.
+    pid_read = QtCore.pyqtSignal(object)
+    filters_read = QtCore.pyqtSignal(object)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
                  show_stop_button=False, sweep_range=(-1.0, 1.0),
-                 v_to_freq_ghz=None, v_to_mhz=None, parent=None):
+                 v_to_freq_ghz=None, v_to_mhz=None, event_log=None,
+                 parent=None):
         super().__init__(parent)
+        self._event_log = event_log
         self._linien_host = linien_host or "rp-F0C6AD.local"
         self._show_lock_buttons = show_lock_buttons
         self._show_stop_button = show_stop_button
@@ -280,16 +286,20 @@ class LinienWidget(QtWidgets.QWidget):
         """Import LinienWorker (heavy) and start the acquisition thread."""
         try:
             from linien_worker import LinienWorker
-        except ImportError:
-            print("! linien_worker not found — plot will be static")
+        except ImportError as e:
+            self.fault.emit(f"linien_worker not importable, plot is static: {e}")
             return
 
-        self.linien_thread = LinienWorker(host=self._linien_host)
+        self.linien_thread = LinienWorker(
+            host=self._linien_host, event_log=self._event_log
+        )
         self.linien_thread.new_data.connect(self._update_plot)
         self.linien_thread.initial.connect(self._initialize_slider)
         self.linien_thread.lock_state.connect(self._on_lock_state)
         self.linien_thread.connection_status.connect(self.connection_status_changed.emit)
         self.linien_thread.fault.connect(self.fault.emit)
+        self.linien_thread.pid_read.connect(self.pid_read.emit)
+        self.linien_thread.filters_read.connect(self.filters_read.emit)
         self.linien_thread.start()
 
     # --- Slots ---

@@ -12,6 +12,7 @@ the work sequence and open questions.
 ```powershell
 .venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
 .venv\Scripts\python.exe tests\test_logging.py
+.venv\Scripts\python.exe tests\test_workers.py
 .venv\Scripts\python.exe tests\test_dispenser.py
 .venv\Scripts\python.exe tests\test_probe.py
 .venv\Scripts\python.exe tests\smoke_ui.py    # refreshes mot-ui-smoke.png
@@ -20,7 +21,7 @@ the work sequence and open questions.
 Install with the explicit `.venv\Scripts\python.exe -m pip` form — a bare `pip`
 hits global Python and clobbers the editable linien installs there.
 
-After any UI change, run `smoke_ui.py` and **read the PNG**. All four suites
+After any UI change, run `smoke_ui.py` and **read the PNG**. All five suites
 are hardware-free, so green says nothing about devices — never report a
 device-facing change as working without the bench.
 
@@ -54,11 +55,11 @@ reads 10 kΩ at 25 °C. Do not change the default until confirmed.
    the dispenser's auto-off lives in its worker thread, so killing it mid-fire
    leaves the output on.
 
-3 is **not yet true**: 21 direct GUI→worker calls remain, in `linien_worker.py`
-and `LaserSetpointWorker`. Every other worker already uses the mutex +
-pending-queue pattern (`RidenDPSWorker._queue`) — copy it, don't invent one.
-
-4 holds everywhere except `linien_worker.py`, which still has 21 `print`s.
+All seven hold as of 2026-08-14. Every worker uses the same mutex +
+pending-queue pattern (`RidenDPSWorker._queue`) — copy it, don't invent one:
+public setters enqueue and return, the run loop does the I/O, reads come back
+as signals, and long waits arm a deadline the loop checks rather than blocking.
+No `print`s remain; keep it that way.
 
 ## State ownership
 
@@ -139,7 +140,7 @@ behaviour from memory. Debugging: reproduce, pull evidence from `logs/*.jsonl`,
 one hypothesis, smallest discriminating change. If you can't reproduce it, say
 so rather than shipping a plausible fix.
 
-**Verification budget: run the four suites, glance at the screenshot, hand it
+**Verification budget: run the five suites, glance at the screenshot, hand it
 over.** That is the whole check for UI work. The user's manual check is fast and
 is the real gate, so getting work in front of them beats proving it yourself.
 

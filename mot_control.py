@@ -911,6 +911,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._readback_log_protection = {}
         self._log_debounce = {}
         self._last_logged_vtune = None
+        # Last PID the worker reported. Reads are asynchronous now, so
+        # the modal PID dialog and the config snapshot use this rather
+        # than blocking the GUI thread on RPyC.
+        self._linien_pid = None
         self._event_log.install_excepthook()
         self._event_log.session_start(
             rp_host=rp_host,
@@ -959,6 +963,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget.fault.connect(
             lambda msg: self._log_fault("linien", msg)
         )
+        self.linien_widget.pid_read.connect(self._on_pid_read)
+        self.linien_widget.filters_read.connect(self._on_filters_read)
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1287,7 +1293,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """)
         # No v_to_freq_ghz: the x axis stays in sweep volts, which is what
         # the sweep slider and the lock region are actually set in.
-        self.linien_widget = LinienWidget(linien_host=self._rp_host)
+        self.linien_widget = LinienWidget(
+            linien_host=self._rp_host, event_log=self._event_log
+        )
         # Built by the Linien widget (it owns the range logic) but shown in
         # the header beside the camera toggle, with the other view controls.
         self._header_row.insertWidget(
@@ -2378,6 +2386,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.laser_worker.connection_status.connect(
             lambda status: self._log_connection("laser", status)
         )
+        self.laser_worker.fault.connect(
+            lambda msg: self._log_fault("laser", msg)
+        )
         self.laser_worker.start()
 
     def _start_dps_workers(self):
@@ -2947,18 +2958,33 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_filters(self._filters_from_ui())
 
     def _sync_filters_from_device(self):
+        """Ask the worker for the device's filters; answered on a signal."""
         worker = self._get_lock_worker()
-        filters = worker.get_filters() if worker is not None else None
-        if filters is None:
+        if worker is None:
             self._log_fault("linien", "error filter read skipped: not connected")
             return
+        worker.request_filters()
+
+    def _request_pid(self):
+        worker = self._get_lock_worker()
+        if worker is not None:
+            worker.request_pid()
+
+    def _on_filters_read(self, filters):
+        if filters is None:
+            self._log_fault("linien", "error filter read returned nothing")
+            return
         self._set_filters_ui(filters)
+
+    def _on_pid_read(self, pid):
+        self._linien_pid = pid
 
     def _on_linien_connection(self, status):
         self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
+            QtCore.QTimer.singleShot(1500, self._request_pid)
             # Push the saved offset preference; the server default is True
             # and we must not silently disagree with the checkbox.
             QtCore.QTimer.singleShot(
@@ -2974,8 +3000,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _open_pid_dialog(self):
         worker = self._get_lock_worker()
-        current = worker.get_pid() if worker is not None else None
-        dialog = PidDialog(self, current)
+        # The dialog is modal and the GUI thread must not block on RPyC,
+        # so it opens against the last value the worker reported rather
+        # than reading the device here.
+        dialog = PidDialog(self, self._linien_pid)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         p_value, i_value, d_value = dialog.values()
@@ -2992,8 +3020,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _collect_config(self):
         """Snapshot of every control setting, for the JSON export."""
-        worker = self._get_lock_worker()
-        pid = worker.get_pid() if worker is not None else None
+        pid = self._linien_pid
         # Sliders read in physical units now; the config keeps hardware
         # units so files written by either build stay interchangeable.
         vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)
