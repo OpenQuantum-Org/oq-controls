@@ -61,6 +61,7 @@ class LinienWorker(QtCore.QThread):
         self._ping_changed_at = None
         self._ping_ever_moved = False
         self._stalled = False
+        self._last_lock_read_error = None
 
     def _check_server_alive(self):
         """Watch the server's heartbeat; report the edges, not every poll."""
@@ -359,6 +360,7 @@ class LinienWorker(QtCore.QThread):
             self._log("sweep update failed: " + str(e))
 
     def _wait_for_lock(self, should_be_locked: bool, timeout_s: int = 30):
+        failures = 0
         for _ in range(timeout_s):
             try:
                 t = pickle.loads(self.client.parameters.to_plot.value)
@@ -367,8 +369,16 @@ class LinienWorker(QtCore.QThread):
                 status = has_locked_key or param_lock
                 if status == should_be_locked:
                     return True
-            except Exception:
-                pass
+                failures = 0
+            except Exception as e:
+                # A read failing every second for 30 s is a broken
+                # connection, not a lock that is taking its time -- and
+                # the two are indistinguishable from the outside. Report
+                # once rather than waiting out the full timeout in
+                # silence.
+                failures += 1
+                if failures == 3:
+                    self._log(f"lock-state polling is failing: {e}")
             sleep(1)
         return False
 
@@ -385,8 +395,11 @@ class LinienWorker(QtCore.QThread):
         params = self.client.parameters
         try:
             self.client.connection.root.start_sweep()
-        except Exception:
-            pass
+        except Exception as e:
+            # Not fatal -- the spectrum below may still be usable -- but
+            # it means the autolock is about to sample a trace that was
+            # not freshly swept, which is worth knowing if it then fails.
+            self._log(f"could not restart the sweep before locking: {e}")
         sleep(0.4)  # let a full sweep land before sampling it
 
         try:
@@ -499,5 +512,12 @@ class LinienWorker(QtCore.QThread):
             if locked != self._last_ui_lock_state:
                 self._last_ui_lock_state = locked
                 self.lock_state.emit(locked)
-        except Exception:
-            pass
+        except Exception as e:
+            # This decides whether the UI says LOCKED. Swallowing it
+            # silently turns "the lock status is not updating" into an
+            # unreproducible report, which is exactly what happened.
+            # Logged once per distinct failure so a persistent one does
+            # not fill the log at 5 Hz.
+            if str(e) != self._last_lock_read_error:
+                self._last_lock_read_error = str(e)
+                self._log(f"lock-state read failed: {e}")

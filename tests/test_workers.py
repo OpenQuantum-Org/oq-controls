@@ -301,6 +301,52 @@ def test_stop_can_leave_the_lock_engaged():
     assert "start_sweep" in [n for n, _ in w.client.connection.root.calls]
 
 
+def test_a_failing_lock_state_read_reaches_the_log():
+    """The handler that decides whether the UI says LOCKED must not be
+    silent.
+
+    It used to swallow every exception, which is how "the lock status is
+    not updating" became an unreproducible report: the evidence went
+    into a bare `except: pass`. Repeats are collapsed so a persistent
+    failure does not fill the log at 5 Hz.
+    """
+    import mot_logging
+
+    w = worker()
+    records = []
+    w.event_log = mot_logging.EventLog(".")
+    w.event_log._write = lambda kind, event, fields: records.append(
+        (kind, fields.get("message", ""))
+    )
+
+    class Exploding:
+        @property
+        def value(self):
+            raise RuntimeError("rpyc is down")
+
+    w.client.parameters._params["to_plot"] = Exploding()
+    w.to_plot = {}  # force the uncached path
+    w._emit_lock_state_best_effort()
+    assert records, "the lock-state read failed silently"
+    assert records[0][0] == "fault"
+    assert "rpyc is down" in records[0][1]
+
+    # The same failure again is not logged again.
+    w._emit_lock_state_best_effort()
+    w._emit_lock_state_best_effort()
+    assert len(records) == 1, records
+
+    # A different failure is.
+    class OtherFailure:
+        @property
+        def value(self):
+            raise RuntimeError("connection reset")
+
+    w.client.parameters._params["to_plot"] = OtherFailure()
+    w._emit_lock_state_best_effort()
+    assert len(records) == 2, records
+
+
 def test_faults_go_to_the_log_not_stdout():
     """CLAUDE.md invariant 4: no fault path ends at a print."""
     import io as _io
