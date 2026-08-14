@@ -961,6 +961,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         "coils": "coils_card",
         "disp": "dispenser_card",
         "repump": "repump_card",
+        "laser": "laser_card",
     }
     _CHIP_NEUTRAL = "#ababab"
 
@@ -1160,6 +1161,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
         self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
         self._set_chip("repump", "REPUMP OFF", self._CHIP_NEUTRAL)
+        self._set_chip("laser", "LASER OFF", self._CHIP_NEUTRAL)
 
     def _build_spectroscopy_column(self, root):
         left = QtWidgets.QVBoxLayout()
@@ -1709,7 +1711,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Mod Amplitude:",
             0,
             1000,
-            self._int_setting("linien/mod_strength_mv", 0, 0, 1000),
+            # Non-zero default: at 0 the dither is off and there is no
+            # error signal, which reads as "modulation does nothing".
+            self._int_setting("linien/mod_strength_mv", 100, 0, 1000),
             single=1,
             page=50,
             suffix=" Vpp",
@@ -1844,6 +1848,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _add_laser_card(self, parent):
         card = CollapsibleCard("Laser Setpoints", collapsed=True)
+        self.laser_card = card
         layout = card.content_layout
 
         self.laser_status = add_readout_row(layout, "Koheron:", "No port set")
@@ -2542,6 +2547,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "value": self.mod_strength_slider.value(),
             },
         )
+        # With modulation off the device stays at zero regardless; the
+        # slider only records what to restore when it is switched on.
+        if not self.mod_enable_btn.isChecked():
+            return
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_amplitude(value)
@@ -2587,6 +2596,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_laser(self, checked):
         self.laser_btn.setText("Laser On" if checked else "Laser Off")
+        self._set_chip(
+            "laser",
+            "LASER ON" if checked else "LASER OFF",
+            "#6f9e7c" if checked else self._CHIP_NEUTRAL,
+        )
         self._event_log.log("laser_output", on=bool(checked))
         worker = getattr(self, "laser_worker", None)
         if worker is not None:

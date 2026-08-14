@@ -322,11 +322,19 @@ class LinienWidget(QtWidgets.QWidget):
     def _set_autozoom(self, on):
         """Track the signal on Y, or hold whatever range is showing.
 
-        X stays under the sweep slider's control either way -- autozooming
-        it would fight _limit_xrange.
+        Switching it back on also resets X to the full sweep range, so a
+        tick-off/tick-on undoes a zoom -- this is the Reset Zoom button
+        the checkbox replaced. X is not auto-ranged continuously, since
+        that would fight _limit_xrange.
         """
         self.plot.enableAutoRange(axis="y", enable=bool(on))
-        if not on:
+        if on:
+            slider_min, slider_max = self.xrange_slider.value()
+            d_min, d_max = self._v_range_to_display(
+                slider_min / 1000, slider_max / 1000
+            )
+            self.plot.setXRange(d_min, d_max, padding=0)
+        else:
             self.plot.setYRange(*self.plot.viewRange()[1], padding=0)
 
     def _run_lock(self):

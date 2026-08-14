@@ -57,10 +57,20 @@ APP_STYLESHEET = """
     QPushButton:pressed {
         background-color: #181818;
     }
+    /* Checked means the thing is ON, so it reads brighter than the idle
+       state. Dimming it here made every active output look disabled. */
     QPushButton:checked {
-        background-color: #282828;
-        color: #949494;
-        border-color: #3d3d3d;
+        background-color: #3a3a3a;
+        color: #ffffff;
+        border-color: #6f6f6f;
+    }
+    QPushButton:checked:hover {
+        background-color: #454545;
+        border-color: #8a8a8a;
+    }
+    QPushButton:disabled {
+        color: #6a6a6a;
+        border-color: #262626;
     }
 
     /* --- Sliders --- */
