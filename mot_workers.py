@@ -16,6 +16,8 @@ import time
 
 from pyqtgraph.Qt import QtCore
 
+from mot_logging import NULL_LOG
+
 
 # ---------------------------------------------------------------------------
 # USB serial discovery helpers
@@ -218,9 +220,16 @@ class RidenDPSWorker(QtCore.QThread):
         baudrate=9600,
         disable_on_stop=True,
         poll_ms=500,
+        event_log=None,
+        log_name="dps",
     ):
         super().__init__()
         spec = DPS_MODELS[model]
+        # Transactions are logged here rather than in the GUI: this is
+        # where the write actually happens and where its duration and
+        # outcome are known.
+        self.event_log = event_log or NULL_LOG
+        self.log_name = log_name
         self.port = port
         self.address = int(address)
         self.model = model
@@ -273,8 +282,14 @@ class RidenDPSWorker(QtCore.QThread):
             self.msleep(self.poll_ms)
 
         if self.disable_on_stop and self._client is not None:
+            # The safety-critical write of the whole class: this is what
+            # makes CLAUDE.md invariant 7 true, so it is logged even
+            # though nothing is left alive to react to a failure.
             try:
-                self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
+                with self.event_log.command(
+                    f"{self.log_name}.output", value=False, reason="worker_stop"
+                ):
+                    self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
             except Exception:
                 pass
         if self._client is not None:
@@ -321,18 +336,22 @@ class RidenDPSWorker(QtCore.QThread):
             self._apply(kind, value)
 
     def _apply(self, kind, value):
-        if kind == "voltage":
-            self._client.write_register(
-                RidenDPSClient.REG_V_SET, int(round(value * 100))
-            )
-        elif kind == "current":
-            self._client.write_register(
-                RidenDPSClient.REG_I_SET, int(round(value * self.current_scale))
-            )
-        elif kind == "output":
-            self._client.write_register(
-                RidenDPSClient.REG_OUTPUT, 1 if value else 0
-            )
+        with self.event_log.command(
+            f"{self.log_name}.{kind}", value=value, port=self.port
+        ):
+            if kind == "voltage":
+                self._client.write_register(
+                    RidenDPSClient.REG_V_SET, int(round(value * 100))
+                )
+            elif kind == "current":
+                self._client.write_register(
+                    RidenDPSClient.REG_I_SET,
+                    int(round(value * self.current_scale)),
+                )
+            elif kind == "output":
+                self._client.write_register(
+                    RidenDPSClient.REG_OUTPUT, 1 if value else 0
+                )
 
     def _service(self, state):
         """Per-poll hook for subclasses (runs after the state read)."""
@@ -735,8 +754,10 @@ class DacClickWorker(QtCore.QThread):
         max_voltage=5.0,
         username="root",
         password="root",
+        event_log=None,
     ):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
         self.host = host
         self.min_voltage = float(min_voltage)
         self.max_voltage = float(max_voltage)
@@ -784,9 +805,14 @@ class DacClickWorker(QtCore.QThread):
             try:
                 pending = self._take_pending_voltage()
                 if pending is not None:
-                    self._parameter.value = pending
-                    # Blocks ~0.3 s while the server runs its SPI retry loop.
-                    self._client.connection.root.write_registers()
+                    with self.event_log.command(
+                        "repump.vtune", volts=pending
+                    ) as op:
+                        self._parameter.value = pending
+                        # Blocks ~0.3 s while the server runs its SPI
+                        # retry loop.
+                        self._client.connection.root.write_registers()
+                        op.result(readback_v=float(self._parameter.value))
                     self.voltage_readback.emit(float(self._parameter.value))
                 elif ticks % 20 == 0:
                     self.voltage_readback.emit(float(self._parameter.value))
@@ -1024,8 +1050,10 @@ class LinienGpioWorker(QtCore.QThread):
         username="root",
         password="root",
         disable_on_stop=True,
+        event_log=None,
     ):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
         self.host = host
         self.bank = str(bank or "n").lower()
         self.bit = int(bit)
@@ -1077,7 +1105,10 @@ class LinienGpioWorker(QtCore.QThread):
             try:
                 pending = self._take_pending_state()
                 if pending is not None:
-                    self._write_state(pending)
+                    with self.event_log.command(
+                        "repump.gate", enabled=bool(pending)
+                    ):
+                        self._write_state(pending)
                 else:
                     self._emit_state_from_raw(int(self._parameter.value))
             except Exception as e:
@@ -1138,8 +1169,9 @@ class LaserSetpointWorker(QtCore.QThread):
     initial_values = QtCore.pyqtSignal(dict)
     connection_status = QtCore.pyqtSignal(str)
 
-    def __init__(self, port=None, baudrate=115200):
+    def __init__(self, port=None, baudrate=115200, event_log=None):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
         self._port = port
         self._baudrate = baudrate
         self._ser = None
@@ -1176,19 +1208,25 @@ class LaserSetpointWorker(QtCore.QThread):
 
     def set_current(self, current_mA: float):
         """Set laser diode current in mA."""
-        self._send(f"ilaser {current_mA}")
+        with self.event_log.command("laser.current", ma=current_mA):
+            self._send(f"ilaser {current_mA}")
 
     def set_thermistor(self, resistance_ohms: float):
         """Set thermistor setpoint in Ohms."""
-        self._send(f"rtset {resistance_ohms}")
+        with self.event_log.command("laser.thermistor", ohms=resistance_ohms):
+            self._send(f"rtset {resistance_ohms}")
 
     def laser_on(self, on: bool = True):
         """Enable or disable laser output."""
-        self._send(f"lason {1 if on else 0}")
+        with self.event_log.command("laser.enable", on=bool(on)):
+            self._send(f"lason {1 if on else 0}")
 
     def stop(self):
         try:
-            self._send("lason 0")
+            with self.event_log.command(
+                "laser.enable", on=False, reason="worker_stop"
+            ):
+                self._send("lason 0")
         except Exception:
             pass
         if self._ser and self._ser.is_open:

@@ -143,9 +143,13 @@ def load_app_fonts():
     into fonts/ are also registered but stay local (licensed files are
     gitignored). Fonts are registered from bytes because the path-based
     QFontDatabase.addApplicationFont silently fails on this Qt build
-    (6.11/macOS). Missing families fall back to Helvetica Neue, with a
-    console warning.
+    (6.11/macOS). Missing families fall back to Helvetica Neue.
+
+    Returns the list of problems found. This runs before the window and
+    therefore before the event log exists, so it reports upward rather
+    than printing (CLAUDE.md invariant 4); the window logs what it gets.
     """
+    problems = []
     if os.path.isdir(FONTS_DIR):
         for name in sorted(os.listdir(FONTS_DIR)):
             if not name.lower().endswith((".ttf", ".otf")):
@@ -155,14 +159,21 @@ def load_app_fonts():
                 with open(path, "rb") as f:
                     data = f.read()
             except OSError as e:
-                print(f"! could not read font {name}: {e}")
+                problems.append(f"could not read font {name}: {e}")
                 continue
             if QtGui.QFontDatabase.addApplicationFontFromData(data) < 0:
-                print(f"! could not register font: {name}")
+                problems.append(f"could not register font: {name}")
     families = set(QtGui.QFontDatabase.families())
     for family in (BODY_FONT_FAMILY, TITLE_FONT_FAMILY):
         if family not in families:
-            print(f"! font family not available, using fallback: {family}")
+            problems.append(f"font family unavailable, using fallback: {family}")
+    global _FONT_PROBLEMS
+    _FONT_PROBLEMS = problems
+    return problems
+
+
+# Set by load_app_fonts(), drained by the window once the log is open.
+_FONT_PROBLEMS = []
 
 
 # The original eit-controls text colors were too dim for lab use; the
@@ -835,6 +846,11 @@ class PidDialog(QtWidgets.QDialog):
 
 
 class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
+    # Worker threads log directly (a fault that must reach the GUI thread
+    # to be recorded is lost when the GUI is what broke), so records reach
+    # the log pane through a signal rather than by touching the widget.
+    log_record = QtCore.pyqtSignal(object)
+
     def __init__(
         self,
         rp_host=None,
@@ -895,7 +911,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._readback_log_protection = {}
         self._log_debounce = {}
         self._last_logged_vtune = None
-        self._event_log.log("app_start")
+        self._event_log.install_excepthook()
+        self._event_log.session_start(
+            rp_host=rp_host,
+            laser_port=laser_port,
+            mot_coil_port=mot_coil_port,
+            dispenser_port=dispenser_port,
+            mot_coil_address=mot_coil_address,
+            dispenser_address=dispenser_address,
+        )
+        for problem in _FONT_PROBLEMS:
+            self._event_log.fault("font", message=problem)
 
         self.setWindowTitle("OpenQuantum Controls")
         self.resize(1540, 960)
@@ -920,8 +946,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._build_spectroscopy_column(root)
         self._build_control_column(root)
 
-        # Route event-log records into the log pane (GUI thread only).
-        self._event_log.on_record = self._on_log_record
+        # Route event-log records into the log pane. Via the signal, so a
+        # record written on a worker thread is queued onto the GUI thread
+        # instead of touching log_view from the wrong one.
+        self.log_record.connect(self._on_log_record)
+        self._event_log.on_record = self.log_record.emit
 
         # Pull the filter settings from the device once Linien connects.
         self.linien_widget.connection_status_changed.connect(
@@ -1063,8 +1092,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "log_view"):
             return
         timestamp = record.get("t", "")[11:19]
+        # "traceback" belongs in the file, not the pane -- it is many
+        # lines and would push everything else out of view.
         extras = " ".join(
-            f"{k}={v}" for k, v in record.items() if k not in ("t", "event")
+            f"{k}={v}"
+            for k, v in record.items()
+            if k not in ("t", "kind", "event", "traceback")
         )
         line = f"{timestamp}  {record.get('event', '?')}"
         if extras:
@@ -1090,7 +1123,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._log_fault(device, str(status).split(":", 1)[-1].strip())
 
     def _log_fault(self, device, message):
-        self._event_log.log("fault", device=device, message=str(message))
+        self._event_log.fault("fault", device=device, message=str(message))
 
     def _debounced_log(self, key, event, payload_fn, delay_ms=1500):
         """Log once after a burst of changes (e.g. a slider drag) settles."""
@@ -1125,8 +1158,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._readback_log_t[channel] = now
         self._readback_log_output[channel] = output
         self._readback_log_protection[channel] = protection
-        self._event_log.log(
-            "readback",
+        self._event_log.readback(
+            "dps",
             channel=channel,
             v_out=state.get("v_out"),
             i_out=state.get("i_out"),
@@ -1136,10 +1169,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             protection=protection,
         )
         if protection_changed and protection:
-            self._event_log.log(
+            # A supply in protection has shut its own output off; that is
+            # a fault, not a routine state change.
+            self._event_log.fault(
                 "protection_trip",
                 channel=channel,
-                kind=DPS_PROTECTION.get(protection, str(protection)),
+                protection=DPS_PROTECTION.get(protection, str(protection)),
             )
 
     # ------------------------------------------------------------------
@@ -2330,7 +2365,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._settings.setValue("dac/vtune_max", self._vtune_max)
 
     def _start_laser_worker(self):
-        self.laser_worker = LaserSetpointWorker(port=self.laser_edit.text().strip())
+        self.laser_worker = LaserSetpointWorker(
+            port=self.laser_edit.text().strip(),
+            event_log=self._event_log,
+        )
         self.laser_worker.initial_values.connect(self._on_laser_init)
         self.laser_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(
@@ -2347,6 +2385,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             port=self.mot_coil_port_edit.text().strip(),
             address=self._mot_coil_address,
             model="DPS5005",
+            event_log=self._event_log,
+            log_name="coil",
         )
         self.mot_coil_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(
@@ -2370,6 +2410,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             fire_seconds=self._dispenser_fire_seconds,
             dispense_current_a=self._dispenser_fire_current,
             dispense_voltage_v=self._dispenser_fire_voltage,
+            event_log=self._event_log,
+            log_name="dispenser",
         )
         self.dispenser_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(
@@ -2396,6 +2438,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             host=self.rp_edit.text().strip(),
             min_voltage=self._vtune_min,
             max_voltage=self._vtune_max,
+            event_log=self._event_log,
         )
         self.vtune_worker.connection_status.connect(
             lambda status: self._log_connection("dac_click", status)
@@ -2413,6 +2456,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             bank="n",
             bit=1,
             active_high=False,
+            event_log=self._event_log,
         )
         self.repump_gpio_worker.connection_status.connect(
             lambda status: self._log_connection("repump_gate", status)
@@ -2906,7 +2950,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = self._get_lock_worker()
         filters = worker.get_filters() if worker is not None else None
         if filters is None:
-            print("! error filter read skipped: Linien not connected")
+            self._log_fault("linien", "error filter read skipped: not connected")
             return
         self._set_filters_ui(filters)
 
@@ -3313,7 +3357,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._log_fault("linien", f"could not zero modulation on exit: {e}")
 
     def closeEvent(self, event):
-        print("Shutting down OpenQuantum Controls...")
         self._save_ui_state()
         self._event_log.log("app_stop")
         if self._dispenser_phase == "firing":

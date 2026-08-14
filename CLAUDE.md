@@ -11,6 +11,7 @@ the work sequence and open questions.
 
 ```powershell
 .venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
+.venv\Scripts\python.exe tests\test_logging.py
 .venv\Scripts\python.exe tests\test_dispenser.py
 .venv\Scripts\python.exe tests\test_probe.py
 .venv\Scripts\python.exe tests\smoke_ui.py    # refreshes mot-ui-smoke.png
@@ -19,7 +20,7 @@ the work sequence and open questions.
 Install with the explicit `.venv\Scripts\python.exe -m pip` form — a bare `pip`
 hits global Python and clobbers the editable linien installs there.
 
-After any UI change, run `smoke_ui.py` and **read the PNG**. All three suites
+After any UI change, run `smoke_ui.py` and **read the PNG**. All four suites
 are hardware-free, so green says nothing about devices — never report a
 device-facing change as working without the bench.
 
@@ -53,8 +54,11 @@ reads 10 kΩ at 25 °C. Do not change the default until confirmed.
    the dispenser's auto-off lives in its worker thread, so killing it mid-fire
    leaves the output on.
 
-3 and 4 are **not yet true**: ~24 direct GUI→worker calls, 38 `print`s (30 in
-`linien_worker.py`). Don't add more; convert what you touch.
+3 is **not yet true**: 21 direct GUI→worker calls remain, in `linien_worker.py`
+and `LaserSetpointWorker`. Every other worker already uses the mutex +
+pending-queue pattern (`RidenDPSWorker._queue`) — copy it, don't invent one.
+
+4 holds everywhere except `linien_worker.py`, which still has 21 `print`s.
 
 ## State ownership
 
@@ -75,7 +79,8 @@ means latency.
 - **Count round trips, not cycles.** `get_filters()` is seven sequential RPyC
   hops, not one. Batch reads; don't micro-optimize the code around them.
 - GUI thread budget is 16 ms; one round trip can eat it. Hence invariant 1.
-- Log durations on device ops. That's the only profiling this app needs.
+- Wrap device ops in `EventLog.command()`: it writes `duration_ms` on every
+  transaction, and that is the only profiling this app needs.
 - Coalesce input before it becomes traffic (see the 400 ms filter-push timer).
 - Warm plot paths mutate, never rebuild — `linien_widget.py:108`/`:271` is the
   reference.
@@ -134,7 +139,7 @@ behaviour from memory. Debugging: reproduce, pull evidence from `logs/*.jsonl`,
 one hypothesis, smallest discriminating change. If you can't reproduce it, say
 so rather than shipping a plausible fix.
 
-**Verification budget: run the three suites, glance at the screenshot, hand it
+**Verification budget: run the four suites, glance at the screenshot, hand it
 over.** That is the whole check for UI work. The user's manual check is fast and
 is the real gate, so getting work in front of them beats proving it yourself.
 

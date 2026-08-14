@@ -874,16 +874,38 @@ finally:
 # --- Event log wrote real JSONL records for the exercised paths ---
 log_files = glob.glob(os.path.join(LOG_DIR, "*.jsonl"))
 assert log_files, "no event log files written"
-logged_events = []
+records = []
 for path in log_files:
     with open(path, encoding="utf-8") as f:
         for line in f:
-            logged_events.append(json.loads(line)["event"])
+            records.append(json.loads(line))
+logged_events = [r["event"] for r in records]
+
+# Every record is categorised, and the categories are the ones a reader
+# filters on. A field named "kind" or "event" must not be able to
+# clobber the record's own -- that silently destroys the category.
+KINDS = {"session", "user", "command", "readback", "state", "fault"}
+for r in records:
+    assert r.get("kind") in KINDS, r
+    assert r.get("event"), r
+
+# The session header must let the log stand alone months later.
+header = next(r for r in records if r["event"] == "session_start")
+assert header["kind"] == "session"
+for field in ("schema", "python", "platform", "machine", "pid", "frozen"):
+    assert field in header, (field, header)
+
+# A protection trip is a fault, and its name survives despite arriving
+# in a field that used to be called "kind".
+trip = next(r for r in records if r["event"] == "protection_trip")
+assert trip["kind"] == "fault", trip
+assert trip["protection"] == "OCP", trip
+
 for expected in (
-    "app_start",
+    "session_start",
     "app_stop",
     "usb_probe",
-    "readback",
+    "dps",
     "protection_trip",
     "dispenser_fire_start",
     "dispenser_fire_end",
