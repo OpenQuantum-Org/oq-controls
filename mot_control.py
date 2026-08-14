@@ -3652,7 +3652,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             outputs.append(LiveOutput(
                 "lock", "Lock", "engaged",
             ))
-        if self.mod_strength_slider.value() > 0:
+        # The slider holds a value even when the dither is switched off --
+        # it is the level to restore, not the level being driven, and
+        # _on_mod_enabled writes 0 to the device on the way off. Reading
+        # the slider alone reported a dither that was not running.
+        if self.mod_enable_btn.isChecked() and self.mod_strength_slider.value() > 0:
             outputs.append(LiveOutput(
                 "modulation", "Dither",
                 f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp",

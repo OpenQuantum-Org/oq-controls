@@ -964,7 +964,15 @@ try:
         (o.key, o.detail) for o in window.live_outputs()
     ]
 
+    # A dither slider above zero is not a running dither: switching
+    # modulation off writes 0 to the device and the slider only holds the
+    # level to restore. Reporting it as live was a lie.
+    window.mod_enable_btn.setChecked(False)
     window.mod_strength_slider.setValue(400)
+    assert not any(o.key == "modulation" for o in window.live_outputs())
+    window.mod_enable_btn.setChecked(True)
+    assert any(o.key == "modulation" for o in window.live_outputs())
+
     window.mot_coil_output_btn.setChecked(True)
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 30.0})
     live = {o.key: o for o in window.live_outputs()}
