@@ -48,6 +48,7 @@ from mot_workers import (
     DispenserWorker,
     LaserSetpointWorker,
     LinienGpioWorker,
+    LinienServerRestartWorker,
     PsdWorker,
     RidenDPSWorker,
     SerialProbeWorker,
@@ -987,6 +988,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # key -> (desired_state, deadline). Present only while a write is
         # outstanding; see _sync_output_button.
         self._pending_output = {}
+        self._server_stalled = False
+        self._server_restarting = False
+        self._rp_last_status = "disconnected"
         self._event_log = EventLog(logs_dir())
         self._readback_log_t = {}
         self._readback_log_output = {}
@@ -1043,6 +1047,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget.fault.connect(
             lambda msg: self._log_fault("linien", msg)
         )
+        self.linien_widget.server_stalled.connect(self._on_server_stalled)
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1581,6 +1586,20 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.connect_btn,
         )
         manual_layout.addWidget(self.connect_btn)
+
+        # Reconnecting does not help a wedged server: it answers RPyC fine,
+        # its acquisition and heartbeat threads are just dead. Only a
+        # restart of the server process brings it back.
+        self.restart_server_btn = QtWidgets.QPushButton("Restart Linien Server")
+        self.restart_server_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.restart_server_btn.clicked.connect(self._restart_linien_server)
+        self._tip(
+            "Restart linien-server on the Red Pitaya over SSH. Use this when\n"
+            "the spectrum has stopped and the status says Stalled — a\n"
+            "reconnect will not fix that. Drops the lock.",
+            self.restart_server_btn,
+        )
+        manual_layout.addWidget(self.restart_server_btn)
 
         self.auto_discover_btn = QtWidgets.QPushButton("Auto-connect")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -3138,7 +3157,85 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return
         self._set_filters_ui(filters)
 
+    def _on_server_stalled(self, stalled):
+        """The Red Pitaya answers but its worker threads have died.
+
+        A frozen plot has three possible causes -- a stalled server, a
+        dropped connection, or a selection holding the trace -- and they
+        look identical. This is what names the first one.
+        """
+        self._server_stalled = bool(stalled)
+        if stalled:
+            self.rp_usb_status.setText("Stalled")
+            self.rp_usb_status.setStyleSheet(
+                "color: #b9924f; font-size: 13px; font-weight: 700; border: none;"
+            )
+            self._set_chip("lock", "RP STALLED", "#b9924f")
+        else:
+            # Restore what the connection actually last reported. Claiming
+            # "connected" here would also silently bump DEVICES n/4.
+            self._set_usb_status_label(
+                self.rp_usb_status, self._rp_last_status, "rp"
+            )
+            self._set_chip("lock", "UNLOCKED", "#b56a6a")
+
+    def _restart_linien_server(self):
+        """Shut the server down and bring it back, without an SSH session."""
+        if self._server_restarting:
+            return
+        host = self.rp_edit.text().strip()
+        if not host:
+            self._log_fault("linien", "restart skipped: no Red Pitaya host set")
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Restart linien server",
+            f"Restart linien-server on {host}?\n\n"
+            "This drops the lock and interrupts acquisition for a few "
+            "seconds. Use it when the spectrum has stalled.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if confirm != QtWidgets.QMessageBox.Yes:
+            return
+
+        self._server_restarting = True
+        self.restart_server_btn.setEnabled(False)
+        self.restart_server_btn.setText("Restarting…")
+        self._event_log.user("linien_server_restart", host=host)
+
+        # Ask the server to exit while we still have a connection to ask
+        # on. It raises SystemExit after joining its threads, so the call
+        # comes back as an EOF -- that is success, not a failure.
+        worker = self._get_lock_worker()
+        if worker is not None:
+            try:
+                worker.client.connection.root.exposed_shutdown()
+            except Exception:
+                pass
+        self.linien_widget.stop()
+
+        self.server_restart_worker = LinienServerRestartWorker(
+            host=host, event_log=self._event_log
+        )
+        self.server_restart_worker.finished_ok.connect(
+            self._on_server_restarted
+        )
+        self.server_restart_worker.start()
+
+    def _on_server_restarted(self, ok, message):
+        self._server_restarting = False
+        self.restart_server_btn.setEnabled(True)
+        self.restart_server_btn.setText("Restart Linien Server")
+        if not ok:
+            self._log_fault("linien", f"server restart failed: {message}")
+            return
+        self._event_log.log("linien_server_restarted", message=message)
+        self._server_stalled = False
+        self.linien_widget.start()
+
     def _on_linien_connection(self, status):
+        self._rp_last_status = status
         self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.

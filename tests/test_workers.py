@@ -125,6 +125,68 @@ def test_lock_uses_the_simple_autolock_preference():
     )
 
 
+def test_stalled_server_is_detected_from_its_heartbeat():
+    """linien-server bumps `ping` once a second; a frozen one does not.
+
+    A wedged server still answers RPyC, so the plot just stops with no
+    explanation -- indistinguishable from a static spectrum. The
+    heartbeat is what tells them apart.
+    """
+    import time
+
+    w = worker()
+    w.STALL_AFTER_S = 0.15  # do not sit out the real 5 s
+    w.client.parameters.ping.value = 7
+
+    seen = []
+    w.server_stalled.connect(seen.append)
+
+    w._check_server_alive()          # first sighting, starts the clock
+    assert seen == []
+    time.sleep(0.2)
+    w._check_server_alive()          # still 7 -> stalled
+    assert seen == [True], seen
+    w._check_server_alive()          # reported on the edge, not per poll
+    w._check_server_alive()
+    assert seen == [True], seen
+
+    w.client.parameters.ping.value = 8
+    w._check_server_alive()
+    assert seen == [True, False], seen
+
+
+def test_a_beating_heart_never_reports_a_stall():
+    import time
+
+    w = worker()
+    w.STALL_AFTER_S = 0.15
+    seen = []
+    w.server_stalled.connect(seen.append)
+    for tick in range(6):
+        w.client.parameters.ping.value = tick
+        w._check_server_alive()
+        time.sleep(0.05)
+    assert seen == [], seen
+
+
+def test_a_failed_ping_read_is_not_a_stall():
+    """A read that raises is a connection problem, reported elsewhere."""
+    w = worker()
+    w.STALL_AFTER_S = 0.0
+    seen = []
+    w.server_stalled.connect(seen.append)
+
+    class Exploding:
+        @property
+        def value(self):
+            raise RuntimeError("connection reset")
+
+    w.client.parameters._params["ping"] = Exploding()
+    w._check_server_alive()
+    w._check_server_alive()
+    assert seen == [], seen
+
+
 def test_stop_can_leave_the_lock_engaged():
     """The shutdown checklist's "leave it locked" has to reach here."""
     w = worker()

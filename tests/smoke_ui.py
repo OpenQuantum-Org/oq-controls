@@ -575,6 +575,42 @@ try:
     })
     assert not lw._plot_paused, "orphaned pause never cleared"
 
+    # A wedged server answers RPyC but its threads are dead, so the plot
+    # just stops. Reconnecting does not help; only a restart does, and
+    # the UI has to say which failure this is.
+    window._on_server_stalled(True)
+    assert window.rp_usb_status.text() == "Stalled"
+    assert window.chip_text("lock") == "RP STALLED"
+    window._on_server_stalled(False)
+    assert window.rp_usb_status.text() != "Stalled"
+    assert window.chip_text("lock") == "UNLOCKED"
+
+    # The restart action guards against a double press.
+    assert window.restart_server_btn.isEnabled()
+    window._server_restarting = True
+    window._restart_linien_server()  # must return without prompting
+    window._server_restarting = False
+    # ...and reports a missing host rather than SSHing to nothing.
+    saved_host = window.rp_edit.text()
+    window.rp_edit.setText("")
+    window._restart_linien_server()
+    assert not window._server_restarting
+    window.rp_edit.setText(saved_host)
+
+    # A failed restart re-enables the button and says so, rather than
+    # leaving it stuck on "Restarting...". The success path is not driven
+    # here: it reconnects, and this test must never touch hardware.
+    window._server_restarting = True
+    window.restart_server_btn.setEnabled(False)
+    window._on_server_restarted(False, "ssh refused")
+    assert window.restart_server_btn.isEnabled()
+    assert not window._server_restarting
+    assert window.restart_server_btn.text() == "Restart Linien Server"
+    assert any(
+        r["kind"] == "fault" and "ssh refused" in str(r.get("message", ""))
+        for r in _records()
+    )
+
     # Determine signal offset defaults on, matching linien's server default.
     assert window.auto_offset_check.isChecked()
     window.auto_offset_check.setChecked(False)

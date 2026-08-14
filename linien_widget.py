@@ -53,6 +53,8 @@ class LinienWidget(QtWidgets.QWidget):
     connection_status_changed = QtCore.pyqtSignal(str)
     selection_state_changed = QtCore.pyqtSignal(bool)
     fault = QtCore.pyqtSignal(str)
+    # The server's heartbeat stopped/resumed -- see LinienWorker.
+    server_stalled = QtCore.pyqtSignal(bool)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
                  show_stop_button=False, sweep_range=(-1.0, 1.0),
@@ -294,6 +296,7 @@ class LinienWidget(QtWidgets.QWidget):
         self.linien_thread.lock_state.connect(self._on_lock_state)
         self.linien_thread.connection_status.connect(self.connection_status_changed.emit)
         self.linien_thread.fault.connect(self.fault.emit)
+        self.linien_thread.server_stalled.connect(self.server_stalled.emit)
         self.linien_thread.start()
 
     # --- Slots ---

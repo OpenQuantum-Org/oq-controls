@@ -12,7 +12,7 @@ from pyqtgraph.Qt import QtCore
 from linien_client.device import Device
 import pickle
 import numpy as np
-from time import sleep
+from time import monotonic, sleep
 from linien_common.common import MHz, AutolockMode, Vpp
 
 from mot_logging import NULL_LOG
@@ -24,6 +24,15 @@ class LinienWorker(QtCore.QThread):
     lock_state = QtCore.pyqtSignal(bool)  # True if locked, False otherwise
     connection_status = QtCore.pyqtSignal(str)  # "connected:<host>" or "disconnected"
     fault = QtCore.pyqtSignal(str)  # anything that would otherwise be silent
+    # True when the server's heartbeat has stopped, False when it resumes.
+    server_stalled = QtCore.pyqtSignal(bool)
+
+    # linien-server increments ``ping`` once a second from a thread of its
+    # own (linien_server/server.py:181). If it stops advancing the server's
+    # threads are dead, which is the one thing a frozen plot cannot tell
+    # you by itself: a static spectrum is legitimate, a static heartbeat
+    # is not.
+    STALL_AFTER_S = 5.0
 
     def __init__(self, host="rp-F0C6AD.local", username="root", password="root",
                  event_log=None, unlock_on_stop=True):
@@ -44,6 +53,40 @@ class LinienWorker(QtCore.QThread):
         self.mon = np.array([])
         self.voltages = np.array([])
         self._last_ui_lock_state = None  # debounce UI lock-state updates
+        self._last_ping = None
+        self._ping_changed_at = None
+        self._stalled = False
+
+    def _check_server_alive(self):
+        """Watch the server's heartbeat; report the edges, not every poll."""
+        try:
+            ping = int(self.client.parameters.ping.value)
+        except Exception:
+            return  # a read that fails is a connection problem, not a stall
+        now = monotonic()
+        if ping != self._last_ping:
+            self._last_ping = ping
+            self._ping_changed_at = now
+            if self._stalled:
+                self._stalled = False
+                self.event_log.log("linien_server_recovered", host=self.host)
+                self.server_stalled.emit(False)
+            return
+        if self._ping_changed_at is None:
+            self._ping_changed_at = now
+            return
+        quiet_s = now - self._ping_changed_at
+        if not self._stalled and quiet_s >= self.STALL_AFTER_S:
+            self._stalled = True
+            self.event_log.fault(
+                "linien",
+                message=(
+                    f"server heartbeat stopped {quiet_s:.0f} s ago — "
+                    "it is wedged, restart it"
+                ),
+                host=self.host,
+            )
+            self.server_stalled.emit(True)
 
     def run(self):
         try:
@@ -139,6 +182,7 @@ class LinienWorker(QtCore.QThread):
                 self._log("acquisition failed: " + str(e))
 
             self._emit_lock_state_best_effort()
+            self._check_server_alive()
             self.msleep(200)
 
         self.event_log.log("linien_loop_ended", host=self.host)

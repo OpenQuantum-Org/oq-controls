@@ -1240,3 +1240,55 @@ class LaserSetpointWorker(QtCore.QThread):
             self._ser.close()
         self.wait()
 
+
+
+# ---------------------------------------------------------------------------
+class LinienServerRestartWorker(QtCore.QThread):
+    """Restart linien-server on the Red Pitaya, over SSH.
+
+    A wedged server answers RPyC but its acquisition and heartbeat threads
+    are dead, and the only cure is a restart. This does it from the app so
+    that does not mean an SSH session.
+
+    Deliberately a one-shot thread rather than a persistent worker: it
+    exists because ``start_remote_server`` blocks on SSH for several
+    seconds and the GUI thread must not. It owns no client and no port.
+
+    **Only ever calls ``start_remote_server``.** linien-gui's
+    ``install_remote_server`` runs ``pip3 uninstall linien-server -y``,
+    which would destroy the hand-applied dac_click_voltage patch on this
+    device (see CLAUDE.md).
+
+    Signals:
+        finished_ok(bool, str): success flag and a message for the log.
+    """
+
+    finished_ok = QtCore.pyqtSignal(bool, str)
+
+    def __init__(self, host, username="root", password="root", event_log=None):
+        super().__init__()
+        self.event_log = event_log or NULL_LOG
+        self.host = host
+        self.username = username
+        self.password = password
+
+    def run(self):
+        try:
+            from linien_client.deploy import start_remote_server
+            from linien_client.device import Device
+        except Exception as e:
+            self.finished_ok.emit(False, f"linien_client unavailable: {e}")
+            return
+
+        device = Device(
+            host=self.host, username=self.username, password=self.password
+        )
+        try:
+            with self.event_log.command(
+                "linien.restart_server", host=self.host
+            ):
+                start_remote_server(device)
+        except Exception as e:
+            self.finished_ok.emit(False, str(e))
+            return
+        self.finished_ok.emit(True, f"linien-server restarted on {self.host}")
