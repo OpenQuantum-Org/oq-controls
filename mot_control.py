@@ -1704,7 +1704,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_lock_card(self, parent):
-        card = CollapsibleCard("Error Signal & Lock", collapsed=False)
+        card = CollapsibleCard("Error Signal & Lock", collapsed=True)
         self.lock_card = card
         layout = card.content_layout
 
@@ -1858,7 +1858,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
 
     def _add_laser_card(self, parent):
-        card = CollapsibleCard("Laser Setpoints", collapsed=False)
+        card = CollapsibleCard("Laser Setpoints", collapsed=True)
         layout = card.content_layout
 
         self.laser_status = add_readout_row(layout, "Koheron:", "No port set")
@@ -1941,7 +1941,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _add_dps_card(self, parent):
         """Coils and dispenser: two cards, one per supply."""
-        card = CollapsibleCard("Coils", collapsed=False)
+        card = CollapsibleCard("Coils", collapsed=True)
         self.coils_card = card
         layout = card.content_layout
 
@@ -1999,7 +1999,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         parent.addWidget(card)
 
-        card = CollapsibleCard("Dispenser", collapsed=False)
+        card = CollapsibleCard("Dispenser", collapsed=True)
         self.dispenser_card = card
         layout = card.content_layout
 
@@ -2078,7 +2078,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _add_repump_card(self, parent):
-        card = CollapsibleCard("Repump", collapsed=False)
+        card = CollapsibleCard("Repump", collapsed=True)
         self.repump_card = card
         layout = card.content_layout
 

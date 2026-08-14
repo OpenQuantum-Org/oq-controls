@@ -298,6 +298,17 @@ try:
     # scrollbars — including them once caused infinite recursion).
     scroll_area = window.findChild(QtWidgets.QScrollArea)
     vbar = scroll_area.verticalScrollBar()
+    # Cards open collapsed, so expand enough of them to overflow the
+    # viewport -- otherwise there is nothing to scroll and the guard below
+    # would pass vacuously.
+    for card in (
+        window.lock_card,
+        window.coils_card,
+        window.dispenser_card,
+        window.repump_card,
+    ):
+        card.set_expanded(True)
+    app.processEvents()
     assert vbar.maximum() > 0  # column is taller than the viewport
     vbar.setValue(0)
     wheel_down = QtGui.QWheelEvent(
@@ -656,9 +667,16 @@ try:
     window._apply_dispenser_override(7.5, 30.0)
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     # Back to the default shape so the reference screenshot shows what the
-    # app actually opens with.
-    window.manual_setup_card.set_expanded(False)
-    window.log_card.set_expanded(False)
+    # app actually opens with: every card collapsed.
+    for card in (
+        window.manual_setup_card,
+        window.log_card,
+        window.lock_card,
+        window.coils_card,
+        window.dispenser_card,
+        window.repump_card,
+    ):
+        card.set_expanded(False)
 
     pixmap = window.grab()
     out = os.path.join(ROOT, "mot-ui-smoke.png")

@@ -88,6 +88,11 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         style_plot_axes(self.plot)
 
+        self.plot.setLabel("left", "Volts", **plot_label_style())
+        # The error signal is a fraction of a volt; pyqtgraph would rescale
+        # the axis and append a "(x0.001)" multiplier to the label.
+        self.plot.getAxis("left").enableAutoSIPrefix(False)
+
         if self._v_to_mhz is not None:
             self.plot.setLabel("bottom", "VCO Frequency (MHz)",
                                **plot_label_style())
