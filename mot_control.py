@@ -1339,8 +1339,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._add_repump_card(layout)
         self._add_lock_card(layout)
         self._add_dps_card(layout)
-        self._add_config_card(layout)
-        self._add_log_card(layout)
+        self._add_config_log_card(layout)
         for card_attr in set(self._CHIP_CARDS.values()):
             self._refresh_card_status(card_attr)
         layout.addStretch()
@@ -1669,9 +1668,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
 
 
-    def _add_config_card(self, parent):
-        card = CollapsibleCard("Config", collapsed=True)
+    def _add_config_log_card(self, parent):
+        """Config snapshots and the event log: both are about the session
+        as a whole rather than any one device, so they share a card."""
+        card = CollapsibleCard("Config & Log", collapsed=True)
+        self.log_card = card
         layout = card.content_layout
+
         config_row = QtWidgets.QHBoxLayout()
         config_row.setSpacing(6)
         self.save_config_btn = QtWidgets.QPushButton("Save Config As...")
@@ -1691,15 +1694,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._tip(
             "Apply a saved config: setpoints go to the hardware where\n"
             "connected. Dispenser settings ask for confirmation; port\n"
-            "changes take effect on Connect / Reconnect.",
+            "changes take effect on Connect.",
             self.load_config_btn,
         )
         layout.addLayout(config_row)
-        parent.addWidget(card)
 
-    def _add_log_card(self, parent):
-        card = CollapsibleCard("Log", collapsed=True)
-        self.log_card = card
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
@@ -1714,7 +1713,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "The full history is in logs/mot-YYYYMMDD.jsonl.",
             self.log_view,
         )
-        card.content_layout.addWidget(self.log_view)
+        layout.addWidget(self.log_view)
         parent.addWidget(card)
 
     def _add_lock_card(self, parent):
