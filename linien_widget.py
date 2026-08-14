@@ -14,6 +14,20 @@ from superqt import QRangeSlider
 from styles import UI_FONT_PX, plot_label_style, style_plot_axes
 
 
+class _ShortLineSample(pg.ItemSample):
+    """Legend swatch: a short line instead of pyqtgraph's wide default."""
+
+    def boundingRect(self):
+        return QtCore.QRectF(0, 0, 16, 14)
+
+    def paint(self, painter, *args):
+        opts = self.item.opts
+        pen = pg.mkPen(opts["pen"])
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(0, 7, 16, 7)
+
+
 class LinienWidget(QtWidgets.QWidget):
     """Linien plot + lock controls for a Red Pitaya.
 
@@ -80,19 +94,8 @@ class LinienWidget(QtWidgets.QWidget):
                 background: #5e5e5e; width: 12px; border-radius: 0px; margin: -4px 0;
             }
         """)
-        # The slider spans the same x range as the plot below it, so it is
-        # inset to match the plot's data area. The y-axis width depends on
-        # the current tick labels, so the margin is applied on layout
-        # rather than hardcoded (see _align_slider_to_plot).
-        self._slider_box = QtWidgets.QWidget()
-        self._slider_box.setStyleSheet("background: transparent;")
-        self._slider_row = QtWidgets.QHBoxLayout(self._slider_box)
-        self._slider_row.setContentsMargins(0, 0, 0, 0)
-        self._slider_row.setSpacing(0)
-        self._slider_row.addWidget(self.xrange_slider)
-
         slider_proxy = QtWidgets.QGraphicsProxyWidget()
-        slider_proxy.setWidget(self._slider_box)
+        slider_proxy.setWidget(self.xrange_slider)
         self.pg_widget.addItem(slider_proxy, row=0, col=0)
         self.xrange_slider.valueChanged.connect(self._update_range)
 
@@ -131,15 +134,28 @@ class LinienWidget(QtWidgets.QWidget):
         self.original_xrange = self.plot.viewRange()[0]
         self.original_yrange = self.plot.viewRange()[1]
 
-        # No plot legend: the host places `self.legend` in the bar above,
-        # so nothing sits over the traces.
         self.ERROR_COLOR = "#5cb8ff"
         self.MONITOR_COLOR = "#c080e0"
+
+        # Compact legend in the corner: small type, tight spacing and a
+        # short sample line, so it reads as a key rather than a panel.
+        # Must be created *before* the curves -- addLegend only registers
+        # named items added after it.
+        self.legend = self.plot.addLegend(
+            offset=(-8, 8),
+            labelTextSize=f"{UI_FONT_PX - 2}px",
+            labelTextColor="#9a9a9a",
+            brush=pg.mkBrush(11, 11, 11, 170),
+            pen=pg.mkPen(40, 40, 40, 160),
+            verSpacing=-5,
+            horSpacing=4,
+            sampleType=_ShortLineSample,
+        )
+
         self.error_curve = self.plot.plot(
             pen=pg.mkPen(self.ERROR_COLOR, width=1.5), name="Error signal")
         self.monitor_curve = self.plot.plot(
             pen=pg.mkPen(self.MONITOR_COLOR, width=1.5), name="Monitor signal")
-        self.legend = self._build_legend()
 
         self.zero_line = pg.InfiniteLine(
             pos=0, angle=0,
@@ -148,9 +164,6 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.addItem(self.zero_line)
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
-        self.view_box.sigRangeChanged.connect(
-            lambda *_: self._align_slider_to_plot()
-        )
 
         # --- Autolock line selection (linien's PlotWidget overlays) ---
         # Created once and shown/hidden. Adding items per selection is what
@@ -230,26 +243,6 @@ class LinienWidget(QtWidgets.QWidget):
             self.stop_sweep_btn.setCursor(QtCore.Qt.PointingHandCursor)
             self.stop_sweep_btn.clicked.connect(self._stop_sweep)
             lock_row.addWidget(self.stop_sweep_btn)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._align_slider_to_plot()
-
-    def _align_slider_to_plot(self):
-        """Inset the slider to line up with the plot's data area.
-
-        The y-axis pushes the plot content right by however wide its tick
-        labels currently are, so this is measured rather than hardcoded --
-        the width changes as the trace rescales.
-        """
-        try:
-            box = self.view_box.sceneBoundingRect()
-            width = self.pg_widget.width()
-            left = max(0, int(box.left()))
-            right = max(0, int(width - box.right()))
-        except Exception:
-            return
-        self._slider_row.setContentsMargins(left, 0, right, 0)
 
     # --- Voltage ↔ display coordinate helpers ---
 
@@ -346,34 +339,6 @@ class LinienWidget(QtWidgets.QWidget):
         # mouse-driven zoom/pan to the sweep bounds.
         d_min, d_max = self._v_range_to_display(x_min, x_max)
         self.plot.setXRange(d_min, d_max, padding=0)
-
-    def _build_legend(self):
-        """Trace key for the host to place above the plot.
-
-        The swatches read the curve colours from the same constants the
-        pens use, so a colour change cannot leave the key stale.
-        """
-        box = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(box)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        for color, text in (
-            (self.ERROR_COLOR, "Error signal"),
-            (self.MONITOR_COLOR, "Monitor signal"),
-        ):
-            swatch = QtWidgets.QLabel()
-            swatch.setFixedSize(14, 3)
-            swatch.setStyleSheet(f"background: {color}; border: none;")
-            row.addWidget(swatch, 0, QtCore.Qt.AlignVCenter)
-            label = QtWidgets.QLabel(text)
-            label.setStyleSheet(
-                "color: #ababab; background: transparent;"
-                f"font-size: {UI_FONT_PX}px; border: none;"
-            )
-            row.addWidget(label)
-            row.addSpacing(6)
-        return box
-
 
     def _limit_xrange(self):
         vb = self.plot.getViewBox()

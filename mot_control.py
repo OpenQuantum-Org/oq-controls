@@ -1215,10 +1215,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         sweep_row = QtWidgets.QHBoxLayout()
         sweep_row.setContentsMargins(20, 0, 8, 0)
         sweep_row.setSpacing(8)
-        # The trace key and sweep readouts belong at the left of this row,
-        # but the Linien widget that owns them is built below. Kept here
-        # so they can be inserted once it exists.
-        self._sweep_row = sweep_row
         sweep_row.addStretch()
         sweep_row.addWidget(self._small_label("Sweep Speed:"))
         self.sweep_speed_combo = QtWidgets.QComboBox()
@@ -1268,8 +1264,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.linien_widget.autozoom_check,
         )
 
-        # Trace key, at the left of the sweep row.
-        self._sweep_row.insertWidget(0, self.linien_widget.legend)
 
         self.camera_widget = CameraViewWidget()
         self.camera_widget.setVisible(False)
