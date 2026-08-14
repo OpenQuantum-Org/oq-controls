@@ -227,7 +227,7 @@ try:
     # Unit suffixes on the previously unitless fields.
     assert window.mod_freq_edit.text().endswith(" MHz")
     assert window.mod_phase_edit.text().endswith("\N{DEGREE SIGN}")
-    assert window.therm_edit.text().endswith(" \N{OHM SIGN}")
+    assert window.therm_edit.text().endswith(" \N{DEGREE SIGN}C")
 
     # Every slider value edit must fit its own extreme values in the
     # current font (the proportional body font clipped "130 mA" once).
@@ -250,10 +250,11 @@ try:
             needed = fm.horizontalAdvance(text) + 20  # padding + border
             assert needed <= edit.width(), (text, needed, edit.width())
 
-    # Laser slider ranges: current 50-100 mA, thermistor up to 15000 ohm.
+    # Laser slider ranges: current 50-100 mA, temperature 16-42 C in
+    # 0.1 C steps, which is what 5000-15000 ohm used to span.
     assert window.current_slider.minimum() == 50
     assert window.current_slider.maximum() == 100
-    assert window.therm_slider.maximum() == 15000
+    assert window.therm_slider.maximum() == 420
 
     # Typed entry: the value boxes now drive the sliders (with clamping,
     # suffix tolerance, and garbage rejection).
@@ -270,11 +271,11 @@ try:
     window.mod_freq_edit.editingFinished.emit()
     assert window.mod_freq_slider.value() == 17500
     assert window.mod_freq_edit.text() == "17.500 MHz"
-    window.vtune_slider.setValue(2500)
+    window.vtune_slider.setValue(28500)
     window.vtune_edit.setText("garbage")
     window.vtune_edit.editingFinished.emit()
-    assert window.vtune_slider.value() == 2500  # unchanged
-    assert window.vtune_edit.text() == "2.500 V"  # display restored
+    assert window.vtune_slider.value() == 28500  # unchanged
+    assert window.vtune_edit.text() == "2850.0 MHz"  # display restored
 
     # Wheel guard: a wheel event over an unfocused slider must not change
     # the value (it used to — accidental hardware actuation).
@@ -329,13 +330,17 @@ try:
     window._on_lock_state(False)
     assert window.chip_text("lock") == "UNLOCKED"
 
-    # Thermistor row shows an estimated temperature in degrees C.
-    expected_c = mot_control.thermistor_ohms_to_c(window.therm_slider.value())
-    assert window.therm_temp_readback.text() == f"{expected_c:.1f} \N{DEGREE SIGN}C"
-    window.therm_slider.setValue(5000)
-    assert window.therm_temp_readback.text() == (
-        f"{mot_control.thermistor_ohms_to_c(5000):.1f} \N{DEGREE SIGN}C"
-    )
+    # The laser setpoint is a temperature; the ohms the Koheron wants are
+    # derived from it and are what gets persisted.
+    window.therm_slider.setValue(300)  # move off the default first
+    window.therm_slider.setValue(250)  # 25.0 C
+    assert window.therm_edit.text() == "25.0 \N{DEGREE SIGN}C"
+    saved_ohms = int(window._settings.value("laser/thermistor_ohm"))
+    assert abs(mot_control.thermistor_ohms_to_c(saved_ohms) - 25.0) < 0.05
+    # The two conversions must agree across the slider's range.
+    for celsius in (16.0, 25.0, 42.0):
+        ohms = mot_control.thermistor_c_to_ohms(celsius)
+        assert abs(mot_control.thermistor_ohms_to_c(ohms) - celsius) < 0.01
 
     # Dispenser fire-state UI: button, label, chip, and progress bar.
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 15.0})
@@ -394,15 +399,15 @@ try:
     assert window._int_setting("dispenser/total_fires", 0) == 2
     assert window._float_setting("dispenser/total_fire_s", 0.0) == 42.0
 
-    # Exercise the V_tune readback slider sync and the VCO frequency
-    # display.
+    # The repump slider is in MHz; a DAC readback in volts is converted
+    # once per connect to adopt the hardware's tune point.
     window._vtune_slider_synced = False
     window._on_vtune_readback(3.3)
-    assert window.vtune_slider.value() == 3300
-    assert window.vtune_freq_readback.text().endswith("MHz")
+    expected = round(mot_control.vtune_to_vco_mhz(3.3) * 10)
+    assert window.vtune_slider.value() == expected
+    assert window.vtune_edit.text().endswith(" MHz")
     window._on_vtune_readback(5.0)
-    assert window.vtune_freq_readback.text() == "2970.0 MHz"
-    assert window.vtune_slider.value() == 3300  # later readbacks don't move it
+    assert window.vtune_slider.value() == expected  # later readbacks ignored
 
     # Repump button wording (no "Gate"), mirrored in the card header.
     assert window.repump_gpio_btn.text() == "Repump Off"
@@ -648,7 +653,7 @@ try:
         window._settings.value("psd/max_decimation")
     )
     assert config["repump"]["vco_mhz"] == round(
-        mot_control.vtune_to_vco_mhz(window.vtune_slider.value() / 1000.0), 1
+        window.vtune_slider.value() / 10.0, 1
     )
     assert config["linien"]["pid"] is None  # no linien connection in smoke
     assert config["saved_at"]
@@ -664,7 +669,7 @@ try:
     # --- Config load: change everything, then restore from the file ---
     window.current_slider.setValue(60)
     window.mot_coil_current_slider.setValue(500)
-    window.vtune_slider.setValue(1000)
+    window.vtune_slider.setValue(28100)
     window._settings.setValue("psd/max_decimation", 14)
     window._set_filters_ui({"automatic": False, "filter_1_frequency": 777})
     window._apply_dispenser_override(12.0, 40.0)
@@ -795,10 +800,10 @@ try:
     w1.usb_card.set_expanded(False)
     w1.mod_freq_slider.setValue(23456)
     w1.current_slider.setValue(95)
-    w1.therm_slider.setValue(12000)
+    w1.therm_slider.setValue(205)
     w1.mot_coil_voltage_slider.setValue(12000)
     w1.mot_coil_current_slider.setValue(2500)
-    w1.vtune_slider.setValue(3300)
+    w1.vtune_slider.setValue(29000)
     w1.sweep_speed_combo.setCurrentIndex(4)
     w1._apply_dispenser_override(9.0, 20.0)
     w1._settings.sync()
@@ -808,10 +813,10 @@ try:
     w2 = mot_control.OpenQuantumControlsWindow()
     assert w2.mod_freq_slider.value() == 23456
     assert w2.current_slider.value() == 95
-    assert w2.therm_slider.value() == 12000
+    assert w2.therm_slider.value() == 205
     assert w2.mot_coil_voltage_slider.value() == 12000
     assert w2.mot_coil_current_slider.value() == 2500
-    assert w2.vtune_slider.value() == 3300
+    assert w2.vtune_slider.value() == 29000
     assert w2.sweep_speed_combo.currentIndex() == 4
     assert w2._dispenser_fire_current == 9.0
     assert w2._dispenser_fire_seconds == 20.0

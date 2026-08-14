@@ -288,6 +288,13 @@ VCO_FREQ_MAX_MHZ = 2970.0
 VCO_VTUNE_SPAN_V = 5.0
 
 
+def vco_mhz_to_vtune(mhz: float) -> float:
+    """Inverse of vtune_to_vco_mhz. The VCO curve is linear in V_tune."""
+    span = VCO_FREQ_MAX_MHZ - VCO_FREQ_MIN_MHZ
+    fraction = (float(mhz) - VCO_FREQ_MIN_MHZ) / span
+    return max(0.0, min(1.0, fraction)) * VCO_VTUNE_SPAN_V
+
+
 def vtune_to_vco_mhz(vtune_v: float) -> float:
     """Convert a repump V_tune voltage to the VCO output frequency in MHz."""
     fraction = max(0.0, min(1.0, vtune_v / VCO_VTUNE_SPAN_V))
@@ -304,6 +311,25 @@ def thermistor_ohms_to_c(ohms: float) -> float:
     r = max(1e-3, float(ohms))
     ln_r = math.log(r)
     return 1.0 / (0.00113 + 0.000234 * ln_r + 8.78e-8 * ln_r**3) - 273.15
+
+
+def thermistor_c_to_ohms(celsius: float) -> float:
+    """Inverse of thermistor_ohms_to_c.
+
+    Steinhart-Hart has a closed form inverse, but the curve is smooth and
+    strictly decreasing over the range this thermistor is used in, so a
+    bisection is shorter and cannot be got subtly wrong. 40 iterations
+    over 100 Ohm - 1 MOhm resolves to well under a milliohm.
+    """
+    target = float(celsius)
+    lo, hi = 100.0, 1e6  # higher resistance = colder
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if thermistor_ohms_to_c(mid) > target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
 
 COMBO_STYLE = """
     QComboBox {
@@ -1891,34 +1917,35 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.current_slider,
             self.current_edit,
         )
+        # Temperature, not resistance: the thermistor value is an
+        # implementation detail of how the Koheron holds the setpoint.
+        # Stored and sent in ohms; the slider is in 0.1 C steps over the
+        # range the old 5000-15000 ohm limits covered (about 16-42 C).
         self.therm_slider, self.therm_edit = add_slider_row(
             layout,
-            "Thermistor:",
-            5000,
-            15000,
-            # 10 k on the 10 k NTC curve is 25 C, the intended operating point.
-            # The previous 6215 default sat at 36 C.
-            self._int_setting("laser/thermistor_ohm", 10000, 5000, 15000),
+            "Temperature:",
+            160,
+            420,
+            int(round(
+                thermistor_ohms_to_c(
+                    self._int_setting("laser/thermistor_ohm", 10000, 5000, 15000)
+                ) * 10
+            )),
             single=1,
-            page=50,
-            suffix=" \N{OHM SIGN}",
+            page=10,
+            suffix=" °C",
+            decimals=1,
+            scale=10.0,
         )
         self.therm_slider.valueChanged.connect(self._on_thermistor)
         self._tip(
-            "TEC thermistor setpoint (ohms). Lower resistance = warmer\n"
-            "diode; see the estimated temperature below.",
+            "TEC temperature setpoint. Converted to a thermistor\n"
+            "resistance with the 10 k NTC Steinhart-Hart curve before it\n"
+            "is sent to the Koheron.",
             self.therm_slider,
             self.therm_edit,
         )
-        self.therm_temp_readback = add_readout_row(layout, "Temp (est):", "--")
-        self._update_therm_temp(self.therm_slider.value())
         self._apply_laser_lock(False)
-        self._tip(
-            "Setpoint converted with the 10 k NTC Steinhart-Hart curve\n"
-            "(estimate, not a measurement).",
-            self.therm_temp_readback,
-            help_cursor=True,
-        )
         parent.addWidget(card)
 
     def _add_dps_card(self, parent):
@@ -2163,37 +2190,33 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.repump_card = card
         layout = card.content_layout
 
-        # No V_tune readout row: the slider's own value box below shows it,
-        # and it adopts the hardware value on connect.
-        self.vtune_freq_readback = add_readout_row(layout, "VCO Freq:", "--")
-        self._tip(
-            "Repump VCO output frequency: 0-5 V V_tune spans\n"
-            f"{VCO_FREQ_MIN_MHZ:.0f}-{VCO_FREQ_MAX_MHZ:.0f} MHz (linear).",
-            self.vtune_freq_readback,
-            help_cursor=True,
-        )
-        vtune_min_mv = int(round(self._vtune_min * 1000))
-        vtune_max_mv = int(round(self._vtune_max * 1000))
+        # Frequency, not V_tune: the tune voltage is how the DAC reaches a
+        # frequency, not a number anyone sets on purpose. Stored in mV;
+        # the slider is in 0.1 MHz steps across the VCO's range.
         vtune_initial_mv = self._int_setting(
-            "dac/vtune_mv", 0, vtune_min_mv, vtune_max_mv
+            "dac/vtune_mv",
+            0,
+            int(round(self._vtune_min * 1000)),
+            int(round(self._vtune_max * 1000)),
         )
         self.vtune_slider, self.vtune_edit = add_slider_row(
             layout,
-            "V_tune:",
-            vtune_min_mv,
-            vtune_max_mv,
-            vtune_initial_mv,
+            "Frequency:",
+            int(round(VCO_FREQ_MIN_MHZ * 10)),
+            int(round(VCO_FREQ_MAX_MHZ * 10)),
+            int(round(vtune_to_vco_mhz(vtune_initial_mv / 1000.0) * 10)),
             single=1,
-            page=100,
-            suffix=" V",
-            decimals=3,
-            scale=1000.0,
+            page=10,
+            suffix=" MHz",
+            decimals=1,
+            scale=10.0,
         )
         self.vtune_slider.valueChanged.connect(self._on_vtune)
         self._tip(
-            "Repump VCO tune voltage via the DAC Click (0-5 V full scale).\n"
-            "Type a value or drag; the slider adopts the hardware value on\n"
-            "connect.",
+            "Repump VCO output frequency. Set with the DAC Click's tune\n"
+            f"voltage, whose 0-5 V spans {VCO_FREQ_MIN_MHZ:.0f}-"
+            f"{VCO_FREQ_MAX_MHZ:.0f} MHz linearly. The slider adopts the\n"
+            "hardware value on connect.",
             self.vtune_slider,
             self.vtune_edit,
         )
@@ -2577,11 +2600,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.current_slider.blockSignals(False)
         self.current_edit.setText(f"{int(values['current'])} mA")
 
+        therm_c = thermistor_ohms_to_c(int(values["thermistor"]))
         self.therm_slider.blockSignals(True)
-        self.therm_slider.setValue(int(values["thermistor"]))
+        self.therm_slider.setValue(int(round(therm_c * 10)))
         self.therm_slider.blockSignals(False)
-        self.therm_edit.setText(f"{int(values['thermistor'])} \N{OHM SIGN}")
-        self._update_therm_temp(int(values["thermistor"]))
+        self.therm_edit.setText(f"{therm_c:.1f} \N{DEGREE SIGN}C")
         self._event_log.log(
             "laser_init",
             current_ma=int(values["current"]),
@@ -2628,21 +2651,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_current(value)
 
     def _on_thermistor(self, value):
-        self.therm_edit.setText(f"{value} \N{OHM SIGN}")
-        self._settings.setValue("laser/thermistor_ohm", value)
-        self._update_therm_temp(value)
+        # Slider is deci-degrees; the Koheron still speaks ohms.
+        celsius = value / 10.0
+        ohms = int(round(thermistor_c_to_ohms(celsius)))
+        self.therm_edit.setText(f"{celsius:.1f} \N{DEGREE SIGN}C")
+        self._settings.setValue("laser/thermistor_ohm", ohms)
         self._debounced_log(
             "laser_thermistor",
             "setpoint",
             lambda: {
                 "name": "laser_thermistor_ohm",
-                "value": self.therm_slider.value(),
-                "temp_c": round(thermistor_ohms_to_c(self.therm_slider.value()), 2),
+                "value": ohms,
+                "temp_c": round(celsius, 2),
             },
         )
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
-            worker.set_thermistor(value)
+            worker.set_thermistor(ohms)
 
     def _apply_laser_lock(self, unlocked):
         """Enable or disable the laser setpoint controls and update the badge."""
@@ -2661,11 +2686,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_laser_unlock(self, unlocked):
         self._apply_laser_lock(unlocked)
         self._event_log.log("laser_setpoints_unlocked", unlocked=bool(unlocked))
-
-    def _update_therm_temp(self, ohms):
-        self.therm_temp_readback.setText(
-            f"{thermistor_ohms_to_c(ohms):.1f} \N{DEGREE SIGN}C"
-        )
 
     # ------------------------------------------------------------------
     # DPS5005 controls
@@ -2906,18 +2926,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_vtune(self, value):
-        volts = value / 1000.0
-        self.vtune_edit.setText(f"{volts:.3f} V")
-        self._settings.setValue("dac/vtune_mv", value)
-        # Live target frequency while dragging; the readback (actual)
-        # overwrites it as soon as the ~0.3 s DAC write completes.
-        self.vtune_freq_readback.setText(f"{vtune_to_vco_mhz(volts):.1f} MHz")
+        # Slider is in 0.1 MHz; the DAC still takes volts.
+        mhz = value / 10.0
+        volts = vco_mhz_to_vtune(mhz)
+        self.vtune_edit.setText(f"{mhz:.1f} MHz")
+        self._settings.setValue("dac/vtune_mv", int(round(volts * 1000)))
         worker = getattr(self, "vtune_worker", None)
         if worker is not None:
             worker.set_voltage(volts)
 
     def _on_vtune_readback(self, volts):
-        self.vtune_freq_readback.setText(f"{vtune_to_vco_mhz(volts):.1f} MHz")
         if (
             self._last_logged_vtune is None
             or abs(volts - self._last_logged_vtune) >= 0.001
@@ -2933,10 +2951,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # jump the VCO away from its current tune point.
         if not self._vtune_slider_synced:
             self._vtune_slider_synced = True
+            mhz = vtune_to_vco_mhz(volts)
             self.vtune_slider.blockSignals(True)
-            self.vtune_slider.setValue(int(round(volts * 1000)))
+            self.vtune_slider.setValue(int(round(mhz * 10)))
             self.vtune_slider.blockSignals(False)
-            self.vtune_edit.setText(f"{volts:.3f} V")
+            self.vtune_edit.setText(f"{mhz:.1f} MHz")
 
     def _toggle_repump_gpio(self, checked):
         self._set_repump_ui(checked)
@@ -3063,7 +3082,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """Snapshot of every control setting, for the JSON export."""
         worker = self._get_lock_worker()
         pid = worker.get_pid() if worker is not None else None
-        vtune_v = self.vtune_slider.value() / 1000.0
+        # Sliders read in physical units now; the config keeps hardware
+        # units so files written by either build stay interchangeable.
+        vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)
+        therm_ohm = int(round(thermistor_c_to_ohms(self.therm_slider.value() / 10.0)))
         return {
             "saved_at": datetime.now().astimezone().isoformat(
                 timespec="seconds"
@@ -3088,10 +3110,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             },
             "laser": {
                 "current_ma": self.current_slider.value(),
-                "thermistor_ohm": self.therm_slider.value(),
-                "temp_est_c": round(
-                    thermistor_ohms_to_c(self.therm_slider.value()), 2
-                ),
+                "thermistor_ohm": therm_ohm,
+                "temp_est_c": round(self.therm_slider.value() / 10.0, 2),
             },
             "repump": {
                 "vtune_v": vtune_v,
@@ -3216,12 +3236,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if "current_ma" in laser:
             self.current_slider.setValue(int(laser["current_ma"]))
         if "thermistor_ohm" in laser:
-            self.therm_slider.setValue(int(laser["thermistor_ohm"]))
+            # Config stores ohms; the slider is in deci-degrees.
+            self.therm_slider.setValue(
+                int(round(
+                    thermistor_ohms_to_c(float(laser["thermistor_ohm"])) * 10
+                ))
+            )
 
         repump = config.get("repump", {})
         if "vtune_v" in repump:
+            # Config stores volts; the slider is in deci-MHz.
             self.vtune_slider.setValue(
-                int(round(float(repump["vtune_v"]) * 1000))
+                int(round(vtune_to_vco_mhz(float(repump["vtune_v"])) * 10))
             )
 
         coils = config.get("coils", {})
