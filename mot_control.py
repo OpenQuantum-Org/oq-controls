@@ -1268,20 +1268,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.linien_widget.autozoom_check,
         )
 
-        # Trace key and sweep readouts, at the left of the sweep row.
-        for index, widget in enumerate((
-            self.linien_widget.legend,
-            self.linien_widget.center_label,
-            self.linien_widget.span_label,
-        )):
-            self._sweep_row.insertWidget(index, widget)
-        self._sweep_row.insertSpacing(1, 16)
-        self._tip(
-            "Sweep centre and width, set by the slider above the plot.",
-            self.linien_widget.center_label,
-            self.linien_widget.span_label,
-            help_cursor=True,
-        )
+        # Trace key, at the left of the sweep row.
+        self._sweep_row.insertWidget(0, self.linien_widget.legend)
 
         self.camera_widget = CameraViewWidget()
         self.camera_widget.setVisible(False)

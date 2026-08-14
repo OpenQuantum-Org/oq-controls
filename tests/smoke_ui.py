@@ -833,6 +833,9 @@ try:
         def set_modulation_amplitude(self, value):
             zeroed.append(value)
 
+        def stop(self):
+            pass
+
     w1.linien_widget.linien_thread = _FakeLockWorker()
     w1.close()
     assert zeroed == [0], zeroed

@@ -80,38 +80,19 @@ class LinienWidget(QtWidgets.QWidget):
                 background: #5e5e5e; width: 12px; border-radius: 0px; margin: -4px 0;
             }
         """)
-        # Flank the slider with the range it can span, so its endpoints
-        # mean something. Wrapped in a plain widget rather than proxied
-        # directly, so the labels track the slider's own width.
-        end_style = (
-            "color: #969696; background: transparent;"
-            f"font-size: {UI_FONT_PX}px; border: none;"
-        )
-        self.sweep_min_label = QtWidgets.QLabel()
-        self.sweep_min_label.setStyleSheet(end_style)
-        self.sweep_min_label.setAlignment(
-            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
-        )
-        self.sweep_min_label.setFixedWidth(90)
-        self.sweep_max_label = QtWidgets.QLabel()
-        self.sweep_max_label.setStyleSheet(end_style)
-        self.sweep_max_label.setAlignment(
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-        )
-        self.sweep_max_label.setFixedWidth(90)
-
-        slider_box = QtWidgets.QWidget()
-        slider_box.setStyleSheet("background: transparent;")
-        slider_row = QtWidgets.QHBoxLayout(slider_box)
-        slider_row.setContentsMargins(0, 0, 0, 0)
-        slider_row.setSpacing(8)
-        slider_row.addWidget(self.sweep_min_label)
-        slider_row.addWidget(self.xrange_slider, stretch=1)
-        slider_row.addWidget(self.sweep_max_label)
-        self._update_sweep_end_labels()
+        # The slider spans the same x range as the plot below it, so it is
+        # inset to match the plot's data area. The y-axis width depends on
+        # the current tick labels, so the margin is applied on layout
+        # rather than hardcoded (see _align_slider_to_plot).
+        self._slider_box = QtWidgets.QWidget()
+        self._slider_box.setStyleSheet("background: transparent;")
+        self._slider_row = QtWidgets.QHBoxLayout(self._slider_box)
+        self._slider_row.setContentsMargins(0, 0, 0, 0)
+        self._slider_row.setSpacing(0)
+        self._slider_row.addWidget(self.xrange_slider)
 
         slider_proxy = QtWidgets.QGraphicsProxyWidget()
-        slider_proxy.setWidget(slider_box)
+        slider_proxy.setWidget(self._slider_box)
         self.pg_widget.addItem(slider_proxy, row=0, col=0)
         self.xrange_slider.valueChanged.connect(self._update_range)
 
@@ -167,6 +148,9 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.addItem(self.zero_line)
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
+        self.view_box.sigRangeChanged.connect(
+            lambda *_: self._align_slider_to_plot()
+        )
 
         # --- Autolock line selection (linien's PlotWidget overlays) ---
         # Created once and shown/hidden. Adding items per selection is what
@@ -198,18 +182,6 @@ class LinienWidget(QtWidgets.QWidget):
 
         self.plot.scene().sigMouseMoved.connect(self._selection_mouse_moved)
         self.pg_widget.viewport().installEventFilter(self)
-
-        # Centre/span read out in the bar above rather than over the
-        # traces. Plain labels, so _update_overlay_labels -- the one place
-        # that formats these for all three axis modes -- is unchanged.
-        readout_style = (
-            "color: #ababab; background: transparent;"
-            f"font-size: {UI_FONT_PX}px; border: none;"
-        )
-        self.center_label = QtWidgets.QLabel("Center: 0.000 V")
-        self.center_label.setStyleSheet(readout_style)
-        self.span_label = QtWidgets.QLabel("Span: 2.000 V")
-        self.span_label.setStyleSheet(readout_style)
 
         # Nothing sits over the traces: the lock controls and
         # the autozoom checkbox are handed to the host window.
@@ -259,12 +231,25 @@ class LinienWidget(QtWidgets.QWidget):
             self.stop_sweep_btn.clicked.connect(self._stop_sweep)
             lock_row.addWidget(self.stop_sweep_btn)
 
-        # Populate the overlay labels with calibrated units immediately,
-        # so they don't sit at "0 V / 2 V" while waiting for the Linien
-        # `initial` signal (or forever if no RP is connected).
-        _init_center_v = (self._sweep_min_v + self._sweep_max_v) / 2
-        _init_amplitude_v = (self._sweep_max_v - self._sweep_min_v) / 2
-        self._update_overlay_labels(_init_center_v, _init_amplitude_v)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._align_slider_to_plot()
+
+    def _align_slider_to_plot(self):
+        """Inset the slider to line up with the plot's data area.
+
+        The y-axis pushes the plot content right by however wide its tick
+        labels currently are, so this is measured rather than hardcoded --
+        the width changes as the trace rescales.
+        """
+        try:
+            box = self.view_box.sceneBoundingRect()
+            width = self.pg_widget.width()
+            left = max(0, int(box.left()))
+            right = max(0, int(width - box.right()))
+        except Exception:
+            return
+        self._slider_row.setContentsMargins(left, 0, right, 0)
 
     # --- Voltage ↔ display coordinate helpers ---
 
@@ -318,7 +303,6 @@ class LinienWidget(QtWidgets.QWidget):
     def _initialize_slider(self, data):
         center = data.get("center", 0.0)
         amplitude = data.get("amplitude", 1.0)
-        self._update_overlay_labels(center, amplitude)
         x_min, x_max = center - amplitude, center + amplitude
         d_min, d_max = self._v_range_to_display(x_min, x_max)
         self.plot.setXRange(d_min, d_max, padding=0)
@@ -355,7 +339,6 @@ class LinienWidget(QtWidgets.QWidget):
         x_min, x_max = slider_min / 1000, slider_max / 1000
         center = (x_min + x_max) / 2
         amplitude = (x_max - x_min) / 2
-        self._update_overlay_labels(center, amplitude)
         if self.linien_thread is not None:
             self.linien_thread.request_sweep_change(center, amplitude)
         # Plot axis always follows the slider — both when shrinking and
@@ -391,34 +374,6 @@ class LinienWidget(QtWidgets.QWidget):
             row.addSpacing(6)
         return box
 
-    def _update_sweep_end_labels(self):
-        """Label the slider's limits in whatever unit the x axis uses."""
-        lo, hi = self._v_range_to_display(
-            self._sweep_min_v, self._sweep_max_v
-        )
-        if self._v_to_mhz is not None or self._v_to_freq is not None:
-            self.sweep_min_label.setText(f"{lo:.1f} MHz")
-            self.sweep_max_label.setText(f"{hi:.1f} MHz")
-        else:
-            self.sweep_min_label.setText(f"{lo:+.3f} V")
-            self.sweep_max_label.setText(f"{hi:+.3f} V")
-
-    def _update_overlay_labels(self, center_v, amplitude_v):
-        """Update the overlay labels with voltage and/or frequency info."""
-        if self._v_to_mhz is not None:
-            center_mhz = float(self._v_to_mhz(center_v))
-            lo_mhz = float(self._v_to_mhz(center_v - amplitude_v))
-            hi_mhz = float(self._v_to_mhz(center_v + amplitude_v))
-            span_mhz = abs(hi_mhz - lo_mhz)
-            self.center_label.setText(f"Center: {center_mhz:.1f} MHz")
-            self.span_label.setText(f"Span: {span_mhz:.1f} MHz")
-        elif self._v_to_freq is not None:
-            self.center_label.setText(f"Center: {center_v:+.3f} V")
-            span_mhz = 2 * amplitude_v * abs(self._v_to_freq) * 1000.0
-            self.span_label.setText(f"Span: {span_mhz:.0f} MHz")
-        else:
-            self.center_label.setText(f"Center: {center_v:+.3f} V")
-            self.span_label.setText(f"Span: {2 * amplitude_v:.3f} V")
 
     def _limit_xrange(self):
         vb = self.plot.getViewBox()
