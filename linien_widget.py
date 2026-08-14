@@ -80,8 +80,38 @@ class LinienWidget(QtWidgets.QWidget):
                 background: #5e5e5e; width: 12px; border-radius: 0px; margin: -4px 0;
             }
         """)
+        # Flank the slider with the range it can span, so its endpoints
+        # mean something. Wrapped in a plain widget rather than proxied
+        # directly, so the labels track the slider's own width.
+        end_style = (
+            "color: #969696; background: transparent;"
+            f"font-size: {UI_FONT_PX}px; border: none;"
+        )
+        self.sweep_min_label = QtWidgets.QLabel()
+        self.sweep_min_label.setStyleSheet(end_style)
+        self.sweep_min_label.setAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
+        self.sweep_min_label.setFixedWidth(90)
+        self.sweep_max_label = QtWidgets.QLabel()
+        self.sweep_max_label.setStyleSheet(end_style)
+        self.sweep_max_label.setAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+        )
+        self.sweep_max_label.setFixedWidth(90)
+
+        slider_box = QtWidgets.QWidget()
+        slider_box.setStyleSheet("background: transparent;")
+        slider_row = QtWidgets.QHBoxLayout(slider_box)
+        slider_row.setContentsMargins(0, 0, 0, 0)
+        slider_row.setSpacing(8)
+        slider_row.addWidget(self.sweep_min_label)
+        slider_row.addWidget(self.xrange_slider, stretch=1)
+        slider_row.addWidget(self.sweep_max_label)
+        self._update_sweep_end_labels()
+
         slider_proxy = QtWidgets.QGraphicsProxyWidget()
-        slider_proxy.setWidget(self.xrange_slider)
+        slider_proxy.setWidget(slider_box)
         self.pg_widget.addItem(slider_proxy, row=0, col=0)
         self.xrange_slider.valueChanged.connect(self._update_range)
 
@@ -120,17 +150,15 @@ class LinienWidget(QtWidgets.QWidget):
         self.original_xrange = self.plot.viewRange()[0]
         self.original_yrange = self.plot.viewRange()[1]
 
-        legend = self.plot.addLegend(
-            offset=(-10, 10), labelTextSize=f"{UI_FONT_PX}px"
-        )
-        legend.setLabelTextColor("#ababab")
-        legend.setBrush(pg.mkBrush(11, 11, 11, 200))
-        legend.setPen(pg.mkPen("#282828"))
-
+        # No plot legend: the host places `self.legend` in the bar above,
+        # so nothing sits over the traces.
+        self.ERROR_COLOR = "#5cb8ff"
+        self.MONITOR_COLOR = "#c080e0"
         self.error_curve = self.plot.plot(
-            pen=pg.mkPen("#5cb8ff", width=1.5), name="Error signal")
+            pen=pg.mkPen(self.ERROR_COLOR, width=1.5), name="Error signal")
         self.monitor_curve = self.plot.plot(
-            pen=pg.mkPen("#c080e0", width=1.5), name="Monitor signal")
+            pen=pg.mkPen(self.MONITOR_COLOR, width=1.5), name="Monitor signal")
+        self.legend = self._build_legend()
 
         self.zero_line = pg.InfiniteLine(
             pos=0, angle=0,
@@ -171,27 +199,19 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.scene().sigMouseMoved.connect(self._selection_mouse_moved)
         self.pg_widget.viewport().installEventFilter(self)
 
-        # --- Overlay labels ---
-        vb = self.plot.getViewBox()
-        overlay_label_style = "color: #ababab; background: transparent; font-size: 13px; border: none;"
-
+        # Centre/span read out in the bar above rather than over the
+        # traces. Plain labels, so _update_overlay_labels -- the one place
+        # that formats these for all three axis modes -- is unchanged.
+        readout_style = (
+            "color: #ababab; background: transparent;"
+            f"font-size: {UI_FONT_PX}px; border: none;"
+        )
         self.center_label = QtWidgets.QLabel("Center: 0.000 V")
-        self.center_label.setStyleSheet(overlay_label_style)
-        self.center_label.setFixedWidth(120)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.center_label)
-        proxy.setZValue(1000)
-        proxy.setPos(22, 10)
-
+        self.center_label.setStyleSheet(readout_style)
         self.span_label = QtWidgets.QLabel("Span: 2.000 V")
-        self.span_label.setStyleSheet(overlay_label_style)
-        self.span_label.setFixedWidth(140)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.span_label)
-        proxy.setZValue(1000)
-        proxy.setPos(150, 10)
+        self.span_label.setStyleSheet(readout_style)
 
-        # Nothing but labels sits over the traces: the lock controls and
+        # Nothing sits over the traces: the lock controls and
         # the autozoom checkbox are handed to the host window.
         # Unparented: the host window places this with its other view
         # controls (see autozoom_check).
@@ -343,6 +363,45 @@ class LinienWidget(QtWidgets.QWidget):
         # mouse-driven zoom/pan to the sweep bounds.
         d_min, d_max = self._v_range_to_display(x_min, x_max)
         self.plot.setXRange(d_min, d_max, padding=0)
+
+    def _build_legend(self):
+        """Trace key for the host to place above the plot.
+
+        The swatches read the curve colours from the same constants the
+        pens use, so a colour change cannot leave the key stale.
+        """
+        box = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        for color, text in (
+            (self.ERROR_COLOR, "Error signal"),
+            (self.MONITOR_COLOR, "Monitor signal"),
+        ):
+            swatch = QtWidgets.QLabel()
+            swatch.setFixedSize(14, 3)
+            swatch.setStyleSheet(f"background: {color}; border: none;")
+            row.addWidget(swatch, 0, QtCore.Qt.AlignVCenter)
+            label = QtWidgets.QLabel(text)
+            label.setStyleSheet(
+                "color: #ababab; background: transparent;"
+                f"font-size: {UI_FONT_PX}px; border: none;"
+            )
+            row.addWidget(label)
+            row.addSpacing(6)
+        return box
+
+    def _update_sweep_end_labels(self):
+        """Label the slider's limits in whatever unit the x axis uses."""
+        lo, hi = self._v_range_to_display(
+            self._sweep_min_v, self._sweep_max_v
+        )
+        if self._v_to_mhz is not None or self._v_to_freq is not None:
+            self.sweep_min_label.setText(f"{lo:.1f} MHz")
+            self.sweep_max_label.setText(f"{hi:.1f} MHz")
+        else:
+            self.sweep_min_label.setText(f"{lo:+.3f} V")
+            self.sweep_max_label.setText(f"{hi:+.3f} V")
 
     def _update_overlay_labels(self, center_v, amplitude_v):
         """Update the overlay labels with voltage and/or frequency info."""

@@ -789,6 +789,10 @@ try:
         window.repump_card,
     ):
         card.set_expanded(False)
+    # The wheel-guard check above leaves the column scrolled; put it back
+    # so the reference screenshot is not clipped at the top.
+    window.findChild(QtWidgets.QScrollArea).verticalScrollBar().setValue(0)
+    app.processEvents()
 
     pixmap = window.grab()
     out = os.path.join(ROOT, "mot-ui-smoke.png")
