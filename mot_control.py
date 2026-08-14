@@ -540,29 +540,7 @@ class CameraViewWidget(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        header = QtWidgets.QHBoxLayout()
-        header.setSpacing(8)
-        title = QtWidgets.QLabel("USB CAMERA")
-        title.setStyleSheet(
-            f"color: {NEON_BLUE}; font-size: 13px; font-weight: 700;"
-            "letter-spacing: 1px; border: none; padding: 4px 6px;"
-            f'font-family: "{TITLE_FONT_FAMILY}";'
-        )
-        header.addWidget(title)
-        header.addStretch()
-
-        self.camera_combo = QtWidgets.QComboBox()
-        _style_combo(self.camera_combo)
-        self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
-        header.addWidget(self.camera_combo, stretch=1)
-
-        self.refresh_btn = QtWidgets.QPushButton("Refresh")
-        self.refresh_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.refresh_btn.clicked.connect(lambda: self.refresh(auto_start=True))
-        header.addWidget(self.refresh_btn)
-        layout.addLayout(header)
+        layout.setSpacing(6)
 
         self.stack = QtWidgets.QStackedWidget()
         self.message_label = QtWidgets.QLabel("No USB camera found")
@@ -587,9 +565,54 @@ class CameraViewWidget(QtWidgets.QWidget):
             self.message_label.setText(f"Camera view unavailable: {e}")
 
         layout.addWidget(self.stack, stretch=1)
+
+        # Controls sit under the image: the picture is the point, and the
+        # bar reads as a caption rather than competing with the header.
+        controls = QtWidgets.QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+
+        label = QtWidgets.QLabel("Camera:")
+        label.setStyleSheet(
+            "color: #ababab; font-size: 13px; font-weight: 600; border: none;"
+        )
+        label.setFixedWidth(60)
+        controls.addWidget(label)
+
+        self.camera_combo = QtWidgets.QComboBox()
+        _style_combo(self.camera_combo)
+        # Long device names must not widen the pane, same as PortSelect.
+        self.camera_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.camera_combo.setMinimumContentsLength(12)
+        self.camera_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
+        )
+        self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
+        controls.addWidget(self.camera_combo, stretch=1)
+
+        self.refresh_btn = QtWidgets.QPushButton("Refresh")
+        self.refresh_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.refresh_btn.setFixedWidth(96)
+        self.refresh_btn.clicked.connect(self._refresh_clicked)
+        controls.addWidget(self.refresh_btn)
+        layout.addLayout(controls)
+
         self.refresh(auto_start=False)
 
-    def refresh(self, auto_start=False):
+    def _refresh_clicked(self):
+        """Re-enumerate, keeping the selected camera if it is still there."""
+        previous = self.camera_combo.currentText()
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.setText("...")
+        try:
+            self.refresh(auto_start=True, prefer=previous)
+        finally:
+            self.refresh_btn.setText("Refresh")
+            self.refresh_btn.setEnabled(True)
+
+    def refresh(self, auto_start=False, prefer=None):
         self.stop()
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
@@ -621,8 +644,17 @@ class CameraViewWidget(QtWidgets.QWidget):
             return
 
         for camera in self._camera_devices:
-            self.camera_combo.addItem(camera.description())
+            name = camera.description()
+            self.camera_combo.addItem(name)
+            self.camera_combo.setItemData(
+                self.camera_combo.count() - 1, name, QtCore.Qt.ToolTipRole
+            )
         self.camera_combo.setEnabled(True)
+        # Keep the camera the user had selected, if it is still present.
+        if prefer:
+            index = self.camera_combo.findText(prefer)
+            if index >= 0:
+                self.camera_combo.setCurrentIndex(index)
         self.camera_combo.blockSignals(False)
         if auto_start:
             self._start_camera(self.camera_combo.currentIndex())
