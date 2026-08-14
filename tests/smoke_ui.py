@@ -225,7 +225,7 @@ try:
     section.show()
     app.processEvents()
     assert resolved_family(section) == "Space Grotesk"
-    assert resolved_family(window.laser_status) == "Space Grotesk"
+    assert resolved_family(window.laser_btn) == "Space Grotesk"
     assert resolved_family(window.dispenser_fire_btn) == "Space Grotesk"
 
     # Unit suffixes on the previously unitless fields.
@@ -419,6 +419,14 @@ try:
     assert window.chip_text("repump") == "REPUMP ON"
     window._on_repump_gpio_state(False)
     assert window.repump_gpio_btn.text() == "Repump Off"
+
+    # A device error surfaces as a fault, not only as a connection note:
+    # the Koheron has no status row of its own any more, so the log is
+    # where it has to show up.
+    window._log_connection("laser", "error:could not open port")
+    log_text = window.log_view.toPlainText()
+    assert "fault" in log_text
+    assert "could not open port" in log_text
 
     # The repump gate and the dither both follow the laser off -- they are
     # meaningless without it.

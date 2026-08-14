@@ -1082,11 +1082,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     READBACK_LOG_PERIOD_S = 10.0
 
     def _log_connection(self, device, status):
-        print(f"{device}: {status}")
         self._event_log.log("connection", device=device, status=status)
+        if str(status).startswith("error"):
+            # Surface it as a fault too: an error buried among routine
+            # connect/disconnect events is easy to miss, and for devices
+            # with no status row the log is the only place it shows.
+            self._log_fault(device, str(status).split(":", 1)[-1].strip())
 
     def _log_fault(self, device, message):
-        print(f"! {device} fault: {message}")
         self._event_log.log("fault", device=device, message=str(message))
 
     def _debounced_log(self, key, event, payload_fn, delay_ms=1500):
@@ -1788,18 +1791,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.laser_card = card
         layout = card.content_layout
 
-        self.laser_status = add_readout_row(layout, "Koheron:", "No port set")
-        self._tip(
-            "Koheron CTL200 connection state.",
-            self.laser_status,
-            help_cursor=True,
-        )
-        self.laser_btn = QtWidgets.QPushButton("Laser Off")
-        self.laser_btn.setCheckable(True)
-        self.laser_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.laser_btn.toggled.connect(self._toggle_laser)
-        layout.addWidget(self.laser_btn)
-        self._tip("Toggle the laser diode output (lason).", self.laser_btn)
+        # No Koheron connection row: the Devices card already carries it.
+        # Connection changes and faults go to the event log instead.
 
         # The laser runs at a fixed operating point. Both setpoints start
         # locked every session so neither can be moved by a stray drag;
@@ -1865,6 +1858,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.therm_edit,
         )
         self._apply_laser_lock(False)
+
+        # The action goes under the settings it acts on, as in Coils and
+        # Repump.
+        self.laser_btn = QtWidgets.QPushButton("Laser Off")
+        self.laser_btn.setCheckable(True)
+        self.laser_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.laser_btn.toggled.connect(self._toggle_laser)
+        layout.addWidget(self.laser_btn)
+        self._tip("Toggle the laser diode output (lason).", self.laser_btn)
+
         parent.addWidget(card)
 
     def _add_dps_card(self, parent):
@@ -2327,9 +2330,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _start_laser_worker(self):
         self.laser_worker = LaserSetpointWorker(port=self.laser_edit.text().strip())
         self.laser_worker.initial_values.connect(self._on_laser_init)
-        self.laser_worker.connection_status.connect(
-            lambda status: self._set_status_label(self.laser_status, status)
-        )
         self.laser_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(
                 self.laser_usb_status, status, "laser"
@@ -3298,28 +3298,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"DEVICES {n_ok}/{total}",
             "#6f9e7c" if n_ok == total else
             self._CHIP_NEUTRAL if n_ok == 0 else "#b9924f",
-        )
-
-    @staticmethod
-    def _set_status_label(label, status):
-        if status.startswith("connected:"):
-            text = status.split(":", 1)[1]
-            color = "#6f9e7c"
-        elif status == "connected":
-            text = "Connected"
-            color = "#6f9e7c"
-        elif status in ("no_port", "no_host"):
-            text = "Not configured"
-            color = "#ababab"
-        elif status.startswith("error:"):
-            text = "Error"
-            color = "#b56a6a"
-        else:
-            text = "Disconnected"
-            color = "#b56a6a"
-        label.setText(text)
-        label.setStyleSheet(
-            f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
         )
 
     def _show_fault(self, label, device, message):
