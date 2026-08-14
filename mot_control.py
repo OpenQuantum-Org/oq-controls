@@ -1423,6 +1423,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _add_port_select_row(self, layout, label_text, value):
         """Labelled port dropdown. Options are filled by _refresh_discovery."""
         row = QtWidgets.QHBoxLayout()
+        # Same rhythm as add_slider_row / add_readout_row.
+        row.setContentsMargins(0, 3, 0, 3)
         row.setSpacing(8)
         row.addWidget(self._small_label(label_text))
         select = PortSelect(value)
@@ -1438,6 +1440,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         reads as status rather than as a form to fill in.
         """
         row = QtWidgets.QHBoxLayout()
+        # Same rhythm as add_slider_row / add_readout_row.
+        row.setContentsMargins(0, 3, 0, 3)
         row.setSpacing(8)
         row.addWidget(self._small_label(label_text))
         value = QtWidgets.QLabel(edit.text())
@@ -2142,6 +2146,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _add_line_edit(self, layout, label_text, value, placeholder):
         row = QtWidgets.QHBoxLayout()
+        # Same rhythm as add_slider_row / add_readout_row.
+        row.setContentsMargins(0, 3, 0, 3)
         row.setSpacing(8)
         row.addWidget(self._small_label(label_text))
         edit = QtWidgets.QLineEdit(str(value or ""))
@@ -3288,6 +3294,21 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
         )
 
+    def _silence_modulation_on_exit(self):
+        """Drive the dither to zero before the linien worker goes away.
+
+        Only reaches the device on a graceful close -- a crash or a kill
+        leaves the last value on the Red Pitaya.
+        """
+        worker = self._get_lock_worker()
+        if worker is None:
+            return
+        try:
+            worker.set_modulation_amplitude(0)
+            self._event_log.log("modulation_auto_off", reason="app_exit")
+        except Exception as e:
+            self._log_fault("linien", f"could not zero modulation on exit: {e}")
+
     def closeEvent(self, event):
         print("Shutting down OpenQuantum Controls...")
         self._save_ui_state()
@@ -3300,6 +3321,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "dispenser/cooldown_until",
                 time.time() + DispenserWorker.COOLDOWN_SECONDS,
             )
+        # The workers each drive their own output safe on stop (laser
+        # lason 0, both DPS outputs off, repump gate low). Modulation is
+        # the exception: it is a linien parameter, not a worker output, so
+        # it would otherwise keep dithering the laser after we exit.
+        self._silence_modulation_on_exit()
+
         self.camera_widget.stop()
         self.linien_widget.stop()
         self._stop_hardware_workers()

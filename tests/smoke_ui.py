@@ -819,7 +819,19 @@ try:
     w1.sweep_speed_combo.setCurrentIndex(4)
     w1._set_dispenser_fire(9.0, 20.0)
     w1._settings.sync()
+
+    # Closing must silence the dither. The workers drive their own
+    # outputs safe on stop, but modulation is a linien parameter rather
+    # than a worker output, so nothing else would turn it off.
+    zeroed = []
+
+    class _FakeLockWorker:
+        def set_modulation_amplitude(self, value):
+            zeroed.append(value)
+
+    w1.linien_widget.linien_thread = _FakeLockWorker()
     w1.close()
+    assert zeroed == [0], zeroed
     app.processEvents()
 
     w2 = mot_control.OpenQuantumControlsWindow()
