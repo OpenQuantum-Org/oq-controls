@@ -824,15 +824,6 @@ class PidDialog(QtWidgets.QDialog):
         form.addRow("D:", self.d_spin)
         root.addLayout(form)
 
-        note = QtWidgets.QLabel(
-            "Applied to the Red Pitaya immediately on Apply "
-            "(linien range 0-8191 each)."
-            + ("" if current else " Current values could not be read.")
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #969696; border: none; font-size: 13px;")
-        root.addWidget(note)
-
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch()
         cancel_btn = QtWidgets.QPushButton("Cancel")

@@ -187,6 +187,92 @@ def test_linien_stale_commands_dropped():
     assert worker._pending == []
 
 
+def _run_worker(worker, fake, seconds, states=None, faults=None, on_tick=None):
+    """Drive the real run loop against a fake client for a moment."""
+    import time
+
+    def fake_connect():
+        worker.client = fake
+        return True
+
+    worker._connect = fake_connect
+    worker.start()
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+        if on_tick is not None:
+            on_tick()
+    worker.running = False
+    worker.wait(3000)
+
+
+def _sweeping(n=8):
+    import pickle
+    return pickle.dumps({"error_signal_1": [0] * n, "monitor_signal": [0] * n})
+
+
+def _locked(n=8):
+    import pickle
+    return pickle.dumps({"error_signal": [0] * n, "control_signal": [0] * n})
+
+
+def test_run_loop_tracks_lock_state():
+    """The loop, not just the helpers -- this path had no coverage.
+
+    linien names the signal "error_signal" only while locked and
+    "error_signal_1" while sweeping (linien_server/acquisition.py), which
+    is what the lock indicator reads.
+    """
+    worker = LinienWorker(host="fake.local")
+    fake = FakeClient()
+    fake.parameters.to_plot.value = _sweeping()
+    fake.parameters.lock.value = 0
+
+    states, frames = [], []
+    worker.lock_state.connect(states.append)
+    worker.new_data.connect(frames.append)
+
+    flipped = []
+
+    def flip():
+        if not flipped and states == [False]:
+            fake.parameters.to_plot.value = _locked()
+            fake.parameters.lock.value = 1
+            flipped.append(True)
+
+    _run_worker(worker, fake, 1.5, on_tick=flip)
+    assert frames, "the loop never emitted a frame"
+    assert states == [False, True], states
+
+
+def test_run_loop_reports_a_failed_autolock_instead_of_timing_out():
+    """linien sets autolock_failed when it gives up looking for the line.
+
+    Without reading it, a failed lock is a silent 30 s wait and then a
+    generic message -- indistinguishable from the button doing nothing.
+    """
+    worker = LinienWorker(host="fake.local")
+    fake = FakeClient()
+    fake.parameters.to_plot.value = _sweeping(2048)
+    fake.parameters.lock.value = 0
+    fake.parameters.autolock_failed.value = False
+
+    faults = []
+    worker.fault.connect(faults.append)
+    worker.lock_laser(100, 200, 2048)
+
+    def fail_it():
+        if worker._await_lock is not None:
+            fake.parameters.autolock_failed.value = True
+
+    _run_worker(worker, fake, 2.0, on_tick=fail_it)
+    assert any("could not find" in f for f in faults), faults
+    # Well inside the 30 s timeout, and the flag is cleared for next time.
+    assert worker._await_lock is None
+    assert not fake.parameters.autolock_failed.value
+
+
 def test_laser_setters_only_enqueue_and_conflate():
     worker = LaserSetpointWorker(port=None)
     writes = []

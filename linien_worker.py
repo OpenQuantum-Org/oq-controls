@@ -492,6 +492,9 @@ class LinienWorker(QtCore.QThread):
             params.autolock_mode_preference.value = AutolockMode.SIMPLE
             params.fetch_additional_signals.value = False
             params.autolock_target_position.value = 0
+            # Clear the previous verdict, or a stale True from an earlier
+            # attempt fails this one before it has started.
+            params.autolock_failed.value = False
             self._write_registers()
             self.client.connection.root.start_autolock(
                 i0, i1, pickle.dumps(raw)
@@ -525,7 +528,28 @@ class LinienWorker(QtCore.QThread):
             self._await_lock = None
             self.event_log.log("lock_state", locked=want)
             self._emit_lock_state_best_effort(force_value=want)
-        elif monotonic() >= deadline:
+            return
+
+        # linien reports its own verdict rather than making us infer one
+        # from a timeout: autolock_failed means the algorithm gave up
+        # looking for the line. Without this a failed lock is a silent
+        # 30 s wait and then a generic message.
+        if want:
+            try:
+                params = self.client.parameters
+                if bool(params.autolock_failed.value):
+                    self._await_lock = None
+                    params.autolock_failed.value = False
+                    self._fault(
+                        "autolock could not find the selected line — "
+                        "try a wider selection around a stronger feature"
+                    )
+                    self._emit_lock_state_best_effort()
+                    return
+            except Exception:
+                pass  # older server without the parameter: fall back to timeout
+
+        if monotonic() >= deadline:
             self._await_lock = None
             self._fault(
                 f"{'lock' if want else 'unlock'} did not take within "
@@ -543,6 +567,10 @@ class LinienWorker(QtCore.QThread):
             )
             if locked != self._last_ui_lock_state:
                 self._last_ui_lock_state = locked
+                # Logged on every transition, not just the ones we asked
+                # for: a lock that drops on its own is the interesting
+                # case and nothing else would record it.
+                self.event_log.log("lock_state", locked=locked)
                 self.lock_state.emit(locked)
-        except Exception:
-            pass
+        except Exception as e:
+            self.event_log.fault("linien", message=f"lock-state read failed: {e}")
