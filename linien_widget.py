@@ -142,7 +142,8 @@ class LinienWidget(QtWidgets.QWidget):
         # Must be created *before* the curves -- addLegend only registers
         # named items added after it.
         self.legend = self.plot.addLegend(
-            offset=(-8, 8),
+            # Both negative anchors the legend to the plot's bottom-right.
+            offset=(-8, -8),
             labelTextSize=f"{UI_FONT_PX - 2}px",
             labelTextColor="#9a9a9a",
             brush=pg.mkBrush(11, 11, 11, 170),

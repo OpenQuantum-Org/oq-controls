@@ -9,7 +9,7 @@ shrink and change — edit it directly as priorities move.
 
 Status: `[ ]` not started · `[~]` in progress · `[x]` done
 
-Last updated 2026-08-13.
+Last updated 2026-08-14.
 
 ---
 
@@ -30,18 +30,15 @@ a green run only proves the UI constructed, not that it looks right.
 
 `/bench` (step 8) is the only other skill worth making, and not yet.
 
-## [ ] 2. Colours and card order
+## [x] 2. Colours and card order
 
-The cheap half of the UI work. Card order is the sequence of
-`parent.addWidget(card)` calls in the `_build_*` methods; colours are
-`styles.py` plus inline stylesheets.
+Done 2026-08-14, and it grew well past "colours and card order": the dark grey
+flat theme, one font and one body size, the collapsible-card restructure, the
+PSD window port, the linien locking rewrite (SIMPLE mode, determine-offset,
+selection-bar cleanup), unit fixes for modulation amplitude and frequency,
+temperature and MHz readouts in place of ohms and volts, and a spacing pass.
 
-*Why here:* zero risk, and it produces something visibly better within an hour
-while the next three steps are invisible plumbing.
-
-Also fold in: **Mod Strength** (`mot_control.py:1742`) is the modulation
-amplitude control — exists and is fully wired, but is named unhelpfully and
-defaults to `0 mV` so it looks inert. Rename and give it a sane default.
+Mod Strength is now **Mod Amplitude** (`mot_control.py:1612`).
 
 ## [ ] 3. Logging substrate — the experimental record
 
@@ -108,17 +105,20 @@ out of the QThread wrappers.
 the CLI a clean seam. By then you will have hand-verified at the bench and know
 which checks are worth automating.
 
-## [ ] 7. Structural UI, done as the module split
+## [~] 7. Structural UI, done as the module split
 
-Merge Error Signal Filters into Linien Lock (already adjacent in the layout).
-Inline `DeviceConfigDialog` — note ports are *already* inline, so the dialog is
-additive; the work is deciding what replaces the auto-open at
-`mot_control.py:2229`. Each panel extracted into its own module on the way out
-of `OpenQuantumControlsWindow`.
+The **UI half is done** (step 2): filters and lock are one *Error Signal & Lock*
+card, `DeviceConfigDialog` is gone entirely and replaced by the always-visible
+Devices panel. Both open questions below are answered by what shipped.
 
-*Why last among the big items:* these touch the same panels step 4 rewrote and
-the same code a god-class split would move. Done together, each panel is cut
-once and the refactor is a side effect of UI work you already wanted.
+What remains is only the **module split**. `mot_control.py` is still 3,400 lines
+with `OpenQuantumControlsWindow` most of it, so the plan to extract each panel
+"on the way out" did not happen — the UI work went in place instead. It is now
+its own job rather than a side effect, which makes it less attractive: it is
+pure churn against a file that currently works.
+
+*Reconsider before doing:* the god class is a real cost only if you keep adding
+panels. If the UI is settled, the split buys less than steps 3–5.
 
 ## [ ] 8. `/bench` skill
 
@@ -131,15 +131,20 @@ looks like per subsystem.
 
 ## Open questions
 
-Neither blocks steps 1–6. Both must be answered before step 7 can be planned.
+Both original questions were answered by shipping step 2: device config is one
+always-visible Devices panel with a nested collapsed *Manual Setup*, and filters
+and lock are a single collapsed *Error Signal & Lock* card.
 
-1. **Device config inlining** — per-device connection detail in each device's
-   own card, or one always-visible Devices panel replacing the dialog? What
-   should happen at `mot_control.py:2229`, where it currently auto-opens?
-2. **Merged filter + lock card** — one card with both sets of controls, or
-   sections/tabs? Linien Lock already carries four rows and two buttons, so the
-   merged card runs tall. Should it start expanded (filters currently default
-   to collapsed, `mot_control.py:1559`)?
+What is open now is all bench work, none of it answerable from the desk:
+
+1. **Does the lock actually engage in SIMPLE mode**, and does *Determine signal
+   offset* move it? Ported from linien 2.1.0, never run against the RP.
+2. **Do the temperature and frequency sliders land where they claim?** The
+   Steinhart-Hart and VCO conversions are unverified against a real reading.
+3. **Is the 16-38 °C range right**, and is 0.1 V / 0.1 A too coarse for setting
+   coil current?
+4. **Does everything actually turn off on close?** `_silence_modulation_on_exit`
+   is wired but only step 5 makes this a guarantee.
 
 ## Ordering rationale, in one line
 
