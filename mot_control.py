@@ -847,6 +847,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_fire_seconds = self._float_setting(
             "dispenser/fire_seconds", DispenserWorker.FIRE_SECONDS
         )
+        self._dispenser_fire_voltage = self._float_setting(
+            "dispenser/fire_voltage_v", DispenserWorker.DISPENSE_VOLTAGE_V
+        )
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
         self._psd_runs = {}
@@ -1494,7 +1497,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
 
 
-        self.connect_btn = QtWidgets.QPushButton("Connect / Reconnect")
+        self.connect_btn = QtWidgets.QPushButton("Connect")
         self.connect_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.connect_btn.clicked.connect(self._connect_all)
         self._tip(
@@ -1504,7 +1507,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         manual_layout.addWidget(self.connect_btn)
 
-        self.auto_discover_btn = QtWidgets.QPushButton("Auto Discover")
+        self.auto_discover_btn = QtWidgets.QPushButton("Autoconnect")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.auto_discover_btn.clicked.connect(
             lambda: self._run_usb_probe(startup=False)
@@ -1609,9 +1612,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         for index in (1, 2):
             row = QtWidgets.QHBoxLayout()
+            # Same margins and label width as add_slider_row, so these rows
+            # sit on the same rhythm as every other control in the card.
+            row.setContentsMargins(0, 2, 0, 2)
             row.setSpacing(8)
             enabled = QtWidgets.QCheckBox(f"Filter {index}")
             enabled.setCursor(QtCore.Qt.PointingHandCursor)
+            enabled.setFixedWidth(120)
             enabled.setStyleSheet(
                 "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
                 "QCheckBox::indicator { width: 14px; height: 14px; }"
@@ -1624,9 +1631,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             freq_spin.setRange(1, 10_000_000)
             freq_spin.setValue(10000)
             freq_spin.setSuffix(" Hz")
+            freq_spin.setFixedWidth(112)
             row.addWidget(enabled)
-            row.addWidget(type_combo)
-            row.addWidget(freq_spin, stretch=1)
+            row.addWidget(type_combo, stretch=1)
+            row.addWidget(freq_spin)
             layout.addLayout(row)
             enabled.toggled.connect(self._on_filter_changed)
             type_combo.currentIndexChanged.connect(self._on_filter_changed)
@@ -1642,16 +1650,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 type_combo,
                 freq_spin,
             )
-
-        self.filter_read_btn = QtWidgets.QPushButton("Read from Device")
-        self.filter_read_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.filter_read_btn.clicked.connect(self._sync_filters_from_device)
-        layout.addWidget(self.filter_read_btn)
-        self._tip(
-            "Re-read the filter settings from the Linien server (also done\n"
-            "automatically when it connects).",
-            self.filter_read_btn,
-        )
 
         self._update_filter_rows_enabled()
 
@@ -1881,6 +1879,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         lock_row.setSpacing(8)
         self.laser_unlock_box = QtWidgets.QCheckBox("Unlock setpoints")
         self.laser_unlock_box.setCursor(QtCore.Qt.PointingHandCursor)
+        self.laser_unlock_box.setStyleSheet(
+            "QCheckBox { color: #e6e6e6; font-size: 13px; border: none; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
         self.laser_unlock_box.toggled.connect(self._on_laser_unlock)
         lock_row.addWidget(self.laser_unlock_box)
         lock_row.addStretch()
@@ -2010,29 +2012,52 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_readback,
             help_cursor=True,
         )
-        # The dispense operating point defaults to 7.5 A constant-current
-        # for 30 s and is only changeable through the confirmed Override
-        # dialog; there are no free-form controls.
-        self.dispenser_setpoint_label = add_readout_row(layout, "Setpoint:", "--")
-        self._tip(
-            "Fixed dispense operating point. Change it only through\n"
-            "Override... (confirmation required).",
-            self.dispenser_setpoint_label,
-            help_cursor=True,
+        self.dispenser_voltage_slider, self.dispenser_voltage_edit = (
+            add_slider_row(
+                layout,
+                "Voltage:",
+                0,
+                50000,
+                int(round(self._dispenser_fire_voltage * 1000)),
+                single=10,
+                page=1000,
+                suffix=" V",
+                decimals=3,
+                scale=1000.0,
+            )
         )
-        self.dispenser_history_label = add_readout_row(layout, "Fires:", "--")
-        self._update_dispenser_history_label()
-        self._tip(
-            "Lifetime fire count and total seconds — tracks dispenser wear.",
-            self.dispenser_history_label,
-            help_cursor=True,
+        self.dispenser_voltage_slider.valueChanged.connect(
+            self._on_dispenser_voltage
         )
-        self.dispenser_fire_label = add_readout_row(layout, "Fire:", "Idle")
         self._tip(
-            "Fire phase. After each fire a 15 min cooldown blocks re-firing\n"
-            "(it survives an app restart).",
-            self.dispenser_fire_label,
-            help_cursor=True,
+            "Dispenser supply voltage limit (V). The dispenser is a\n"
+            "near-short, so the supply runs current-limited and this is\n"
+            "only headroom.",
+            self.dispenser_voltage_slider,
+            self.dispenser_voltage_edit,
+        )
+        self.dispenser_current_slider, self.dispenser_current_edit = (
+            add_slider_row(
+                layout,
+                "Current:",
+                0,
+                20000,
+                int(round(self._dispenser_fire_current * 1000)),
+                single=10,
+                page=100,
+                suffix=" A",
+                decimals=3,
+                scale=1000.0,
+            )
+        )
+        self.dispenser_current_slider.valueChanged.connect(
+            self._on_dispenser_current
+        )
+        self._tip(
+            "Dispense current setpoint (A) — the supply runs here in CC\n"
+            "for the fire duration.",
+            self.dispenser_current_slider,
+            self.dispenser_current_edit,
         )
 
         fire_row = QtWidgets.QHBoxLayout()
@@ -2074,21 +2099,54 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_progress,
         )
 
-        self._update_dispenser_setpoint_text()
         parent.addWidget(card)
+
+    def _on_dispenser_voltage(self, millivolts):
+        self._dispenser_fire_voltage = millivolts / 1000.0
+        self._settings.setValue(
+            "dispenser/fire_voltage_v", self._dispenser_fire_voltage
+        )
+        self._debounced_log(
+            "dispenser_voltage",
+            "setpoint",
+            lambda: {
+                "name": "dispenser_voltage_v",
+                "value": self._dispenser_fire_voltage,
+            },
+        )
+        self._push_dispenser_fire_parameters()
+
+    def _on_dispenser_current(self, milliamps):
+        self._dispenser_fire_current = milliamps / 1000.0
+        self._settings.setValue(
+            "dispenser/fire_current_a", self._dispenser_fire_current
+        )
+        self._debounced_log(
+            "dispenser_current",
+            "setpoint",
+            lambda: {
+                "name": "dispenser_current_a",
+                "value": self._dispenser_fire_current,
+            },
+        )
+        self._push_dispenser_fire_parameters()
+
+    def _push_dispenser_fire_parameters(self):
+        worker = getattr(self, "dispenser_worker", None)
+        if worker is not None:
+            worker.set_fire_parameters(
+                self._dispenser_fire_current,
+                self._dispenser_fire_seconds,
+                self._dispenser_fire_voltage,
+            )
 
     def _add_repump_card(self, parent):
         card = CollapsibleCard("Repump", collapsed=True)
         self.repump_card = card
         layout = card.content_layout
 
-        self.vtune_readback = add_readout_row(layout, "V_tune:", "--")
-        self._tip(
-            "Actual DAC Click output voltage read back from the Linien\n"
-            "server (each write takes ~0.3 s).",
-            self.vtune_readback,
-            help_cursor=True,
-        )
+        # No V_tune readout row: the slider's own value box below shows it,
+        # and it adopts the hardware value on connect.
         self.vtune_freq_readback = add_readout_row(layout, "VCO Freq:", "--")
         self._tip(
             "Repump VCO output frequency: 0-5 V V_tune spans\n"
@@ -2360,6 +2418,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             cooldown_until=self._dispenser_cooldown_until,
             fire_seconds=self._dispenser_fire_seconds,
             dispense_current_a=self._dispenser_fire_current,
+            dispense_voltage_v=self._dispenser_fire_voltage,
         )
         self.dispenser_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(self.dispenser_usb_status, status)
@@ -2618,35 +2677,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._settings.setValue(
             "dispenser/fire_seconds", self._dispenser_fire_seconds
         )
-        worker = getattr(self, "dispenser_worker", None)
-        if worker is not None:
-            worker.set_fire_parameters(
-                self._dispenser_fire_current, self._dispenser_fire_seconds
-            )
+        # Keep the current slider showing what the override set, without
+        # bouncing back through _on_dispenser_current.
+        self.dispenser_current_slider.blockSignals(True)
+        self.dispenser_current_slider.setValue(
+            int(round(self._dispenser_fire_current * 1000))
+        )
+        self.dispenser_current_edit.setText(
+            f"{self._dispenser_fire_current:.3f} A"
+        )
+        self.dispenser_current_slider.blockSignals(False)
+        self._push_dispenser_fire_parameters()
         self._event_log.log(
             "dispenser_override",
             current_a=self._dispenser_fire_current,
             seconds=self._dispenser_fire_seconds,
         )
-        self._update_dispenser_setpoint_text()
         if self._dispenser_phase == "idle":
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
-            )
-
-    def _update_dispenser_setpoint_text(self):
-        current_a = self._dispenser_fire_current
-        seconds = self._dispenser_fire_seconds
-        is_default = (
-            abs(current_a - DispenserWorker.DISPENSE_CURRENT_A) < 0.005
-            and abs(seconds - DispenserWorker.FIRE_SECONDS) < 0.5
-        )
-        text = f"{current_a:.2f} A CC / {seconds:.0f} s fire"
-        if is_default:
-            self._set_colored_text(self.dispenser_setpoint_label, text, "#ababab")
-        else:
-            self._set_colored_text(
-                self.dispenser_setpoint_label, text + "  (OVERRIDE)", "#b9924f"
             )
 
     def _on_mot_coil_voltage(self, value):
@@ -2747,28 +2796,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
-            self._set_colored_text(
-                self.dispenser_fire_label,
-                f"FIRING — {remaining:.0f} s left",
-                "#b9924f",
-            )
             self._set_chip("disp", "DISP FIRING", "#b9924f")
         elif phase == "cooldown":
             minutes, seconds = divmod(int(round(remaining)), 60)
             self.dispenser_fire_btn.setEnabled(False)
             self.dispenser_fire_btn.setText(f"Cooldown {minutes:d}:{seconds:02d}")
-            self._set_colored_text(
-                self.dispenser_fire_label,
-                f"Cooldown {minutes:d}:{seconds:02d}",
-                "#c4c4c4",
-            )
             self._set_chip("disp", f"DISP {minutes:d}:{seconds:02d}", "#c4c4c4")
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
                 f"Fire Dispenser ({self._dispenser_fire_seconds:.0f} s)"
             )
-            self._set_colored_text(self.dispenser_fire_label, "Idle", "#ababab")
             self._set_chip("disp", "DISP IDLE", "#ababab")
 
     def _update_dispenser_progress(self, phase, remaining):
@@ -2808,14 +2846,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._settings.setValue("dispenser/total_fires", fires)
         self._settings.setValue("dispenser/total_fire_s", total_s)
-        self._update_dispenser_history_label()
-
-    def _update_dispenser_history_label(self):
-        fires = self._int_setting("dispenser/total_fires", 0)
-        total_s = self._float_setting("dispenser/total_fire_s", 0.0)
-        self.dispenser_history_label.setText(
-            f"{fires} / {total_s:.0f} s total"
-        )
 
     @staticmethod
     def _set_colored_text(label, text, color):
@@ -2840,7 +2870,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_voltage(volts)
 
     def _on_vtune_readback(self, volts):
-        self.vtune_readback.setText(f"{volts:.3f} V")
         self.vtune_freq_readback.setText(f"{vtune_to_vco_mhz(volts):.1f} MHz")
         if (
             self._last_logged_vtune is None

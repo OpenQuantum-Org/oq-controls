@@ -364,12 +364,12 @@ class DispenserWorker(RidenDPSWorker):
     while the app is connected.
 
     The dispense operating point is not adjustable through the normal
-    supply API (set_voltage/set_current are inert), to protect the
-    dispenser and the pump. The only sanctioned way to change it is
-    set_fire_parameters(), which the UI gates behind an explicit
-    confirmation dialog. The dispenser is a near-short (<~0.1 V at
-    7.5 A), so the supply runs current-limited (CC); the voltage setpoint
-    is only headroom and is never reached.
+    supply API (set_voltage/set_current are inert), so a stray call cannot
+    move it. The only way in is set_fire_parameters(), which the UI drives
+    from the dispenser card's voltage/current sliders and from the
+    Override dialog. The dispenser is a near-short (<~0.1 V at 7.5 A), so
+    the supply runs current-limited (CC); the voltage setpoint is only
+    headroom and is never reached.
 
     The auto-off runs in this worker thread, so it only holds while the
     app is running and the serial link is alive.
@@ -396,6 +396,7 @@ class DispenserWorker(RidenDPSWorker):
         cooldown_until=0.0,
         fire_seconds=None,
         dispense_current_a=None,
+        dispense_voltage_v=None,
         **kwargs,
     ):
         kwargs.setdefault("model", "DPS5020")
@@ -403,6 +404,9 @@ class DispenserWorker(RidenDPSWorker):
         self.fire_seconds = self._clamp_seconds(fire_seconds or self.FIRE_SECONDS)
         self.dispense_current_a = self._clamp_current(
             dispense_current_a or self.DISPENSE_CURRENT_A
+        )
+        self.dispense_voltage_v = self._clamp_voltage(
+            dispense_voltage_v or self.DISPENSE_VOLTAGE_V
         )
         remaining = max(0.0, float(cooldown_until or 0.0) - time.time())
         self._phase = "cooldown" if remaining > 0 else "idle"
@@ -412,6 +416,9 @@ class DispenserWorker(RidenDPSWorker):
 
     def _clamp_current(self, amps):
         return max(0.01, min(float(amps), self.max_current))
+
+    def _clamp_voltage(self, volts):
+        return max(0.0, min(float(volts), self.max_voltage))
 
     def _clamp_seconds(self, seconds):
         return max(self.MIN_FIRE_SECONDS, float(seconds))
@@ -438,14 +445,20 @@ class DispenserWorker(RidenDPSWorker):
     def set_current(self, amps: float):
         """Ignored: the dispenser operating point is fixed."""
 
-    def set_fire_parameters(self, current_a: float, seconds: float):
-        """Override the dispense current and fire duration.
+    def set_fire_parameters(
+        self, current_a: float, seconds: float, voltage_v: float = None
+    ):
+        """Override the dispense current, fire duration and voltage limit.
 
-        The UI confirms with the user before calling this. Takes effect
-        from the next fire (mid-fire, the new current is also enforced on
-        the next poll; the running fire keeps its original end time).
+        Takes effect from the next fire (mid-fire, the new setpoints are
+        also enforced on the next poll; the running fire keeps its
+        original end time). ``voltage_v`` is headroom only -- the
+        dispenser is a near-short, so the supply runs current-limited and
+        this setpoint is never reached.
         """
-        self._queue(("params", (float(current_a), float(seconds))))
+        self._queue(
+            ("params", (float(current_a), float(seconds), voltage_v))
+        )
 
     # --- worker-thread internals ---
 
@@ -455,9 +468,11 @@ class DispenserWorker(RidenDPSWorker):
         elif kind == "abort":
             self._end_fire(aborted=True)
         elif kind == "params":
-            current_a, seconds = value
+            current_a, seconds, voltage_v = value
             self.dispense_current_a = self._clamp_current(current_a)
             self.fire_seconds = self._clamp_seconds(seconds)
+            if voltage_v is not None:
+                self.dispense_voltage_v = self._clamp_voltage(voltage_v)
         elif kind == "output":
             # Should not happen (set_output is rerouted), but keep the
             # cooldown authoritative for any direct queued output command.
@@ -479,7 +494,7 @@ class DispenserWorker(RidenDPSWorker):
             return
         # Program the operating point before every enable so a front-panel
         # change can never carry into a fire.
-        super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
+        super()._apply("voltage", self.dispense_voltage_v)
         super()._apply("current", self.dispense_current_a)
         super()._apply("output", True)
         self._phase = "firing"
@@ -528,8 +543,8 @@ class DispenserWorker(RidenDPSWorker):
         self._emit_fire_state()
 
     def _enforce_setpoints(self, state):
-        if abs(state.get("v_set", 0.0) - self.DISPENSE_VOLTAGE_V) > 0.005:
-            super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
+        if abs(state.get("v_set", 0.0) - self.dispense_voltage_v) > 0.005:
+            super()._apply("voltage", self.dispense_voltage_v)
         if abs(state.get("i_set", 0.0) - self.dispense_current_a) > 0.005:
             super()._apply("current", self.dispense_current_a)
 

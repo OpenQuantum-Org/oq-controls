@@ -156,8 +156,6 @@ try:
         "dispenser_status",
         "repump_gpio_status",
         "repump_gpio_bank_combo",
-        "dispenser_voltage_slider",
-        "dispenser_current_slider",
         "master_state_label",
     ):
         assert not hasattr(window, gone), gone
@@ -395,15 +393,15 @@ try:
         assert fm.horizontalAdvance(window.coil_usb_status.text()) <= 84
         assert window.coil_usb_status.toolTip() == status  # detail on hover
 
-    # Fire history counter accumulates from fire summaries.
+    # Fire history still accumulates in settings (no longer displayed).
     window._on_dispenser_fire_summary(
         {"elapsed_s": 12.0, "planned_s": 30.0, "current_a": 7.5, "aborted": True}
     )
-    assert window.dispenser_history_label.text() == "1 / 12 s total"
     window._on_dispenser_fire_summary(
         {"elapsed_s": 30.0, "planned_s": 30.0, "current_a": 7.5, "aborted": False}
     )
-    assert window.dispenser_history_label.text() == "2 / 42 s total"
+    assert window._int_setting("dispenser/total_fires", 0) == 2
+    assert window._float_setting("dispenser/total_fire_s", 0.0) == 42.0
 
     # Exercise the V_tune readback slider sync and the VCO frequency
     # display.
@@ -475,16 +473,15 @@ try:
     dlg._fill_defaults()
     assert dlg.values() == (7.5, 30.0)
 
-    assert "7.50 A CC / 30 s fire" in window.dispenser_setpoint_label.text()
-    assert "OVERRIDE" not in window.dispenser_setpoint_label.text()
+    # An override drives the current slider, which is now the setpoint
+    # display as well as the control.
+    assert window.dispenser_current_slider.value() == 7500
     window._apply_dispenser_override(10.0, 45.0)
-    assert (
-        "10.00 A CC / 45 s fire  (OVERRIDE)"
-        == window.dispenser_setpoint_label.text()
-    )
+    assert window.dispenser_current_slider.value() == 10000
+    assert window.dispenser_current_edit.text() == "10.000 A"
     assert window.dispenser_fire_btn.text() == "Fire Dispenser (45 s)"
-    window._apply_dispenser_override(7.5, 30.0)  # defaults, marker clears
-    assert "OVERRIDE" not in window.dispenser_setpoint_label.text()
+    window._apply_dispenser_override(7.5, 30.0)
+    assert window.dispenser_current_slider.value() == 7500
 
     # Log pane mirrored the events, and the header shows the last one.
     assert "dispenser_override" in window.log_view.toPlainText()
@@ -720,9 +717,7 @@ try:
     assert w2.sweep_speed_combo.currentIndex() == 4
     assert w2._dispenser_fire_current == 9.0
     assert w2._dispenser_fire_seconds == 20.0
-    assert (
-        "9.00 A CC / 20 s fire  (OVERRIDE)" == w2.dispenser_setpoint_label.text()
-    )
+    assert w2.dispenser_current_slider.value() == 9000
     assert w2.dispenser_fire_btn.text() == "Fire Dispenser (20 s)"
     assert not w2.usb_card.content.isVisibleTo(w2.usb_card)  # collapsed again
     w2.close()
