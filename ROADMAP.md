@@ -49,13 +49,21 @@ excepthook on both `sys` and `threading`, and 90-day retention. Transactions
 are logged in the workers, where the duration and outcome are known.
 `tests/test_logging.py` covers it.
 
-## [x] 4. Linien threading fix
+## [-] 4. Linien threading fix — done, then reverted
 
-Done 2026-08-14, and it grew to cover `LaserSetpointWorker`, which had the
-same bug against a serial port. Both now use `RidenDPSWorker`'s mutex +
-pending-queue pattern; reads return via signals; lock and unlock arm a
-deadline the loop checks instead of blocking (`lock_laser` used to freeze the
-GUI for up to 30 s). `tests/test_workers.py` covers it.
+Implemented 2026-08-14 and reverted the same day at the bench. The queue was
+correct (the race and a 30 s GUI freeze on locking were both real), but in use
+it made the app feel worse: setpoints landed a poll late and device writes
+shared the acquisition connection, so the plot stuttered on every control.
+Tuning it — waking the loop on queue, one `to_plot` fetch per poll, debounced
+setpoints — did not change the verdict.
+
+`LinienWorker` and `LaserSetpointWorker` are back to direct GUI-thread calls.
+The logging, the shutdown flags and the unit fixes survived the revert.
+
+*If revisited:* the honest fix is not a queue in front of one connection, it is
+a second connection or a server-side batch call, so writes stop competing with
+acquisition. That is a bigger job than it looked.
 
 ## [x] 5. Safe shutdown
 

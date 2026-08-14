@@ -55,11 +55,20 @@ reads 10 kΩ at 25 °C. Do not change the default until confirmed.
    the dispenser's auto-off lives in its worker thread, so killing it mid-fire
    leaves the output on.
 
-All seven hold as of 2026-08-14. Every worker uses the same mutex +
-pending-queue pattern (`RidenDPSWorker._queue`) — copy it, don't invent one:
-public setters enqueue and return, the run loop does the I/O, reads come back
-as signals, and long waits arm a deadline the loop checks rather than blocking.
-No `print`s remain; keep it that way.
+1 and 3 are **deliberately not true** for `LinienWorker` and
+`LaserSetpointWorker`. Both were converted to the mutex + pending-queue pattern
+on 2026-08-14 and **reverted the same day** — the queue was correct but made the
+UI feel worse (setpoints landing a poll late, writes sharing the acquisition
+connection), and the operator's judgement is the gate that matters. They call
+RPyC and serial from GUI slots again, `get_pid`/`get_filters` block, and
+`lock_laser` blocks the GUI for up to 30 s. Known and accepted; don't re-fix it
+without being asked.
+
+The DPS, DAC Click and GPIO workers *do* use the queue pattern
+(`RidenDPSWorker._queue`) and should keep it.
+
+4 holds: no `print`s remain anywhere. Faults go to `EventLog`; `LinienWorker._log`
+is the shim for what used to be printed.
 
 ## State ownership
 

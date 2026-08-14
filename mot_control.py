@@ -994,10 +994,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._log_debounce = {}
         self._push_debounce = {}
         self._last_logged_vtune = None
-        # Last PID the worker reported. Reads are asynchronous now, so
-        # the modal PID dialog and the config snapshot use this rather
-        # than blocking the GUI thread on RPyC.
-        self._linien_pid = None
         self._event_log.install_excepthook()
         self._event_log.session_start(
             rp_host=rp_host,
@@ -1047,8 +1043,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget.fault.connect(
             lambda msg: self._log_fault("linien", msg)
         )
-        self.linien_widget.pid_read.connect(self._on_pid_read)
-        self.linien_widget.filters_read.connect(self._on_filters_read)
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -2526,9 +2520,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.laser_worker.connection_status.connect(
             lambda status: self._log_connection("laser", status)
         )
-        self.laser_worker.fault.connect(
-            lambda msg: self._log_fault("laser", msg)
-        )
         self.laser_worker.start()
 
     def _start_dps_workers(self):
@@ -2646,12 +2637,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "setpoint",
             lambda: {"name": "mod_freq_khz", "value": self.mod_freq_slider.value()},
         )
-        self._debounced_push("mod_freq", self._push_mod_freq)
-
-    def _push_mod_freq(self):
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_frequency(self.mod_freq_slider.value())
+            worker.set_modulation_frequency(value)
 
     def _on_mod_phase(self, value):
         self.mod_phase_edit.setText(f"{value}\N{DEGREE SIGN}")
@@ -2661,12 +2649,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "setpoint",
             lambda: {"name": "mod_phase_deg", "value": self.mod_phase_slider.value()},
         )
-        self._debounced_push("mod_phase", self._push_mod_phase)
-
-    def _push_mod_phase(self):
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_phase(self.mod_phase_slider.value())
+            worker.set_modulation_phase(value)
 
     def _on_mod_strength(self, value):
         self.mod_strength_edit.setText(f"{value / 1000.0:.3f} Vpp")
@@ -2679,16 +2664,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "value": self.mod_strength_slider.value(),
             },
         )
-        self._debounced_push("mod_strength", self._push_mod_strength)
-
-    def _push_mod_strength(self):
         # With modulation off the device stays at zero regardless; the
         # slider only records what to restore when it is switched on.
         if not self.mod_enable_btn.isChecked():
             return
         worker = self._get_lock_worker()
         if worker is not None:
-            worker.set_modulation_amplitude(self.mod_strength_slider.value())
+            worker.set_modulation_amplitude(value)
 
     def _on_sweep_speed(self, combo_index):
         self._settings.setValue("linien/sweep_speed_index", combo_index)
@@ -3149,33 +3131,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_filters(self._filters_from_ui())
 
     def _sync_filters_from_device(self):
-        """Ask the worker for the device's filters; answered on a signal."""
         worker = self._get_lock_worker()
-        if worker is None:
+        filters = worker.get_filters() if worker is not None else None
+        if filters is None:
             self._log_fault("linien", "error filter read skipped: not connected")
             return
-        worker.request_filters()
-
-    def _request_pid(self):
-        worker = self._get_lock_worker()
-        if worker is not None:
-            worker.request_pid()
-
-    def _on_filters_read(self, filters):
-        if filters is None:
-            self._log_fault("linien", "error filter read returned nothing")
-            return
         self._set_filters_ui(filters)
-
-    def _on_pid_read(self, pid):
-        self._linien_pid = pid
 
     def _on_linien_connection(self, status):
         self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
-            QtCore.QTimer.singleShot(1500, self._request_pid)
             # Push the saved offset preference; the server default is True
             # and we must not silently disagree with the checkbox.
             QtCore.QTimer.singleShot(
@@ -3191,10 +3158,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _open_pid_dialog(self):
         worker = self._get_lock_worker()
-        # The dialog is modal and the GUI thread must not block on RPyC,
-        # so it opens against the last value the worker reported rather
-        # than reading the device here.
-        dialog = PidDialog(self, self._linien_pid)
+        current = worker.get_pid() if worker is not None else None
+        dialog = PidDialog(self, current)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         p_value, i_value, d_value = dialog.values()
@@ -3211,7 +3176,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _collect_config(self):
         """Snapshot of every control setting, for the JSON export."""
-        pid = self._linien_pid
+        worker = self._get_lock_worker()
+        pid = worker.get_pid() if worker is not None else None
         # Sliders read in physical units now; the config keeps hardware
         # units so files written by either build stay interchangeable.
         vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)

@@ -1,13 +1,14 @@
-"""Worker command queues: the GUI thread must never touch a device.
+"""Linien worker unit handling, against a fake client (no hardware).
 
 Run: python tests/test_workers.py
 
-Exercises the queue mechanics directly (no threads started, no hardware):
-that public setters only enqueue, that setpoints conflate while actions
-keep their order, and that stale commands are dropped on connect.
+The queue-mechanics tests that used to live here went away with the
+threading revert. What remains are the conversions that were silently
+wrong by orders of magnitude once before, and are worth a guard.
 """
 
 import os
+import pickle
 import sys
 import types
 
@@ -18,8 +19,9 @@ from pyqtgraph.Qt import QtWidgets  # noqa: E402
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
+import numpy as np  # noqa: E402
+
 from linien_worker import LinienWorker  # noqa: E402
-from mot_workers import LaserSetpointWorker  # noqa: E402
 
 
 class FakeParam:
@@ -53,350 +55,111 @@ class FakeClient:
         self.connection = types.SimpleNamespace(root=FakeRoot())
 
 
-def test_linien_setters_only_enqueue():
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-
-    worker.set_modulation_amplitude(500)
-    worker.set_sweep_speed(7)
-    # Nothing has reached the device: the run loop has not drained yet.
-    assert worker.client.connection.root.calls == []
-    assert len(worker._pending) == 2
-
-    worker._process_pending()
-    assert worker.client.parameters.modulation_amplitude.value == 2048  # 0.5*Vpp
-    assert worker.client.parameters.sweep_speed.value == 7
-    assert worker._pending == []
+def worker():
+    w = LinienWorker(host="fake.local")
+    w.client = FakeClient()
+    return w
 
 
-def test_linien_setpoints_conflate_actions_do_not():
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
+def test_modulation_amplitude_is_dac_units_not_volts():
+    """Vpp = 4095.75 units per volt peak-to-peak.
 
-    # A slider drag must become one write, not a replayed burst.
-    for mv in (100, 200, 300, 400):
-        worker.set_modulation_amplitude(mv)
-    assert len(worker._pending) == 1
-    worker._process_pending()
-    assert worker.client.parameters.modulation_amplitude.value == int(
-        round(0.4 * 4095.75)
+    Writing volts straight into this parameter made the dither ~4096x
+    too small, which is invisible on the plot and ruins the lock.
+    """
+    w = worker()
+    w.set_modulation_amplitude(500)  # 0.5 Vpp
+    assert w.client.parameters.modulation_amplitude.value == 2048
+    w.set_modulation_amplitude(1000)
+    assert w.client.parameters.modulation_amplitude.value == 4096
+
+
+def test_modulation_frequency_is_phase_accumulator_units_not_hz():
+    """MHz = 0x10000000/8 units per MHz; writing Hz was ~33.55x low."""
+    w = worker()
+    w.set_modulation_frequency(1000)  # 1 MHz
+    assert w.client.parameters.modulation_frequency.value == 0x10000000 // 8
+
+
+def test_autolock_receives_raw_counts():
+    """The autolock's peak finding works in ADC counts, not volts.
+
+    The plotted copy is divided by 8192 for display; handing that to
+    start_autolock degrades the lock badly, so the worker re-reads the
+    spectrum itself.
+    """
+    w = worker()
+    spectrum = (np.arange(2048) % 97).astype(np.int16)
+    w.client.parameters.to_plot.value = pickle.dumps(
+        {"error_signal_1": spectrum}
+    )
+    w._wait_for_lock = lambda *a, **k: True  # do not sit out the real wait
+    w.lock_laser(100, 200, 2048)
+
+    sent = next(
+        a for n, a in w.client.connection.root.calls if n == "start_autolock"
+    )
+    raw = pickle.loads(sent[2])
+    assert raw.dtype == np.int16
+    assert raw.max() > 1  # not the /8192 display copy
+
+
+def test_lock_uses_the_simple_autolock_preference():
+    """SIMPLE has to be set through the *preference*.
+
+    The server builds its algorithm selector from
+    autolock_mode_preference and assigns autolock_mode from it, so
+    writing autolock_mode directly is overwritten.
+    """
+    from linien_common.common import AutolockMode
+
+    w = worker()
+    w.client.parameters.to_plot.value = pickle.dumps(
+        {"error_signal_1": np.zeros(2048, dtype=np.int16)}
+    )
+    w._wait_for_lock = lambda *a, **k: True
+    w.lock_laser(100, 200, 2048)
+    assert (
+        w.client.parameters.autolock_mode_preference.value
+        == AutolockMode.SIMPLE
     )
 
-    # Actions keep their ordering: two lock requests are two requests.
-    worker.lock_laser(10, 20, 2048)
-    worker.lock_laser(30, 40, 2048)
-    assert [k for k, _ in worker._pending] == ["lock", "lock"]
+
+def test_stop_can_leave_the_lock_engaged():
+    """The shutdown checklist's "leave it locked" has to reach here."""
+    w = worker()
+    w.unlock_on_stop = False
+    w.stop()
+    assert "start_sweep" not in [n for n, _ in w.client.connection.root.calls]
+
+    w = worker()
+    w.stop()
+    assert "start_sweep" in [n for n, _ in w.client.connection.root.calls]
 
 
-def test_linien_unknown_command_faults_without_killing_the_loop():
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-    faults = []
-    worker.fault.connect(faults.append)
+def test_faults_go_to_the_log_not_stdout():
+    """CLAUDE.md invariant 4: no fault path ends at a print."""
+    import io as _io
+    from contextlib import redirect_stdout
 
-    worker._queue("nonsense")
-    worker.set_sweep_speed(3)
-    worker._process_pending()
+    import mot_logging
 
-    assert faults and "nonsense" in faults[0]
-    # The good command still ran.
-    assert worker.client.parameters.sweep_speed.value == 3
-
-
-def test_linien_failing_command_does_not_stop_the_next():
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-    faults = []
-    worker.fault.connect(faults.append)
+    w = worker()
+    records = []
+    w.event_log = mot_logging.EventLog(".")
+    w.event_log._write = lambda kind, event, fields: records.append(
+        (kind, event, fields)
+    )
 
     def boom():
         raise RuntimeError("rpyc is down")
 
-    worker.client.connection.root.write_registers = boom
-    worker.set_sweep_speed(5)
-    worker.set_modulation_phase(90)
-    worker._process_pending()
-
-    assert len(faults) == 2, faults
-    assert "rpyc is down" in faults[0]
-
-
-def test_linien_reads_come_back_as_signals():
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-    worker.client.parameters.p.value = 300
-    worker.client.parameters.i.value = 2000
-    worker.client.parameters.d.value = 0
-
-    got = []
-    worker.pid_read.connect(got.append)
-    worker.request_pid()
-    # A read is a request, not a return value.
-    assert got == []
-    worker._process_pending()
-    assert got == [(300, 2000, 0)]
-
-    filters = []
-    worker.filters_read.connect(filters.append)
-    worker.request_filters()
-    worker._process_pending()
-    assert filters[0]["filter_1_frequency"] == 0
-    assert set(filters[0]) == {
-        "automatic", "filter_1_enabled", "filter_1_type",
-        "filter_1_frequency", "filter_2_enabled", "filter_2_type",
-        "filter_2_frequency",
-    }
-
-
-def test_linien_lock_arms_a_deadline_instead_of_blocking():
-    """A 30 s lock wait used to run on the GUI thread and freeze it."""
-    import pickle
-
-    import numpy as np
-
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-    spectrum = np.zeros(2048, dtype=np.int16)
-    worker.client.parameters.to_plot.value = pickle.dumps(
-        {"error_signal_1": spectrum}
-    )
-
-    worker.lock_laser(100, 200, 2048)
-    worker._process_pending()
-
-    assert worker._await_lock is not None
-    want, deadline = worker._await_lock
-    assert want is True
-    calls = [name for name, _ in worker.client.connection.root.calls]
-    assert "start_autolock" in calls
-
-    # The spectrum handed to the autolock is raw counts, not the /8192
-    # display copy -- volts degrade the peak finding badly.
-    args = next(a for n, a in worker.client.connection.root.calls
-                if n == "start_autolock")
-    assert pickle.loads(args[2]).dtype == np.int16
-
-
-def test_linien_stale_commands_dropped():
-    worker = LinienWorker(host="fake.local")
-    worker.set_modulation_amplitude(900)
-    worker.lock_laser(1, 2, 3)
-    # What _connect() does before announcing itself: a lock aimed at a
-    # spectrum from the previous session must not run against this one.
-    worker._pop_pending()
-    assert worker._pending == []
-
-
-def _run_worker(worker, fake, seconds, states=None, faults=None, on_tick=None):
-    """Drive the real run loop against a fake client for a moment."""
-    import time
-
-    def fake_connect():
-        worker.client = fake
-        return True
-
-    worker._connect = fake_connect
-    worker.start()
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        app.processEvents()
-        time.sleep(0.02)
-        if on_tick is not None:
-            on_tick()
-    worker.running = False
-    worker.wait(3000)
-
-
-def _sweeping(n=8):
-    import pickle
-    return pickle.dumps({"error_signal_1": [0] * n, "monitor_signal": [0] * n})
-
-
-def _locked(n=8):
-    import pickle
-    return pickle.dumps({"error_signal": [0] * n, "control_signal": [0] * n})
-
-
-def test_run_loop_tracks_lock_state():
-    """The loop, not just the helpers -- this path had no coverage.
-
-    linien names the signal "error_signal" only while locked and
-    "error_signal_1" while sweeping (linien_server/acquisition.py), which
-    is what the lock indicator reads.
-    """
-    worker = LinienWorker(host="fake.local")
-    fake = FakeClient()
-    fake.parameters.to_plot.value = _sweeping()
-    fake.parameters.lock.value = 0
-
-    states, frames = [], []
-    worker.lock_state.connect(states.append)
-    worker.new_data.connect(frames.append)
-
-    flipped = []
-
-    def flip():
-        if not flipped and states == [False]:
-            fake.parameters.to_plot.value = _locked()
-            fake.parameters.lock.value = 1
-            flipped.append(True)
-
-    _run_worker(worker, fake, 1.5, on_tick=flip)
-    assert frames, "the loop never emitted a frame"
-    assert states == [False, True], states
-
-
-def test_run_loop_reports_a_failed_autolock_instead_of_timing_out():
-    """linien sets autolock_failed when it gives up looking for the line.
-
-    Without reading it, a failed lock is a silent 30 s wait and then a
-    generic message -- indistinguishable from the button doing nothing.
-    """
-    worker = LinienWorker(host="fake.local")
-    fake = FakeClient()
-    fake.parameters.to_plot.value = _sweeping(2048)
-    fake.parameters.lock.value = 0
-    fake.parameters.autolock_failed.value = False
-
-    faults = []
-    worker.fault.connect(faults.append)
-    worker.lock_laser(100, 200, 2048)
-
-    def fail_it():
-        if worker._await_lock is not None:
-            fake.parameters.autolock_failed.value = True
-
-    _run_worker(worker, fake, 2.0, on_tick=fail_it)
-    assert any("could not find" in f for f in faults), faults
-    # Well inside the 30 s timeout, and the flag is cleared for next time.
-    assert worker._await_lock is None
-    assert not fake.parameters.autolock_failed.value
-
-
-def test_queued_command_wakes_the_idle_loop():
-    """A control must not wait out the poll period before acting.
-
-    Without the wake condition a command queued just after a poll sits
-    idle for the rest of POLL_MS, which is what made the app feel laggy
-    once writes moved off the GUI thread. Timed against _idle directly
-    rather than through the running loop: waiting on a live loop lands
-    at a random point in its period and passes half the time by luck.
-    """
-    import threading
-    import time
-
-    worker = LinienWorker(host="fake.local")
-
-    # Nothing queued: _idle waits out the full period.
-    t0 = time.perf_counter()
-    worker._idle()
-    idle_ms = (time.perf_counter() - t0) * 1000
-    assert idle_ms >= worker.POLL_MS * 0.8, idle_ms
-
-    # A command arriving mid-wait cuts it short.
-    threading.Timer(0.02, lambda: worker.set_sweep_speed(9)).start()
-    t0 = time.perf_counter()
-    worker._idle()
-    woken_ms = (time.perf_counter() - t0) * 1000
-    assert woken_ms < worker.POLL_MS * 0.5, woken_ms
-    assert worker._pending, "the command was lost"
-
-    # Already-queued work does not wait at all.
-    t0 = time.perf_counter()
-    worker._idle()
-    assert (time.perf_counter() - t0) * 1000 < 20
-
-
-def test_to_plot_is_fetched_once_per_poll():
-    """to_plot is the loop's dominant cost -- do not pay it twice.
-
-    Acquisition unpickles a 2048-point array over RPyC; the lock check
-    used to fetch and unpickle it all over again.
-    """
-    worker = LinienWorker(host="fake.local")
-    fake = FakeClient()
-    reads = []
-
-    class CountingParam:
-        def __init__(self, value):
-            self._value = value
-
-        @property
-        def value(self):
-            reads.append(1)
-            return self._value
-
-        @value.setter
-        def value(self, v):
-            self._value = v
-
-    fake.parameters._params["to_plot"] = CountingParam(_sweeping())
-    fake.parameters.lock.value = 0
-
-    worker.client = fake
-    worker._acquire_once()
-    before = len(reads)
-    worker._read_locked()
-    worker._read_locked()
-    assert len(reads) == before, "lock check re-fetched to_plot"
-
-
-def test_lock_state_needs_two_agreeing_reads():
-    """One disagreeing poll must not flicker the Lock/Unlock buttons.
-
-    The signal name in to_plot and the lock parameter disagree for a poll
-    or so while an autolock engages, and the UI answers a change by
-    showing and hiding buttons.
-    """
-    worker = LinienWorker(host="fake.local")
-    worker.client = FakeClient()
-    seen = []
-    worker.lock_state.connect(seen.append)
-
-    # First reading reports at once -- there is no prior state to flap from.
-    worker._locked_now = False
-    worker._emit_lock_state_best_effort()
-    assert seen == [False]
-
-    # A single contrary reading is held back...
-    worker._locked_now = True
-    worker._emit_lock_state_best_effort()
-    assert seen == [False], "unconfirmed reading reached the UI"
-    # ...and reverting cleanly leaves nothing behind.
-    worker._locked_now = False
-    worker._emit_lock_state_best_effort()
-    assert seen == [False]
-
-    # Two in a row is a real transition.
-    worker._locked_now = True
-    worker._emit_lock_state_best_effort()
-    worker._emit_lock_state_best_effort()
-    assert seen == [False, True], seen
-
-    # A confirmed lock/unlock still reports immediately.
-    worker._emit_lock_state_best_effort(force_value=False)
-    assert seen == [False, True, False]
-
-
-def test_laser_setters_only_enqueue_and_conflate():
-    worker = LaserSetpointWorker(port=None)
-    writes = []
-    worker._write = writes.append
-    worker._ser = types.SimpleNamespace(is_open=True)
-
-    for ma in (70, 75, 80):
-        worker.set_current(ma)
-    worker.laser_on(True)
-    worker.laser_on(False)
-    # Serial I/O has not happened on this (the GUI) thread.
-    assert writes == []
-    # Setpoints conflate; enable/disable keeps order, so a rapid off/on
-    # cannot collapse into just one of them.
-    assert [k for k, _ in worker._pending] == ["current", "enable", "enable"]
-
-    for kind, value in worker._pop_pending():
-        worker._apply(kind, value)
-    assert writes == ["ilaser 80.0", "lason 1", "lason 0"]
+    w.client.connection.root.write_registers = boom
+    captured = _io.StringIO()
+    with redirect_stdout(captured):
+        w.set_modulation_phase(90)
+    assert captured.getvalue() == "", captured.getvalue()
+    assert records and records[0][0] == "fault", records
 
 
 def main():
