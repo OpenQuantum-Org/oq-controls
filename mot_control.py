@@ -60,6 +60,36 @@ PSD_RUN_COLORS = (
 # Riden DPS protection register (reg 7) values.
 DPS_PROTECTION = {1: "OVP", 2: "OCP", 3: "OPP"}
 
+def apply_dark_titlebar(widget):
+    """Ask Windows to draw this window's title bar in dark mode.
+
+    The frame is drawn by the OS, not by Qt, so a light title bar sits
+    above the dark UI until DWM is told otherwise. No-op everywhere else
+    and on Windows builds that predate the attribute.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        handle = int(widget.winId())
+        enabled = ctypes.c_int(1)
+        # 20 is DWMWA_USE_IMMERSIVE_DARK_MODE on Windows 10 2004+; 19 is
+        # the pre-2004 spelling. Try the current one, then the old one.
+        for attribute in (20, 19):
+            result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(handle),
+                ctypes.c_int(attribute),
+                ctypes.byref(enabled),
+                ctypes.sizeof(enabled),
+            )
+            if result == 0:
+                return True
+    except Exception:
+        pass  # cosmetic only: never let this stop the app starting
+    return False
+
+
 def resource_path(*parts):
     """Absolute path to a bundled resource (fonts, etc.).
 
@@ -868,6 +898,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("OpenQuantum Controls")
         self.resize(1540, 960)
+        apply_dark_titlebar(self)
 
         central = QtWidgets.QWidget()
         central.setObjectName("central")
@@ -3587,6 +3618,9 @@ def main():
         vtune_max=args.vtune_max,
     )
     window.show()
+    # Re-apply after show: on some Qt/Windows combinations the frame is
+    # painted light once before DWM picks the attribute up.
+    apply_dark_titlebar(window)
     sys.exit(app.exec())
 
 
