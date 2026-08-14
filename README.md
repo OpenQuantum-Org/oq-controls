@@ -82,14 +82,10 @@ app is connected, which also gets the same fire time limit. The auto-off
 runs in the app — if the app or the serial link dies mid-fire, the supply
 does not shut off on its own.
 
-The `Override...` button next to the fire button opens a dialog for changing
-the fire current (up to the DPS5020's 20 A) and duration (1–120 s); a
-confirmation window restates the requested values and the safe default
-before anything is applied. Overridden values are shown in the Setpoint row
-with an orange `(OVERRIDE)` marker, persist across restarts, and can be
-restored via the dialog's Defaults button (the safe operating point remains
-`DispenserWorker.DISPENSE_CURRENT_A` / `FIRE_SECONDS` in `mot_workers.py`).
-The override is locked out while a fire is running.
+Fire current and duration are set on the Dispenser card's own sliders;
+the Fire button fires for that long at that current, and clicking again
+during a fire aborts it. The safe operating point lives in
+`DispenserWorker.DISPENSE_CURRENT_A` / `FIRE_SECONDS` (`mot_workers.py`).
 
 ## UI behavior
 
@@ -116,9 +112,9 @@ The override is locked out while a fire is running.
 
 ## Lock PID and config snapshots
 
-`Set PID...` (Linien Lock card) opens a dialog pre-filled with the
-current P/I/D gains read from the Red Pitaya (each 0–8191) and writes
-them back on Apply; changes are logged as `pid_set` events.
+`Set PID...` (Error Signal & Lock card) opens a dialog pre-filled with the
+current P/I/D gains (each 0–8191) and writes them back on Apply;
+changes are logged as `pid_set` events.
 
 `Save Config As...` (Config card) exports a timestamped JSON snapshot of
 every control setting — connections, lock parameters, live PID, error
@@ -133,7 +129,7 @@ Loads and saves are logged.
 
 ## Error signal filters
 
-The collapsible "Error Signal Filters" card exposes Linien's two IIR
+The Error Signal & Lock card exposes Linien's two IIR
 stages on the demodulated error signal (channel A): an Automatic mode
 (two low-passes at half the modulation frequency — Linien's default) or
 manual control of each stage's enable, low/high-pass type, and corner
@@ -144,7 +140,7 @@ gain to preserve the propagation delay.
 
 ## Lock PSD measurement
 
-`Measure Lock PSD...` (Linien Lock card) switches the plot area to a
+`Measure Lock PSD...` (Error Signal & Lock card) switches the plot area to a
 log-log error-signal noise view and the sidebar to the PSD panel:
 algorithm (LPSD or Welch), max decimation (deeper reaches lower Fourier
 frequencies but takes ~16x longer per +4; default 18), `Run PSD
@@ -169,21 +165,23 @@ device connections and faults, lock/unlock transitions, laser on/off and
 init, setpoint changes (debounced after a slider drag settles), V_tune/VCO
 frequency changes, supply readbacks (every 10 s, plus immediately on any
 output or protection change), DPS protection trips, and every dispenser
-fire (start, end with actual elapsed time and abort flag, cooldown,
-override). The dispenser card also shows a cumulative `Fires:` counter
+fire (start, end with actual elapsed time and abort flag, cooldown).
+The dispenser card also shows a cumulative `Fires:` counter
 (count and total seconds, persisted) for tracking dispenser life.
 
 ## DPS protection status
 
 The supplies' protection register is decoded on every poll; if a supply
-trips OVP/OCP/OPP, the readback row turns red (e.g.
-`OCP TRIPPED — 0.00 V / 0.00 A`) and a `protection_trip` event is logged.
+trips OVP/OCP/OPP the header chip reads `COILS TRIP` and a
+`protection_trip` fault is logged with which protection fired.
 
-## Thermistor temperature
+## Laser temperature
 
-The Koheron thermistor setpoint (ohms) is also shown as an estimated
-temperature (`Temp (est):`), using the Steinhart–Hart coefficients for the
-laser head's 10 k NTC carried over from the old qMOT-os rig.
+The Laser card's Temperature slider is in °C (16–38), which is what you
+actually set. It is converted to a thermistor resistance with the
+Steinhart–Hart coefficients for the laser head's 10 k NTC before being sent
+to the Koheron — the ohms are an implementation detail of how the
+controller holds the setpoint, not a number worth showing.
 
 ## Fonts
 
@@ -192,7 +190,7 @@ are **Space Grotesk**. Both are bundled in `fonts/` under the SIL Open
 Font License, so the app looks the same on a fresh clone. Any extra font
 files dropped into `fonts/` are also registered but stay local (licensed
 files such as `PP*`/`Aptos*` are gitignored). A missing family falls
-back to Helvetica Neue with a console warning. Note: fonts are
+back to Helvetica Neue, logged as a `font` fault. Note: fonts are
 registered from bytes (`addApplicationFontFromData`) because the
 path-based Qt API silently fails on Qt 6.11/macOS. The smoke test
 asserts the *resolved* families on real widgets, so a regression here
@@ -200,8 +198,9 @@ fails CI rather than just looking wrong.
 
 ## Packaged builds (Mac / Linux / Windows)
 
-GitHub Actions (`.github/workflows/build.yml`) runs the test suite on
-every push, and builds standalone executables for all three platforms on
+GitHub Actions (`.github/workflows/build.yml`) runs all five suites on
+every push to `main` or `v1` and on every pull request, and builds
+standalone executables for all three platforms on
 a version tag (`v*`) or a manual workflow run. Artifacts:
 `OpenQuantumControls-macos.zip` (an .app bundle),
 `OpenQuantumControls-linux.tar.gz`, and
@@ -229,23 +228,30 @@ Notes:
 
 ## Tests
 
-`tests/` contains three hardware-free suites, run directly:
+`tests/` contains five hardware-free suites, run directly. CI runs all
+five on every push to `main` or `v1` and on every pull request.
 
 ```bash
-.venv/bin/python tests/test_dispenser.py   # fire/cooldown/override state machine
+.venv/bin/python tests/test_logging.py     # event log: correlation, faults, retention
+.venv/bin/python tests/test_workers.py     # linien unit conversions, stall detection
+.venv/bin/python tests/test_dispenser.py   # fire/cooldown state machine
 .venv/bin/python tests/test_probe.py       # USB port identification logic
 .venv/bin/python tests/smoke_ui.py         # offscreen UI build + behavior checks
 ```
 
-The smoke test uses isolated settings/log files and refreshes
-`mot-ui-smoke.png`.
+A green run says the UI *constructed*, not that it looks right — read the
+screenshot the smoke test writes.
+
+The smoke test uses isolated settings/log files and writes
+`mot-ui-smoke.png`, which is gitignored: it is a build output, read once
+right after the run that made it.
 
 ## Parameter persistence
 
 All control parameters are saved to `QSettings` as they change and restored
 on the next launch: Linien modulation frequency/phase/strength and sweep
 speed, laser current and thermistor setpoints, MOT coil voltage/current,
-the V_tune slider, and the dispenser override. Restoring a parameter only
+the V_tune slider, and the dispenser fire settings. Restoring a parameter only
 sets the UI — nothing is pushed to hardware until you move a control (and
 the laser sliders re-adopt the Koheron's actual setpoints on connect, as
 the V_tune slider does from the DAC).
