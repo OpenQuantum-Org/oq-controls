@@ -1,9 +1,8 @@
 """
 Worker threads for rubidium MOT control hardware.
 
-These workers follow the same QThread pattern used by the EIT control app:
-the GUI thread calls small set_* methods, and the worker owns blocking
-hardware I/O.
+One QThread per device: the GUI thread calls small set_* methods, and the
+worker owns the blocking hardware I/O.
 
 Hardware handled here:
 - Riden DPS5005 (MOT coils) and DPS5020 (dispenser) over Modbus RTU

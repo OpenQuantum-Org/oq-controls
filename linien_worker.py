@@ -18,6 +18,9 @@ from linien_common.common import MHz, AutolockMode, Vpp
 from mot_logging import NULL_LOG
 from mot_workers import drain_parameter_queue
 
+# See linien_widget: rp-F0C6AD was a different Red Pitaya.
+DEFAULT_RP_HOST = "rp-f0f2b5.local"
+
 
 class LinienWorker(QtCore.QThread):
     new_data = QtCore.pyqtSignal(object)
@@ -35,7 +38,7 @@ class LinienWorker(QtCore.QThread):
     # is not.
     STALL_AFTER_S = 5.0
 
-    def __init__(self, host="rp-F0C6AD.local", username="root", password="root",
+    def __init__(self, host=DEFAULT_RP_HOST, username="root", password="root",
                  event_log=None, unlock_on_stop=True):
         super().__init__()
         # Faults go to the log, never to stdout (CLAUDE.md invariant 4).
@@ -477,10 +480,19 @@ class LinienWorker(QtCore.QThread):
             return
         try:
             if force_value is None:
-                t = pickle.loads(self.client.parameters.to_plot.value)
-                has_locked_key = "error_signal" in t
-                param_lock = bool(self.client.parameters.lock.value)
-                locked = has_locked_key or param_lock
+                # Reuse the dict the acquisition pass just unpickled.
+                # to_plot is a 2048-point array over RPyC and the only
+                # uncached read in the loop; fetching it again here made
+                # every poll carry it twice. linien names the signal
+                # "error_signal" only while locked and "error_signal_1"
+                # while sweeping (linien_server/acquisition.py:163-177).
+                t = self.to_plot
+                if not t:
+                    t = pickle.loads(self.client.parameters.to_plot.value)
+                locked = (
+                    "error_signal" in t
+                    or bool(self.client.parameters.lock.value)
+                )
             else:
                 locked = bool(force_value)
 

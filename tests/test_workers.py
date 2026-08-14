@@ -241,6 +241,54 @@ def test_the_parameter_queue_is_drained():
     drain_parameter_queue(Broken())  # must not raise
 
 
+def test_to_plot_is_fetched_once_per_poll():
+    """to_plot is the only uncached read in the loop -- do not pay twice.
+
+    It is a pickled 2048-point array over RPyC. Acquisition unpickles it
+    and the lock check used to fetch the whole thing again, doubling the
+    wire traffic of every poll. Everything else the loop reads is a
+    cached parameter and costs no round trip.
+    """
+    reads = []
+
+    class CountingParam:
+        def __init__(self, value):
+            self._value = value
+
+        @property
+        def value(self):
+            reads.append(1)
+            return self._value
+
+    w = worker()
+    w.client.parameters._params["to_plot"] = CountingParam(
+        pickle.dumps({"error_signal_1": [0] * 8, "monitor_signal": [0] * 8})
+    )
+    w.client.parameters.lock.value = 0
+
+    # Stand in for one acquisition pass: unpickle once, stash it.
+    w.to_plot = pickle.loads(w.client.parameters.to_plot.value)
+    before = len(reads)
+    w._emit_lock_state_best_effort()
+    w._emit_lock_state_best_effort()
+    assert len(reads) == before, "the lock check re-fetched to_plot"
+
+    # With nothing stashed it still works, by reading for itself.
+    w.to_plot = {}
+    w._emit_lock_state_best_effort()
+    assert len(reads) > before
+
+
+def test_default_host_is_this_experiments_red_pitaya():
+    """rp-F0C6AD was a different device; an empty host field used to
+    connect to it silently."""
+    from linien_worker import DEFAULT_RP_HOST
+    from linien_widget import DEFAULT_RP_HOST as WIDGET_HOST
+
+    assert DEFAULT_RP_HOST == "rp-f0f2b5.local"
+    assert WIDGET_HOST == DEFAULT_RP_HOST  # two definitions, one device
+
+
 def test_stop_can_leave_the_lock_engaged():
     """The shutdown checklist's "leave it locked" has to reach here."""
     w = worker()

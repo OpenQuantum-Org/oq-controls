@@ -112,8 +112,10 @@ MCP4921 patch applied on the device). Client pinned to 2.1.0 to match.
   a strategy — it turns a loud failure silent.
 - Never point two clients at one RP.
 - `rp-f0f2b4.local` is a different RP, one character off.
-- Fallback host in `linien_widget.py:42` and `linien_worker.py:25` is
-  `rp-F0C6AD.local` — wrong device. Known TODO.
+- The fallback host is `DEFAULT_RP_HOST` in `linien_widget.py` and
+  `linien_worker.py`, now `rp-f0f2b5.local`. It used to be `rp-F0C6AD.local`, a
+  different device: an empty host field quietly connected to someone else's
+  hardware. Keep the two definitions in step.
 
 **Reference source: `C:\Users\kostu\Desktop\linien` (v2.1.0, commit 6caa6a9).**
 Match it when changing linien-facing behaviour — PSD mode is a direct port of
@@ -138,9 +140,11 @@ is silently wrong by 3-4 orders of magnitude.
 
 ## Code layout
 
-`mot_control.py` is 3,452 lines; `OpenQuantumControlsWindow` is ~2,500 of them
-across 129 methods. Don't add to it — extract the panel you're changing into
-its own module. Colours live in `styles.py`.
+`mot_control.py` is ~3,800 lines; `OpenQuantumControlsWindow` is ~2,800 of them
+across 110 methods. A split was considered on 2026-08-14 and **declined**: the
+file is navigable by card (`_add_*_card`), it works, and the churn buys nothing
+functional. Revisit only if panels keep being added. Colours live in
+`styles.py`.
 
 ## Method
 

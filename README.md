@@ -2,8 +2,8 @@
 
 This is the control UI for the rubidium MOT hardware. The repo is
 self-contained: the Linien spectroscopy widget/worker, the shared styles,
-and the Koheron setpoint worker are vendored here (originally from the
-eit-controls project), plus the MOT supplies and repump tune/gate controls.
+and the Koheron setpoint worker are vendored here, plus the MOT supplies
+and repump tune/gate controls.
 
 ## Hardware covered
 

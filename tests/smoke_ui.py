@@ -126,7 +126,7 @@ def resolved_family(widget):
 
 
 # --- Standalone vendoring: the Linien widget/worker, styles, and the
-# Koheron worker come from THIS repo, not a sibling eit-controls checkout.
+# Koheron worker come from THIS repo, not a sibling checkout.
 import linien_widget  # noqa: E402
 import linien_worker  # noqa: E402
 import styles  # noqa: E402

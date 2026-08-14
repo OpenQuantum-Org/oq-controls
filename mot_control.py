@@ -22,7 +22,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 # Self-contained: the Linien widget/worker, styles, and the Koheron
-# worker are vendored in this repo (originally from eit-controls).
+# worker are vendored in this repo.
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -34,9 +34,9 @@ from styles import (
     UI_FONT_PX,
     NEON_BLUE,
     add_readout_row,
-    add_slider_row as _eit_add_slider_row,
+    add_slider_row as _base_add_slider_row,
     make_card,
-    make_section_title as _eit_make_section_title,
+    make_section_title as _base_make_section_title,
     plot_label_style,
     style_plot_axes,
 )
@@ -178,11 +178,9 @@ def load_app_fonts():
 _FONT_PROBLEMS = []
 
 
-# The original eit-controls text colors were too dim for lab use; the
-# vendored linien_widget/styles copies were brightened with this mapping
-# when they were imported into this repo. The dict is kept as the
-# guard list: the smoke test asserts no widget stylesheet ever carries
-# one of the dim colors again.
+# These colors were too dim to read in the lab and were brightened with
+# this mapping. The dict is kept as the guard list: the smoke test
+# asserts no widget stylesheet ever carries one of the dim colors again.
 CONTRAST_REMAP = {
     "#6a6a80": "#969696",  # tiny/de-emphasized labels
     "#7a7a90": "#ababab",  # section-title class
@@ -223,7 +221,7 @@ def build_app_stylesheet():
 
 
 def make_section_title(text):
-    label = _eit_make_section_title(text)
+    label = _base_make_section_title(text)
     label.setStyleSheet(
         label.styleSheet() + f' font-family: "{TITLE_FONT_FAMILY}";'
     )
@@ -231,7 +229,7 @@ def make_section_title(text):
 
 
 def add_slider_row(*args, **kwargs):
-    slider, edit = _eit_add_slider_row(*args, **kwargs)
+    slider, edit = _base_add_slider_row(*args, **kwargs)
     # The shared helper sizes its value edit for the old monospace font;
     # the proportional body font is wider, so give values like "1000 mV"
     # room (the smoke test checks every edit fits its extreme values).
@@ -2363,14 +2361,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         label.setFixedWidth(120)
         return label
 
-    @staticmethod
-    def _tiny_label(text):
-        label = QtWidgets.QLabel(text)
-        label.setStyleSheet(
-            "color: #969696; font-size: 13px; font-weight: 600; border: none;"
-        )
-        return label
-
     # ------------------------------------------------------------------
     # Startup / reconnect
     # ------------------------------------------------------------------
@@ -2499,12 +2489,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _start_serial_workers(self):
         self._start_laser_worker()
         self._start_dps_workers()
-
-    def _apply_device_values(self, values):
-        self.rp_edit.setText(values["rp"])
-        self.laser_edit.setText(values["laser"])
-        self.mot_coil_port_edit.setText(values["mot_coil"])
-        self.dispenser_port_edit.setText(values["dispenser"])
 
     def _save_connection_settings(self):
         self._settings.setValue("rp/host", self.rp_edit.text().strip())
@@ -3615,15 +3599,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "color: #b56a6a; font-size: 13px; font-weight: 700; border: none;"
         )
         self._log_fault(device, message)
-
-    @staticmethod
-    def _set_lock_label(label, locked):
-        text = "Locked" if locked else "Unlocked"
-        color = "#6f9e7c" if locked else "#b56a6a"
-        label.setText(text)
-        label.setStyleSheet(
-            f"color: {color}; font-size: 13px; font-weight: 700; border: none;"
-        )
 
     # ------------------------------------------------------------------
     # Shutdown

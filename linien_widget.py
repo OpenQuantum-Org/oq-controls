@@ -13,6 +13,11 @@ from superqt import QRangeSlider
 
 from styles import UI_FONT_PX, plot_label_style, style_plot_axes
 
+# This experiment's Red Pitaya. The old fallback was rp-F0C6AD,
+# a different device -- an empty host field quietly connected to
+# someone else's hardware.
+DEFAULT_RP_HOST = "rp-f0f2b5.local"
+
 
 class _ShortLineSample(pg.ItemSample):
     """Legend swatch: a short line instead of pyqtgraph's wide default."""
@@ -62,7 +67,7 @@ class LinienWidget(QtWidgets.QWidget):
                  parent=None):
         super().__init__(parent)
         self._event_log = event_log
-        self._linien_host = linien_host or "rp-F0C6AD.local"
+        self._linien_host = linien_host or DEFAULT_RP_HOST
         self._show_lock_buttons = show_lock_buttons
         self._show_stop_button = show_stop_button
         self._sweep_min_v, self._sweep_max_v = sweep_range
@@ -258,19 +263,6 @@ class LinienWidget(QtWidgets.QWidget):
         if self._v_to_freq:
             return v * self._v_to_freq * 1000.0
         return v
-
-    def _display_to_v(self, x):
-        """Convert a display x coordinate back to voltage (approx for v_to_mhz)."""
-        if self._v_to_mhz is not None:
-            # Numerical inverse: linear search between sweep bounds
-            import numpy as _np
-            vs = _np.linspace(self._sweep_min_v, self._sweep_max_v, 1000)
-            fs = _np.array([float(self._v_to_mhz(v)) for v in vs])
-            idx = int(_np.argmin(_np.abs(fs - x)))
-            return float(vs[idx])
-        if self._v_to_freq:
-            return x / (self._v_to_freq * 1000.0)
-        return x
 
     def _v_range_to_display(self, v_min, v_max):
         """Convert a voltage range to display range (sorted)."""
