@@ -136,12 +136,14 @@ def test_stalled_server_is_detected_from_its_heartbeat():
 
     w = worker()
     w.STALL_AFTER_S = 0.15  # do not sit out the real 5 s
-    w.client.parameters.ping.value = 7
+    w.client.parameters.ping.value = 6
 
     seen = []
     w.server_stalled.connect(seen.append)
 
-    w._check_server_alive()          # first sighting, starts the clock
+    w._check_server_alive()          # first sighting: nothing proven yet
+    w.client.parameters.ping.value = 7
+    w._check_server_alive()          # it ticked -- now the heartbeat counts
     assert seen == []
     time.sleep(0.2)
     w._check_server_alive()          # still 7 -> stalled
@@ -185,6 +187,58 @@ def test_a_failed_ping_read_is_not_a_stall():
     w._check_server_alive()
     w._check_server_alive()
     assert seen == [], seen
+
+
+
+def test_a_heartbeat_that_never_ticks_is_not_reported_as_a_stall():
+    """A still `ping` is only evidence once it has been seen to move.
+
+    linien caches parameters client-side, so `ping.value` sits at its
+    connect-time value until the change queue is drained. That looked
+    exactly like a wedged server on a perfectly healthy one, and
+    accusing a healthy server is the worse error.
+    """
+    import time
+
+    w = worker()
+    w.STALL_AFTER_S = 0.05
+    w.client.parameters.ping.value = 42  # frozen cache, never advances
+    seen = []
+    w.server_stalled.connect(seen.append)
+    for _ in range(5):
+        w._check_server_alive()
+        time.sleep(0.03)
+    assert seen == [], seen
+
+
+def test_the_parameter_queue_is_drained():
+    """Nothing drained it, so it grew on the server for every client.
+
+    Every client gets a listener registered for every cacheable
+    parameter (linien_server/parameters.py:617) and each change is
+    appended to a per-client list that only
+    exposed_get_changed_parameters_queue empties.
+    """
+    from mot_workers import drain_parameter_queue
+
+    calls = []
+
+    class Params:
+        def check_for_changed_parameters(self):
+            calls.append(1)
+
+    class Client:
+        parameters = Params()
+
+    drain_parameter_queue(Client())
+    assert calls == [1]
+
+    class Broken:
+        @property
+        def parameters(self):
+            raise RuntimeError("connection reset")
+
+    drain_parameter_queue(Broken())  # must not raise
 
 
 def test_stop_can_leave_the_lock_engaged():

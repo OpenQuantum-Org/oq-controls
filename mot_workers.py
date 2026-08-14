@@ -62,6 +62,30 @@ def _list_candidate_ports():
     return [p.device for p in list_ports.comports() if _is_likely_usb_serial(p)]
 
 
+def drain_parameter_queue(client):
+    """Drain this client's parameter-change queue on the server.
+
+    Every client that connects gets a listener registered for every
+    cacheable parameter (linien_server/parameters.py:617), and each change
+    is appended to a per-client list. ``get_changed_parameters_queue`` --
+    which this call issues -- is the only thing that empties it. Nothing
+    in this app called it, so those lists grew for the lifetime of every
+    connection, on a 512 MB Red Pitaya, across four connections.
+
+    It is also what refreshes the local cache: with ``use_parameter_cache``
+    on, ``parameters.x.value`` returns a value frozen at connect time
+    until this runs. That made the server's ``ping`` heartbeat look dead
+    on a perfectly healthy server.
+
+    The call is asynchronous inside linien (it issues, then collects on
+    the next call), so this is cheap enough to run every poll.
+    """
+    try:
+        client.parameters.check_for_changed_parameters()
+    except Exception:
+        pass  # a failed drain is a connection problem, reported elsewhere
+
+
 # ---------------------------------------------------------------------------
 # Riden DPS serial / Modbus RTU support (DPS5005, DPS5020)
 # ---------------------------------------------------------------------------
@@ -803,6 +827,7 @@ class DacClickWorker(QtCore.QThread):
         ticks = 0
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 pending = self._take_pending_voltage()
                 if pending is not None:
                     with self.event_log.command(
@@ -907,6 +932,7 @@ class PsdWorker(QtCore.QThread):
         self.running = True
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 self._process_pending()
                 self._poll()
             except Exception as e:
@@ -1103,6 +1129,7 @@ class LinienGpioWorker(QtCore.QThread):
         self.running = True
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 pending = self._take_pending_state()
                 if pending is not None:
                     with self.event_log.command(

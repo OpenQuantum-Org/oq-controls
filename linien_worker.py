@@ -16,6 +16,7 @@ from time import monotonic, sleep
 from linien_common.common import MHz, AutolockMode, Vpp
 
 from mot_logging import NULL_LOG
+from mot_workers import drain_parameter_queue
 
 
 class LinienWorker(QtCore.QThread):
@@ -55,6 +56,7 @@ class LinienWorker(QtCore.QThread):
         self._last_ui_lock_state = None  # debounce UI lock-state updates
         self._last_ping = None
         self._ping_changed_at = None
+        self._ping_ever_moved = False
         self._stalled = False
 
     def _check_server_alive(self):
@@ -65,6 +67,8 @@ class LinienWorker(QtCore.QThread):
             return  # a read that fails is a connection problem, not a stall
         now = monotonic()
         if ping != self._last_ping:
+            if self._last_ping is not None:
+                self._ping_ever_moved = True
             self._last_ping = ping
             self._ping_changed_at = now
             if self._stalled:
@@ -76,6 +80,12 @@ class LinienWorker(QtCore.QThread):
             self._ping_changed_at = now
             return
         quiet_s = now - self._ping_changed_at
+        if not self._ping_ever_moved:
+            # Never seen it tick, so a still value proves nothing about
+            # the server -- it is far more likely we are not reading it
+            # properly. Accusing a healthy server of being wedged is the
+            # worse error, so say nothing until the heartbeat is trusted.
+            return
         if not self._stalled and quiet_s >= self.STALL_AFTER_S:
             self._stalled = True
             self.event_log.fault(
@@ -129,6 +139,9 @@ class LinienWorker(QtCore.QThread):
         # Main acquisition loop
         self.running = True
         while self.running:
+            # Refreshes the local parameter cache and, just as
+            # importantly, empties this client's queue on the server.
+            drain_parameter_queue(self.client)
             try:
                 fetched = pickle.loads(self.client.parameters.to_plot.value)
                 self.to_plot = fetched if isinstance(fetched, dict) else {}
