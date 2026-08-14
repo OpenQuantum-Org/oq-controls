@@ -254,11 +254,23 @@ try:
             needed = fm.horizontalAdvance(text) + 20  # padding + border
             assert needed <= edit.width(), (text, needed, edit.width())
 
-    # Laser slider ranges: current 50-100 mA, temperature 16-42 C in
-    # 0.1 C steps, which is what 5000-15000 ohm used to span.
+    # Laser slider ranges: current 50-100 mA, temperature 16-38 C in
+    # 0.1 C steps.
     assert window.current_slider.minimum() == 50
     assert window.current_slider.maximum() == 100
-    assert window.therm_slider.maximum() == 420
+    assert window.therm_slider.minimum() == 160
+    assert window.therm_slider.maximum() == 380
+
+    # Supply setpoints read to 0.1 V / 0.1 A, and the slider steps match
+    # that so a single arrow-key press moves the displayed number.
+    for edit, slider in (
+        (window.mot_coil_voltage_edit, window.mot_coil_voltage_slider),
+        (window.mot_coil_current_edit, window.mot_coil_current_slider),
+        (window.dispenser_voltage_edit, window.dispenser_voltage_slider),
+        (window.dispenser_current_edit, window.dispenser_current_slider),
+    ):
+        assert edit.decimals == 1, edit.text()
+        assert slider.singleStep() == 100, (edit.text(), slider.singleStep())
 
     # Typed entry: the value boxes now drive the sliders (with clamping,
     # suffix tolerance, and garbage rejection).
@@ -582,7 +594,7 @@ try:
     assert window.dispenser_current_slider.value() == 7500
     window._set_dispenser_fire(10.0, 45.0)
     assert window.dispenser_current_slider.value() == 10000
-    assert window.dispenser_current_edit.text() == "10.000 A"
+    assert window.dispenser_current_edit.text() == "10.0 A"
     assert window.dispenser_fire_btn.text() == "Fire Dispenser (45 s)"
     window._set_dispenser_fire(7.5, 30.0)
     assert window.dispenser_current_slider.value() == 7500

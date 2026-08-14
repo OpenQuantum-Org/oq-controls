@@ -1838,12 +1838,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Temperature, not resistance: the thermistor value is an
         # implementation detail of how the Koheron holds the setpoint.
         # Stored and sent in ohms; the slider is in 0.1 C steps over the
-        # range the old 5000-15000 ohm limits covered (about 16-42 C).
+        # 16-38 C the cell is ever operated across.
         self.therm_slider, self.therm_edit = add_slider_row(
             layout,
             "Temperature:",
             160,
-            420,
+            380,
             int(round(
                 thermistor_ohms_to_c(
                     self._int_setting("laser/thermistor_ohm", 10000, 5000, 15000)
@@ -1888,10 +1888,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             0,
             50000,
             self._int_setting("coil/voltage_mv", 5000, 0, 50000),
-            single=10,
+            # Stored in mV, shown to 0.1 V, so the step matches the display.
+            single=100,
             page=1000,
             suffix=" V",
-            decimals=3,
+            decimals=1,
             scale=1000.0,
         )
         self.mot_coil_voltage_slider.valueChanged.connect(self._on_mot_coil_voltage)
@@ -1907,10 +1908,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             0,
             5000,
             self._int_setting("coil/current_ma", 1000, 0, 5000),
-            single=10,
-            page=100,
+            single=100,
+            page=1000,
             suffix=" A",
-            decimals=3,
+            decimals=1,
             scale=1000.0,
         )
         self.mot_coil_current_slider.valueChanged.connect(self._on_mot_coil_current)
@@ -1943,10 +1944,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 0,
                 50000,
                 int(round(self._dispenser_fire_voltage * 1000)),
-                single=10,
+                single=100,
                 page=1000,
                 suffix=" V",
-                decimals=3,
+                decimals=1,
                 scale=1000.0,
             )
         )
@@ -1967,10 +1968,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 0,
                 20000,
                 int(round(self._dispenser_fire_current * 1000)),
-                single=10,
-                page=100,
+                single=100,
+                page=1000,
                 suffix=" A",
-                decimals=3,
+                decimals=1,
                 scale=1000.0,
             )
         )
@@ -2036,7 +2037,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_dispenser_voltage(self, millivolts):
         self._dispenser_fire_voltage = millivolts / 1000.0
         self.dispenser_voltage_edit.setText(
-            f"{self._dispenser_fire_voltage:.3f} V"
+            f"{self._dispenser_fire_voltage:.1f} V"
         )
         self._settings.setValue(
             "dispenser/fire_voltage_v", self._dispenser_fire_voltage
@@ -2054,7 +2055,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_dispenser_current(self, milliamps):
         self._dispenser_fire_current = milliamps / 1000.0
         self.dispenser_current_edit.setText(
-            f"{self._dispenser_fire_current:.3f} A"
+            f"{self._dispenser_fire_current:.1f} A"
         )
         self._settings.setValue(
             "dispenser/fire_current_a", self._dispenser_fire_current
@@ -2633,7 +2634,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             int(round(self._dispenser_fire_current * 1000))
         )
         self.dispenser_current_edit.setText(
-            f"{self._dispenser_fire_current:.3f} A"
+            f"{self._dispenser_fire_current:.1f} A"
         )
         self.dispenser_current_slider.blockSignals(False)
         self.dispenser_time_slider.blockSignals(True)
@@ -2657,7 +2658,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_mot_coil_voltage(self, value):
         volts = value / 1000.0
-        self.mot_coil_voltage_edit.setText(f"{volts:.3f} V")
+        self.mot_coil_voltage_edit.setText(f"{volts:.1f} V")
         self._settings.setValue("coil/voltage_mv", value)
         self._debounced_log(
             "coil_voltage",
@@ -2673,7 +2674,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_mot_coil_current(self, value):
         amps = value / 1000.0
-        self.mot_coil_current_edit.setText(f"{amps:.3f} A")
+        self.mot_coil_current_edit.setText(f"{amps:.1f} A")
         self._settings.setValue("coil/current_ma", value)
         self._debounced_log(
             "coil_current",
