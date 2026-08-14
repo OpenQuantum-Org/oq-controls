@@ -396,12 +396,8 @@ class PsdWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        root.addLayout(self._build_settings_row())
-        root.addWidget(self._build_run_controls())
-        root.addSpacing(2)
-
-        # Plot and curve list side by side: the table is a legend for the
-        # plot, so it belongs next to it rather than stacked underneath.
+        # Plot on the left, everything you operate on the right: settings,
+        # the run button, then the trace list they produce.
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(8)
 
@@ -410,6 +406,9 @@ class PsdWindow(QtWidgets.QMainWindow):
 
         side = QtWidgets.QVBoxLayout()
         side.setSpacing(6)
+        side.addLayout(self._build_settings_row())
+        side.addWidget(self._build_run_controls())
+        side.addSpacing(4)
         side.addWidget(make_section_title("Traces"))
         self.table = PsdTableWidget()
         self.table.show_or_hide_curve.connect(self.plot.show_or_hide_curve)
@@ -427,10 +426,14 @@ class PsdWindow(QtWidgets.QMainWindow):
     # --- construction helpers ---
 
     def _build_settings_row(self):
+        """Two labelled rows, stacked: the side column is too narrow to
+        put both settings on one line."""
+        column = QtWidgets.QVBoxLayout()
+        column.setSpacing(6)
+
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(8)
-
-        row.addWidget(self._label("Maximum measurement time:"))
+        row.addWidget(self._label("Max measurement time:", width=170))
         self.time_combo = QtWidgets.QComboBox()
         self.time_combo.setStyleSheet(COMBO_STYLE)
         for text in MEASUREMENT_TIMES:
@@ -445,8 +448,11 @@ class PsdWindow(QtWidgets.QMainWindow):
         )
         self.time_combo.currentIndexChanged.connect(self._on_time_changed)
         row.addWidget(self.time_combo, stretch=1)
+        column.addLayout(row)
 
-        row.addWidget(self._label("Algorithm:"))
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._label("Algorithm:", width=170))
         self.algo_combo = QtWidgets.QComboBox()
         self.algo_combo.setStyleSheet(COMBO_STYLE)
         for text, _value in PSD_ALGORITHMS:
@@ -463,7 +469,8 @@ class PsdWindow(QtWidgets.QMainWindow):
         )
         self.algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
         row.addWidget(self.algo_combo, stretch=1)
-        return row
+        column.addLayout(row)
+        return column
 
     def _build_run_controls(self):
         """Start when idle, status + Stop when running.
@@ -527,8 +534,10 @@ class PsdWindow(QtWidgets.QMainWindow):
         return column
 
     @staticmethod
-    def _label(text):
+    def _label(text, width=None):
         label = QtWidgets.QLabel(text)
+        if width is not None:
+            label.setFixedWidth(width)
         label.setStyleSheet(
             f"color: #ababab; font-size: {UI_FONT_PX}px; font-weight: 600;"
             " border: none;"
