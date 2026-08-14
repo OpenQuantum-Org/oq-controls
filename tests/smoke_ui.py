@@ -459,6 +459,23 @@ try:
     assert window.psd_fitness_label.text() == "1.110e-02"
     assert len(window._psd_runs) == 1
     assert len(window._psd_runs["run1"]["curves"]) == 2
+    # Decimation stages are stitched, not overlaid: the high-decimation
+    # stage supplies the low frequencies, and the next stage picks up
+    # above it with the join point prepended. Counts are shown as volts.
+    # The plot is in log mode, so getData returns log10 of the values.
+    lo_x, lo_y = window._psd_runs["run1"]["curves"][0].getData()
+    hi_x, _hi_y = window._psd_runs["run1"]["curves"][1].getData()
+    assert np.allclose(10**lo_x, [1e1, 5e1])  # decimation 5 first
+    assert np.isclose(10**lo_y[0], 1e-2 / mot_control.PSD_VOLTS_TO_COUNTS)
+    assert hi_x[0] == lo_x[-1]  # segments join, no gap and no overlap
+    assert (np.diff(np.concatenate([lo_x, hi_x[1:]])) > 0).all()
+
+    # A late partial payload must not overwrite a completed curve.
+    stale = dict(payload, psds={1: (np.array([1e2]), np.array([9e9]))},
+                 complete=False)
+    window._on_psd_data(stale)
+    assert len(window._psd_runs["run1"]["curves"]) == 2  # unchanged
+
     window._on_psd_data(dict(payload, uuid="run2", p=200))  # second run overlays
     assert len(window._psd_runs) == 2
     window._on_psd_status(

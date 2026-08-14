@@ -51,6 +51,10 @@ from mot_workers import (
     SerialProbeWorker,
 )
 
+# linien reports PSD amplitudes in ADC counts; its GUI divides by this to
+# plot volts (linien_gui.ui.plot_widget.VOLTS_TO_COUNTS_FACTOR).
+PSD_VOLTS_TO_COUNTS = 8192
+
 # Colors cycled through for successive PSD measurement runs.
 PSD_RUN_COLORS = (
     "#c4c4c4", "#b9924f", "#6f9e7c", "#9a7ba8",
@@ -915,6 +919,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
         self._psd_runs = {}
+        self._psd_complete_uids = set()
         self._psd_color_index = 0
         self._psd_prev_status = {}
         self._filters_syncing = False
@@ -1323,7 +1328,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.psd_plot.showGrid(x=True, y=True, alpha=0.25)
         self.psd_plot.setLabel("bottom", "Frequency (Hz)")
         self.psd_plot.setLabel(
-            "left", "Error signal ASD (counts/\N{SQUARE ROOT}Hz)"
+            "left", "Error signal ASD (V/\N{SQUARE ROOT}Hz)"
         )
         self._psd_legend = self.psd_plot.addLegend()
         self._tip(
@@ -3452,7 +3457,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
 
     def _plot_psd_run(self, payload):
+        """Plot one acquisition, stitching the decimation stages.
+
+        Ported from linien-gui's PSDPlotWidget.plot_curve. Each decimation
+        covers a different band and they overlap, so the stages are walked
+        from the highest decimation (lowest frequencies) upward and each
+        one contributes only the points above what has already been drawn;
+        the previous segment's last point is prepended so the joins are
+        continuous. Plotting every stage in full instead draws the
+        overlapping bands on top of each other.
+        """
         uuid = payload.get("uuid") or "run"
+        if uuid in self._psd_complete_uids:
+            # On a slow link a partial payload can arrive after the
+            # complete one; never overwrite a finished curve with it.
+            return
+        if payload.get("complete"):
+            self._psd_complete_uids.add(uuid)
+
         run = self._psd_runs.get(uuid)
         if run is None:
             color = PSD_RUN_COLORS[self._psd_color_index % len(PSD_RUN_COLORS)]
@@ -3464,20 +3486,36 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         run["curves"] = []
 
         pen = pg.mkPen(run["color"], width=2)
+        # Highest decimation first: that stage holds the lowest frequencies.
+        psds_sorted = sorted(payload.get("psds", {}).items(), key=lambda kv: -kv[0])
+        highest_f = 0.0
+        highest_psd = None
         first = True
-        for decimation in sorted(payload.get("psds", {})):
-            freqs, asd = payload["psds"][decimation]
+        for _decimation, (freqs, asd) in psds_sorted:
             freqs = np.asarray(freqs, dtype=float)
             asd = np.asarray(asd, dtype=float)
-            mask = (freqs > 0) & (asd > 0)  # log-log plot
-            if not mask.any():
+            keep = freqs > highest_f
+            freqs, asd = freqs[keep], asd[keep]
+            if freqs.size == 0:
+                continue
+            if highest_psd is not None:
+                # Join this segment to the previous one.
+                freqs = np.concatenate(([highest_f], freqs))
+                asd = np.concatenate(([highest_psd], asd))
+            highest_f = float(freqs[-1])
+            highest_psd = float(asd[-1])
+
+            # Counts to volts, as linien plots it.
+            volts = asd / PSD_VOLTS_TO_COUNTS
+            valid = (freqs > 0) & (volts > 0)  # log-log axes
+            if not valid.any():
                 continue
             name = None
             if first and not run["legend_added"]:
                 name = f"P={payload.get('p')} I={payload.get('i')}"
                 run["legend_added"] = True
             curve = self.psd_plot.plot(
-                freqs[mask], asd[mask], pen=pen, name=name
+                freqs[valid], volts[valid], pen=pen, name=name
             )
             run["curves"].append(curve)
             first = False
@@ -3487,6 +3525,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             for curve in run["curves"]:
                 self.psd_plot.removeItem(curve)
         self._psd_runs = {}
+        self._psd_complete_uids = set()
         self._psd_color_index = 0
         if self._psd_legend is not None:
             self._psd_legend.clear()
