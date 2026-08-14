@@ -403,12 +403,26 @@ try:
     assert window.vtune_freq_readback.text() == "2970.0 MHz"
     assert window.vtune_slider.value() == 3300  # later readbacks don't move it
 
-    # Repump button wording (no "Gate").
+    # Repump button wording (no "Gate"), mirrored in the card header.
     assert window.repump_gpio_btn.text() == "Repump Off"
+    assert window.chip_text("repump") == "REPUMP OFF"
     window._on_repump_gpio_state(True)
     assert window.repump_gpio_btn.text() == "Repump On"
+    assert window.chip_text("repump") == "REPUMP ON"
     window._on_repump_gpio_state(False)
     assert window.repump_gpio_btn.text() == "Repump Off"
+
+    # The repump follows the laser off -- it is meaningless without it.
+    window.laser_btn.setChecked(True)
+    window.repump_gpio_btn.setChecked(True)
+    assert window.repump_gpio_btn.isChecked()
+    window.laser_btn.setChecked(False)
+    assert not window.repump_gpio_btn.isChecked()
+    assert window.chip_text("repump") == "REPUMP OFF"
+    # ...but does not follow it back on: that stays a deliberate act.
+    window.laser_btn.setChecked(True)
+    assert not window.repump_gpio_btn.isChecked()
+    window.laser_btn.setChecked(False)
 
     # --- Lock PSD mode: view/sidebar swap, status, plotting, exit ---
     import numpy as np

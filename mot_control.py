@@ -960,6 +960,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         "usb": "usb_card",
         "coils": "coils_card",
         "disp": "dispenser_card",
+        "repump": "repump_card",
     }
     _CHIP_NEUTRAL = "#ababab"
 
@@ -1158,6 +1159,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._set_chip("usb", "DEVICES --", self._CHIP_NEUTRAL)
         self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
         self._set_chip("disp", "DISP IDLE", self._CHIP_NEUTRAL)
+        self._set_chip("repump", "REPUMP OFF", self._CHIP_NEUTRAL)
 
     def _build_spectroscopy_column(self, root):
         left = QtWidgets.QVBoxLayout()
@@ -1694,7 +1696,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.mod_enable_btn = QtWidgets.QPushButton("Modulation On")
         self.mod_enable_btn.setCheckable(True)
         self.mod_enable_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        layout.addWidget(self.mod_enable_btn)
         self._tip(
             "Turn the current dither on or off. Off drives the amplitude\n"
             "to zero and greys out the modulation controls.",
@@ -1758,6 +1759,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.mod_phase_slider,
             self.mod_phase_edit,
         )
+
+        # Built above so the slider handlers can reference it, but shown
+        # under the three rows it governs.
+        layout.addWidget(self.mod_enable_btn)
 
         self.mod_enable_btn.toggled.connect(self._on_mod_enabled)
         self.mod_enable_btn.setChecked(
@@ -2586,6 +2591,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
             worker.laser_on(checked)
+        # The repump is only meaningful with the laser running, so it
+        # follows the laser off. It does not follow the laser back on --
+        # turning it on is always a deliberate act.
+        repump_btn = getattr(self, "repump_gpio_btn", None)
+        if not checked and repump_btn is not None and repump_btn.isChecked():
+            self._event_log.log("repump_gate_auto_off", reason="laser_off")
+            repump_btn.setChecked(False)
 
     def _on_current(self, value):
         self.current_edit.setText(f"{value} mA")
@@ -2911,7 +2923,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.vtune_edit.setText(f"{volts:.3f} V")
 
     def _toggle_repump_gpio(self, checked):
-        self.repump_gpio_btn.setText("Repump On" if checked else "Repump Off")
+        self._set_repump_ui(checked)
         self._event_log.log("repump_gate", on=bool(checked))
         worker = getattr(self, "repump_gpio_worker", None)
         if worker is not None:
@@ -2920,8 +2932,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_repump_gpio_state(self, enabled):
         self.repump_gpio_btn.blockSignals(True)
         self.repump_gpio_btn.setChecked(enabled)
-        self.repump_gpio_btn.setText("Repump On" if enabled else "Repump Off")
+        self._set_repump_ui(enabled)
         self.repump_gpio_btn.blockSignals(False)
+
+    def _set_repump_ui(self, on):
+        self.repump_gpio_btn.setText("Repump On" if on else "Repump Off")
+        self._set_chip(
+            "repump",
+            "REPUMP ON" if on else "REPUMP OFF",
+            "#6f9e7c" if on else self._CHIP_NEUTRAL,
+        )
 
     # ------------------------------------------------------------------
     # Error signal filters
