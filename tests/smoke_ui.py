@@ -363,19 +363,18 @@ try:
     assert not window.dispenser_progress.isVisibleTo(window)
     assert window.chip_text("disp") == "DISP IDLE"
 
-    # Coil readback shows CC/CV only while the output is on, and DPS
-    # protection trips are surfaced in red (and on the chips).
+    # No readback rows on the supply cards: a DPS protection trip has to
+    # reach the header chip and the event log instead.
     window._on_mot_coil_readback(
         {"v_out": 0.0, "i_out": 0.0, "power": 0.0, "output_enabled": False,
          "cv_cc": 0, "protection": 2}
     )
-    assert window.mot_coil_readback.text().startswith("OCP TRIPPED")
     assert window.chip_text("coils") == "COILS TRIP"
+    assert "OCP" in window.log_view.toPlainText()
     window._on_mot_coil_readback(
         {"v_out": 5.0, "i_out": 1.0, "power": 5.0, "output_enabled": True,
          "cv_cc": 0, "protection": 0}
     )
-    assert "TRIPPED" not in window.mot_coil_readback.text()
     assert window.chip_text("coils") == "COILS 1.0 A"
 
     # USB row statuses stay compact (the 84 px column must never clip

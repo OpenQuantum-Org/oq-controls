@@ -1876,13 +1876,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.coils_card = card
         layout = card.content_layout
 
-        self.mot_coil_readback = add_readout_row(layout, "Readback:", "--")
-        self._tip(
-            "Measured coil supply output (V / A / W). Turns red if the\n"
-            "supply trips a protection (OVP/OCP/OPP).",
-            self.mot_coil_readback,
-            help_cursor=True,
-        )
         self.mot_coil_voltage_slider, self.mot_coil_voltage_edit = add_slider_row(
             layout,
             "Voltage:",
@@ -2687,10 +2680,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_current(amps)
 
     def _on_mot_coil_readback(self, state):
+        # No readback row: the header chip carries the current and the
+        # trip state, and the measurements still reach the event log.
         self._sync_output_button(
             self.mot_coil_output_btn, state, "Coils On", "Coils Off"
         )
-        self._set_readback_text(self.mot_coil_readback, state)
         if int(state.get("protection", 0) or 0):
             self._set_chip("coils", "COILS TRIP", "#b56a6a")
         elif state.get("output_enabled"):
@@ -2703,28 +2697,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # No readback row on this card -- the fire button and the header
         # chip carry the state. Protections still reach the event log.
         self._log_readback("dispenser", state)
-
-    def _set_readback_text(self, label, state, show_mode=False):
-        protection = int(state.get("protection", 0) or 0)
-        if protection:
-            # Keep this short so the row never widens the control column;
-            # power/mode are meaningless once the supply has tripped.
-            kind = DPS_PROTECTION.get(protection, f"PROT {protection}")
-            self._set_colored_text(
-                label,
-                f"{kind} TRIPPED — {state['v_out']:.2f} V / "
-                f"{state['i_out']:.2f} A",
-                "#b56a6a",
-            )
-            return
-        text = (
-            f"{state['v_out']:.2f} V / {state['i_out']:.2f} A / "
-            f"{state['power']:.2f} W"
-        )
-        if show_mode and state.get("output_enabled"):
-            text += " / CC" if state.get("cv_cc") else " / CV"
-        label.setText(text)
-        label.setStyleSheet("color: #e6e6e6; font-size: 13px; border: none;")
 
     @staticmethod
     def _sync_output_button(button, state, on_text, off_text):
