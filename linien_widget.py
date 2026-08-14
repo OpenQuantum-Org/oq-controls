@@ -317,9 +317,15 @@ class LinienWidget(QtWidgets.QWidget):
             return
         # Keep the newest spectrum for the autolock even while paused.
         self._last_error_signal = err
+        if self._plot_paused and self._touch_start is None:
+            # Paused with no drag in progress: the release that should
+            # have resumed it never arrived (the cursor left the widget,
+            # say). A frozen spectrum with no way back is worse than a
+            # trace that moves slightly under the cursor.
+            self._resume_plot()
         if self._plot_paused:
-            # Selecting a line: hold the trace still so it does not move
-            # under the cursor mid-drag (linien pauses the same way).
+            # Mid-drag: hold the trace still so the line does not move
+            # under the cursor while it is being picked.
             return
         if self._v_to_mhz is not None:
             x = self._v_to_mhz(voltages)
@@ -385,11 +391,18 @@ class LinienWidget(QtWidgets.QWidget):
     # --- Line selection, ported from linien's PlotWidget ---
 
     def start_selection(self):
-        """Enable area selection over the trace (linien: selectable 0.99)."""
+        """Enable area selection over the trace (linien: selectable 0.99).
+
+        The trace keeps running until a drag actually starts. linien
+        pauses for the whole of selection mode because it caches spectra
+        to hand to the autolock; ours re-reads the spectrum in the worker
+        and only needs the length, so holding the plot for longer than
+        the drag buys nothing -- and a click that was too short to count
+        as a selection used to leave it frozen with no way back.
+        """
         if self.selection_running:
             return
         self._enable_area_selection(selectable_width=0.99)
-        self._pause_plot()
         self.selection_state_changed.emit(True)
 
     def abort_selection(self):
@@ -472,11 +485,15 @@ class LinienWidget(QtWidgets.QWidget):
 
     def _on_selection_press(self, event):
         x = self._event_x(event)
+        # Held only for the drag, so the line does not move under the
+        # cursor while it is being picked.
+        self._pause_plot()
         self._touch_start = x
         self.overlay.setRegion((x, x))
         self.overlay.setVisible(True)
 
     def _on_selection_release(self, event):
+        self._resume_plot()  # every exit path below leaves the trace live
         if self._touch_start is None:
             return
         x = self._event_x(event)
@@ -487,12 +504,12 @@ class LinienWidget(QtWidgets.QWidget):
         self._touch_start = None
 
         # A drag under 1% of the span is a click, not a selection: this is
-        # what stops a stray click starting a lock.
+        # what stops a stray click starting a lock. Selection stays armed
+        # so the next drag counts, as it does in linien.
         if span <= 0 or abs(x - x0) / span < 0.01:
             return
 
         self._disable_area_selection()
-        self._resume_plot()
         self.selection_state_changed.emit(False)
         self._start_autolock(*sorted((x0, x)))
 

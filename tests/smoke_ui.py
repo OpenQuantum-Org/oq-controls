@@ -32,6 +32,7 @@ def _records():
             out.extend(json.loads(line) for line in f)
     return out
 
+import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -161,6 +162,17 @@ appdata = QtCore.QStandardPaths.writableLocation(
     QtCore.QStandardPaths.AppDataLocation
 )
 assert frozen_logs == os.path.join(appdata, "logs"), frozen_logs
+
+
+class _FakeMouse:
+    """Minimal stand-in for a QMouseEvent at a given data-space x."""
+
+    def __init__(self, widget, data_x):
+        point = widget.view_box.mapViewToScene(QtCore.QPointF(data_x, 0.0))
+        self._pos = widget.pg_widget.mapFromScene(point)
+
+    def pos(self):
+        return self._pos
 
 
 try:
@@ -512,7 +524,10 @@ try:
 
     lw.start_selection()
     assert lw.selection_running
-    assert lw._plot_paused  # trace held still while selecting
+    # The trace keeps running until a drag actually starts -- pausing for
+    # the whole of selection mode is what left the spectrum frozen after
+    # a click too short to count as a selection.
+    assert not lw._plot_paused
     assert not lw.lock_button.isVisibleTo(lw.lock_controls)
     assert lw.abort_button.isVisibleTo(lw.lock_controls)
     assert all(o.isVisible() for o in lw.boundary_overlays)
@@ -535,6 +550,30 @@ try:
         lw._resume_plot()
         assert not lw.overlay.isVisible()
         assert len(lw.plot.items) == baseline
+
+    # A click, or a drag too short to count: the plot must come back.
+    # This left the spectrum frozen with the lock buttons stuck in
+    # selection mode and no way out but a restart.
+    lw.start_selection()
+    lo, hi = lw.selection_boundaries
+    lw._pause_plot()
+    lw._touch_start = lo
+    lw._on_selection_release(_FakeMouse(lw, lo))  # released where it started
+    assert not lw._plot_paused, "a click left the spectrum frozen"
+    assert lw.selection_running, "selection should stay armed for a real drag"
+    lw.abort_selection()
+    assert not lw._plot_paused
+
+    # A press whose release never arrives (cursor leaves the widget) must
+    # not strand the trace either.
+    lw._pause_plot()
+    lw._touch_start = None
+    lw._update_plot({
+        "voltages": np.linspace(-1, 1, 8),
+        "error_signal": np.zeros(8),
+        "monitor_signal": np.zeros(8),
+    })
+    assert not lw._plot_paused, "orphaned pause never cleared"
 
     # Determine signal offset defaults on, matching linien's server default.
     assert window.auto_offset_check.isChecked()
