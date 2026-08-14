@@ -1776,13 +1776,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self._add_filter_section(layout)
 
-        self.lock_readout = add_readout_row(layout, "Laser:", "Unlocked")
-        self._tip(
-            "Lock state reported by Linien. Lock after selecting a region\n"
-            "on the error signal trace.",
-            self.lock_readout,
-            help_cursor=True,
-        )
+        # No lock readout row: the card header carries LOCKED/UNLOCKED.
 
         # Lock/Unlock are built by the Linien widget (they carry its lock
         # wiring) but belong here, not floating over the traces.
@@ -2566,7 +2560,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_sweep_speed(speed)
 
     def _on_lock_state(self, locked):
-        self._set_lock_label(self.lock_readout, locked)
         if locked:
             self._set_chip("lock", "LOCKED", "#6f9e7c")
         else:

@@ -13,7 +13,7 @@ from linien_client.device import Device
 import pickle
 import numpy as np
 from time import sleep
-from linien_common.common import AutolockMode
+from linien_common.common import MHz, AutolockMode, Vpp
 
 
 class LinienWorker(QtCore.QThread):
@@ -150,18 +150,31 @@ class LinienWorker(QtCore.QThread):
             print(f"! Linien stop sweep failed: {e}")
 
     def set_modulation_amplitude(self, amplitude_mV: float):
-        """Set the modulation amplitude in mV (0–1000)."""
+        """Set the modulation amplitude in mV (0-1000).
+
+        ``modulation_amplitude`` is in raw DAC units, not volts: linien's
+        own ``Vpp`` constant (= 4095.75) is units per volt peak-to-peak.
+        Writing volts here made the dither ~4096x too small.
+        """
         try:
-            # Linien expects a value in Volts (0–1 V range for the DAC)
-            self.client.parameters.modulation_amplitude.value = amplitude_mV / 1000.0
+            self.client.parameters.modulation_amplitude.value = int(
+                round(amplitude_mV / 1000.0 * Vpp)
+            )
             self.client.connection.root.write_registers()
         except Exception as e:
             print(f"! Linien mod amplitude update failed: {e}")
 
     def set_modulation_frequency(self, freq_khz: float):
-        """Set the lock-in modulation frequency in kHz."""
+        """Set the lock-in modulation frequency in kHz.
+
+        ``modulation_frequency`` is in raw phase-accumulator units, not
+        Hz: linien's ``MHz`` constant (= 0x10000000/8) is units per MHz.
+        Writing Hz here made the frequency ~33.55x too low.
+        """
         try:
-            self.client.parameters.modulation_frequency.value = int(freq_khz * 1000)
+            self.client.parameters.modulation_frequency.value = int(
+                round(freq_khz / 1000.0 * MHz)
+            )
             self.client.connection.root.write_registers()
         except Exception as e:
             print(f"! Linien mod freq update failed: {e}")
