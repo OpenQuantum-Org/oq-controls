@@ -1,299 +1,399 @@
 # OpenQuantum Controls
 
-This is the control UI for the rubidium MOT hardware. The repo is
-self-contained: the Linien spectroscopy widget/worker, the shared styles,
-and the Koheron setpoint worker are vendored here, plus the MOT supplies
-and repump tune/gate controls.
+Control UI for the rubidium MOT hardware: a Koheron laser controller, a
+Linien/Red Pitaya spectroscopy lock, two Riden DPS supplies, and the repump
+tune/gate. The repo is self-contained — the Linien spectroscopy widget and
+worker, the shared styles, and the Koheron worker are vendored here.
+
+Architectural rules live in `CLAUDE.md`; what is left to do and what was
+decided against live in `ROADMAP.md`.
 
 ## Hardware covered
 
-- One Koheron CTL200-0 laser controller for the MOT laser current, thermistor
-  setpoint, and laser on/off state
-- One Linien/Red Pitaya (STEMlab 125-14) spectroscopy lock; the error signal
-  locks this one laser
-- Repump VCO tune voltage (V_tune) through the MikroE DAC Click (MCP4921) on
-  the Red Pitaya Click Shield, socket 1 — driven via the patched
-  linien-server's `dac_click_voltage` parameter (see below). The UI shows the
-  resulting VCO output frequency (measured tuning range: 0–5 V spans
-  2800–2970 MHz, linear)
-- Repump RF gate through a Linien Red Pitaya GPIO bit — fixed at `DIO1_N`
-  (bank `n`, bit 1), **active-low** (the RF amp enable on Click Shield
-  socket 2, the empirically verified mapping)
-- MOT coil DPS5005 voltage/current/output control
-- Dispenser DPS5020 with a fixed, timed fire: **7.5 A constant-current**
-  (5 V headroom setpoint, never reached) for **30 s**, then the output is
-  forced off automatically and a **15 min cooldown** blocks re-firing (the
-  lockout persists across app restarts). The operating point is fixed in
-  code — no UI controls — to protect the dispenser and the pump
-- Optional USB camera pane that can be toggled on below the live spectroscopy
-  plot, with a no-camera fallback if no camera is present
+- **Koheron CTL200-0** laser controller: MOT laser current, temperature
+  setpoint, and laser on/off
+- **Red Pitaya STEMlab 125-14** running a patched linien-server: the
+  spectroscopy lock for that laser (see [Setup](#setup))
+- **Repump VCO tune voltage** (V_tune) through the MikroE DAC Click (MCP4921)
+  on the Red Pitaya Click Shield, socket 1, driven via the patched server's
+  `dac_click_voltage` parameter. The UI shows the resulting VCO frequency
+  (measured: 0–5 V spans 2800–2970 MHz, linear)
+- **Repump RF gate** on a Red Pitaya GPIO bit — fixed at `DIO1_N` (bank `n`,
+  bit 1), **active-low** (RF amp enable on Click Shield socket 2)
+- **MOT coil DPS5005**: voltage, current, output
+- **Dispenser DPS5020**: a timed constant-current fire with a hard cooldown
+  (see [Dispenser](#dispenser))
+- Optional USB camera pane below the spectroscopy plot
 
-## USB auto-detection at startup
+# Setup
 
-On every launch the app probes the USB serial devices before starting any
-hardware workers, using read-only identification commands only:
+## 1. Red Pitaya
 
-- Koheron CTL200: an `ilaser` query (reads the current setpoint; a numeric
-  reply identifies the device)
-- DPS supplies: a Modbus read of the model register, which distinguishes the
-  DPS5005 (coils) from the DPS5020 (dispenser)
+**The image.** Linien 2.x requires **Red Pitaya OS 2.x** on a STEMlab 125-14
+(Linien 1.x ran on OS 1.x and is unmaintained). The image this experiment runs
+is kept here:
 
-The remembered port for each device is re-verified first — so rearranged USB
-cables are detected and corrected automatically — and any device that fails
-verification is searched for across the remaining ports. Verified assignments
-are saved in `QSettings` and auto-load next time. The device configuration
-pop-up only appears if a device cannot be found; when everything verifies,
-the app starts without interruption.
+> **[Red Pitaya SD card image](https://drive.google.com/file/d/1fvGqLEU4Z0ARxMitc8ChkZGRuVNWU0dQ/view?usp=drive_link)**
 
-The "Device Connections" card is collapsible and collapsed by default; its
-header shows a summary (e.g. `3/3 verified`), and it expands automatically
-when something is missing. Per-device connection status lives on each port
-row inside this card. `Devices -> Auto Discover USB Devices` (or the card's
-Auto Discover button) re-runs the probe at any time.
+Write it to the card with Balena Etcher or the equivalent — Red Pitaya's
+[Prepare SD card](https://redpitaya.readthedocs.io/en/latest/quickStart/SDcard/SDcard.html)
+guide covers the mechanics, and stock images live at
+[downloads.redpitaya.com](https://downloads.redpitaya.com/downloads/) if you
+ever need to start from one. After a major OS change, reset the calibration to
+factory default (or recalibrate). If the card predates OS 2.x, reflash it before
+anything else.
 
-## Red Pitaya prerequisite: patched linien-server
+**The server on this RP is hand-patched and must not be reinstalled.**
+`rp-f0f2b5.local` runs linien-server **2.1.0** with an MCP4921 SPI driver added
+to `write_registers()`, which is what exposes `dac_click_voltage` and drives the
+repump VCO. `DIO3_N` is its chip select. The patch and its walkthrough live in
+the `qmot-linien-controls` repo.
 
-V_tune goes through the Linien server on the Red Pitaya, which must be patched
-to expose the `dac_click_voltage` parameter (the patch adds an MCP4921 SPI
-driver to `write_registers()`, using `DIO3_N` as chip select). The patch and
-its full walkthrough live in the `qmot-linien-controls` repo. Notes that
-matter on the client side (already handled by this app):
+Two things destroy it, both by running `pip3 uninstall linien-server -y` on the
+device:
 
-- The DAC full scale is **0–5 V**, set in hardware by the Click board's Vref;
-  the software range must match it (`--vtune-max`).
-- The linien parameter cache must be **off** for these writes
-  (`use_parameter_cache=False`) or they are silently swallowed.
-- Each DAC update costs ~0.3 s on the server (deliberate chip-select retry
-  loop), so the app only pushes the most recent slider value.
-- `DIO3_N` (bank `n`, bit 3) is reserved as the DAC chip select; the repump
-  gate is fixed on `DIO1_N` and never touches it.
+- running **linien-gui** (`linien`) against this Red Pitaya — it installs the
+  server automatically on first connect;
+- calling `install_remote_server()` from `linien_client.deploy` yourself.
 
-## Dispenser fire behavior
+Both fire automatically when the client and server versions disagree, which is
+why the client is pinned (below).
 
-The dispenser button fires the DPS5020 at the fixed operating point — the
-worker programs 7.5 A / 5.0 V before every enable, so the dispenser (a
-near-short) runs in constant-current mode — for 30 s, then the app turns the
-output off; clicking again during a fire aborts it. Either way a 15 min
-cooldown starts, shown as a countdown, and the fire button is locked out
-until it expires. The cooldown end time is saved in `QSettings`, so
-restarting the app does not reset it. The setpoints are re-enforced during a
-fire and applied to any output enabled from the DPS front panel while the
-app is connected, which also gets the same fire time limit. The auto-off
-runs in the app — if the app or the serial link dies mid-fire, the supply
-does not shut off on its own.
+**Check the device before trusting it.** SSH in (`root`/`root` — the same
+credentials the app uses):
 
-Fire current and duration are set on the Dispenser card's own sliders;
-the Fire button fires for that long at that current, and clicking again
-during a fire aborts it. The safe operating point lives in
-`DispenserWorker.DISPENSE_CURRENT_A` / `FIRE_SECONDS` (`mot_workers.py`).
+```bash
+ssh root@rp-f0f2b5.local
+python3 -c "import linien_server; print(linien_server.__version__)"   # 2.1.0
+linien-server status
+linien-server start        # if it is not running
+```
 
-## UI behavior
+`rp-f0f2b4.local` is a **different** Red Pitaya, one character away. Check the
+hostname you typed before concluding anything is broken.
 
-- **Health strip** (title row): color-coded chips for the laser lock, USB
-  verification, coil supply (with live current), and dispenser phase —
-  readable from across the lab.
-- **Typed entry**: every slider's value box is editable — type a number
-  (suffix optional), press Enter or click away, and the value is clamped
-  and applied.
+**Check the patch is present** from the lab PC — this is exactly what the app's
+V_tune worker does, and the only positive proof the patched server is the one
+answering:
+
+```python
+from linien_client.connection import LinienClient
+from linien_client.device import Device
+
+client = LinienClient(Device(host="rp-f0f2b5.local", username="root", password="root"))
+client.connect(autostart_server=False, use_parameter_cache=False)
+print(hasattr(client.parameters, "dac_click_voltage"))   # must be True
+```
+
+`False` means an unpatched server is installed: the app will run, the lock will
+work, and the repump V_tune slider will do nothing. Run this check after
+flashing a card, rather than assuming the image already carries the patch.
+
+A Red Pitaya that was just powered on is slow to answer, and its `.local`
+hostname takes a while to resolve — if the first connect fails, wait a minute or
+two and press Auto-connect again before assuming anything is wrong.
+
+## 2. Lab PC
+
+Python 3.12. Clone, make a virtualenv, install into it:
+
+```powershell
+git clone https://github.com/OpenQuantum-Org/oq-controls.git
+cd oq-controls
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+```bash
+# macOS / Linux
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Three things that bite:
+
+- **Always use the explicit `.venv\Scripts\python.exe -m pip` form.** A bare
+  `pip` hits the global interpreter and clobbers editable linien installs there.
+- **linien-client is pinned to 2.1.0** in `requirements.txt`, matching the
+  patched server — do not float it. A newer client raises
+  `InvalidServerVersionException` on connect, and the paths that respond to that
+  reinstall the server, which uninstalls the patch. A client version containing
+  `dev` skips the version check entirely; that is not a workaround, it turns a
+  loud failure into a silent one.
+- On Linux, serial access needs `sudo usermod -a -G dialout $USER` and a
+  re-login.
+
+## 3. First run
+
+```powershell
+.venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
+```
+
+Serial ports are optional — the startup probe finds and verifies them. Every
+setting is remembered in `QSettings`, so later launches need no arguments at
+all.
+
+| flag | default | purpose |
+| --- | --- | --- |
+| `--rp-host` | saved, else `rp-f0f2b5.local` | Red Pitaya running linien-server |
+| `--laser-port`, `--mot-coil-port`, `--dispenser-port` | auto-probed | serial ports |
+| `--mot-coil-address`, `--dispenser-address` | `1` | Modbus addresses |
+| `--vtune-min`, `--vtune-max` | `0.0`, `5.0` | V_tune slider range; 5 V is the DAC's hardware full scale, set by the Click board's Vref |
+
+Expect on a good start: `DEVICES 4/4` on the Devices card, all four rows **OK**,
+and a sweeping trace. If the Red Pitaya is not up, a banner over the plot says
+so and names the button to press.
+
+# Using it
+
+## Devices, status and connecting
+
+The **Devices** card lists the four devices, each with its port or host and one
+of exactly three statuses:
+
+| status | meaning |
+| --- | --- |
+| **OK** | connected |
+| **...** | an attempt is in flight |
+| **Error** | everything else |
+
+The reason is always on the row's tooltip and in the event log — unplugged
+port, probe failure, wedged server, serial fault. The card's header chip counts
+the devices that are OK (`DEVICES 3/4`).
+
+**Auto-connect** connects whatever is not connected: it brings up the Red
+Pitaya, then re-runs the USB probe and restarts the serial workers. A Red Pitaya
+that is already connected is left alone, because restarting the acquisition
+client sweeps and that drops a lock. **Manual setup** holds the host/port fields,
+a **Connect** button that always does the full restart (it *will* drop a lock),
+and **Restart Linien Server**, which restarts a wedged server without an SSH
+session.
+
+**The Red Pitaya connect makes three attempts, two seconds apart.** If all three
+fail, a banner over the plot names the host it tried and tells you to press
+Auto-connect. Nothing retries on a timer after that — and a Red Pitaya that was
+just powered on may need a couple of goes a minute or two apart before its
+hostname resolves.
+
+## USB auto-detection
+
+At startup the app identifies each serial device with read-only commands: an
+`ilaser` query for the Koheron, and a Modbus model-register read that
+distinguishes the DPS5005 (coils) from the DPS5020 (dispenser). The saved port
+for each device is re-verified first, so swapped cables correct themselves; a
+device that fails verification is searched for across the remaining ports.
+
+Nothing polls the Koheron once it is connected — it reads two setpoints and then
+only accepts writes — so a separate watcher enumerates the serial ports every
+few seconds and marks any device whose port has disappeared. It reports only;
+reopening a port is Auto-connect's job.
+
+## Dispenser
+
+The dispenser fires the DPS5020 in constant current (it is close to a short) at
+the current and duration set on the Dispenser card's sliders, defaulting to
+**7.5 A for 30 s**. The worker programs current and voltage before every enable,
+turns the output off when the time is up, and starts a **15 min cooldown** that
+blocks re-firing; clicking again during a fire aborts it, and the cooldown still
+applies. The cooldown end time is persisted, so restarting the app does not
+clear it.
+
+Setpoints are re-enforced during a fire, and an output enabled from the DPS
+front panel while the app is connected gets the same time limit. **The auto-off
+runs in the app** — if the app or the serial link dies mid-fire, the supply does
+not shut itself off.
+
+Cumulative use (number of fires and total seconds) is counted and persisted for
+dispenser life, but has no on-screen readout: it reaches you through the event
+log and the `dispenser` section of a saved config.
+
+## Lock, filters and PSD
+
+`Set PID...` opens a dialog pre-filled with the current P/I/D gains (0–8191)
+read live from the server, and writes them back on Apply.
+
+The Error Signal & Lock card exposes Linien's two IIR stages on the demodulated
+error signal (channel A): Automatic (two low-passes at half the modulation
+frequency, Linien's default) or manual control of each stage's enable, type and
+corner frequency. Settings are read from the device when Linien connects and
+pushed back after a short debounce. A disabled stage stays in the signal path at
+unity gain, to preserve its propagation delay. If you are mid-edit when the
+readback lands, your values stand and the disagreement is logged as
+`filter_divergence`.
+
+`Measure Lock PSD...` switches the plot to a log-log error-signal noise view and
+the sidebar to the PSD panel: algorithm (LPSD or Welch), max decimation (deeper
+reaches lower Fourier frequencies but takes ~16x longer per +4; default 18),
+`Run PSD Measurement`, `Optimize PID` (confirmation required — it changes the
+lock's gains while measuring), `Clear Plot` and `Exit PSD Mode`. Runs overlay in
+different colours with their PID settings in the legend. Each completed run logs
+a `psd_complete` event with linien's integrated-noise "fitness" — trend it as a
+lock-health metric. Measure while locked. The live trace pauses during raw
+acquisition, and leaving the mode does not abort an in-flight acquisition on the
+server.
+
+## Config snapshots
+
+`Save Config As...` writes a timestamped JSON snapshot of every **setpoint**:
+connections, modulation, sweep speed, error-signal filters, laser current and
+temperature, repump V_tune/VCO frequency, coil setpoints, the dispenser
+operating point and fire history, and the PSD settings.
+
+A config records what you *set*, never what the hardware is *doing*. It cannot
+carry an output, enable, lock or fire state — those keys are stripped on the way
+out and on the way in, and the removal is logged — so **loading a config can
+never switch the laser, coils, repump, dither or dispenser on or off**. The PID
+is not saved either: it lives only on the server, so recording it would mean
+recording hardware state.
+
+`Load Config...` applies a snapshot: setpoints go to their connected devices
+immediately, including to a running laser or an engaged lock. Partial files are
+fine (missing keys are left alone), dispenser fire settings are
+confirmation-gated, port and host changes take effect on the next connect, and
+fire history and cooldown are never loaded.
+
+## UI behaviour
+
+- **Status chips on every card header**: device count, laser, repump, lock,
+  coils (with live current) and dispenser phase, so a collapsed column still
+  reads from across the lab. The window's title row holds only the Autozoom and
+  camera toggles.
+- **Typed entry**: every slider's value box is editable — type a number, press
+  Enter, and it is clamped and applied. Arrow keys work in the boxes.
 - **Wheel guard**: the mouse wheel never changes an unfocused control, so
-  scrolling the column can't silently move a hardware setpoint. Click a
-  control first if you want wheel adjustment.
-- **Event log pane**: a collapsible card at the bottom of the column
-  mirrors the JSONL log; its header always shows the latest event.
-- **Dispenser progress bar**: time remaining in the current fire (orange)
-  or cooldown (blue).
-- **Tooltips**: every control has hover help; informational readouts show
-  a (?) cursor.
-- **Persistent UI state**: window geometry, splitter position, camera
-  pane visibility, and card expansion are restored on the next launch
-  (alongside all control parameters).
-- Slider drags are coalesced into single hardware writes (latest value
-  wins) instead of replaying every intermediate step.
-
-## Lock PID and config snapshots
-
-`Set PID...` (Error Signal & Lock card) opens a dialog pre-filled with the
-current P/I/D gains (each 0–8191) and writes them back on Apply;
-changes are logged as `pid_set` events.
-
-`Save Config As...` (Config card) exports a timestamped JSON snapshot of
-every control setting — connections, lock parameters, live PID, error
-signal filters, laser setpoints (with the estimated temperature), repump
-V_tune/VCO frequency, coil setpoints, the dispenser operating point and
-fire history, and the PSD settings. `Load Config...` applies a snapshot
-back: setpoints go to the hardware where connected, partial configs are
-fine (missing keys are left unchanged), dispenser settings are
-confirmation-gated, port/host changes take effect on Connect / Reconnect,
-and the fire history/cooldown are never loaded (they are device truth).
-Loads and saves are logged.
-
-## Error signal filters
-
-The Error Signal & Lock card exposes Linien's two IIR
-stages on the demodulated error signal (channel A): an Automatic mode
-(two low-passes at half the modulation frequency — Linien's default) or
-manual control of each stage's enable, low/high-pass type, and corner
-frequency. Settings are read from the device when Linien connects (and
-via `Read from Device`); edits are pushed to the server after a short
-debounce. Note Linien keeps a disabled stage in the signal path at unity
-gain to preserve the propagation delay.
-
-## Lock PSD measurement
-
-`Measure Lock PSD...` (Error Signal & Lock card) switches the plot area to a
-log-log error-signal noise view and the sidebar to the PSD panel:
-algorithm (LPSD or Welch), max decimation (deeper reaches lower Fourier
-frequencies but takes ~16x longer per +4; default 18), `Run PSD
-Measurement`, `Optimize PID` (confirmation required — it actively changes
-the lock's P/I gains on the Red Pitaya while measuring), `Clear Plot`,
-and `Exit PSD Mode`. Successive runs overlay in different colors with
-their PID settings in the legend, so you can compare lock configurations
-directly; each completed run also logs a `psd_complete` event with
-linien's integrated-noise "fitness" — trend it as a lock-health metric.
-Measure while locked. The live spectroscopy trace pauses during the raw
-acquisition stages, and exiting the mode does not abort an in-flight
-acquisition on the server (it finishes on its own).
+  scrolling the column cannot silently move a setpoint.
+- **Coalesced writes**: a slider drag becomes one hardware write (latest value
+  wins), not a replay of every intermediate step.
+- **Persistent UI state**: window geometry and splitter position are restored.
+  Cards always start collapsed and the camera always starts off. Restoring a
+  setting only sets the UI — nothing is pushed until you move a control, and on
+  connect the laser sliders adopt the Koheron's actual setpoints (as V_tune does
+  from the DAC).
+- **Tooltips** on every control.
 
 ## Event log
 
-Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` next to the
-code (a frozen/packaged build writes to the OS per-user app-data
-directory instead, since the install location may be read-only). One
-JSON object per line, gitignored, safe to tail or load with
-`pandas.read_json(..., lines=True)`): app start/stop, USB probe results,
-device connections and faults, lock/unlock transitions, laser on/off and
-init, setpoint changes (debounced after a slider drag settles), V_tune/VCO
-frequency changes, supply readbacks (every 10 s, plus immediately on any
-output or protection change), DPS protection trips, and every dispenser
-fire (start, end with actual elapsed time and abort flag, cooldown).
-The dispenser card also shows a cumulative `Fires:` counter
-(count and total seconds, persisted) for tracking dispenser life.
+Everything notable is appended to `logs/mot-YYYYMMDD.jsonl` next to the code (a
+packaged build writes to the OS per-user app-data directory instead). One JSON
+object per line, gitignored, safe to tail or to load with
+`pandas.read_json(..., lines=True)`. Every record carries `t`, `event` and
+`kind`, and `kind` is the filter axis: `session`, `user`, `command`, `readback`,
+`state`, `fault`.
 
-## DPS protection status
+- Hardware transactions are logged where they happen, as a correlated
+  start/end pair sharing an `op` id, with `duration_ms` and `ok` on the end.
+  That is the only profiling this app needs.
+- **Repeated identical faults are collapsed**: the first is written, the rest
+  are counted, and the count lands as a `fault_repeated` record. An unplugged
+  supply used to write the same line twice a second.
+- **linien's own logging is captured** — the connect attempt, the host it could
+  not resolve, the SSH and RPyC stack — as `library` events, rather than going
+  to the console where a real traceback lives.
+- Supply readbacks are logged **on change** (output enable, protection trip),
+  not on a timer.
+- Retention is 90 days.
 
-The supplies' protection register is decoded on every poll; if a supply
-trips OVP/OCP/OPP the header chip reads `COILS TRIP` and a
-`protection_trip` fault is logged with which protection fired.
+The **Config & Log** card mirrors the log in a pane: time, a source column, and
+the message, coloured by severity. linien's DEBUG detail stays in the file.
+
+# Reference
+
+## File map
+
+| file | what lives there |
+| --- | --- |
+| `mot_control.py` | The window and every card, plus the app entry point. ~3,900 lines, most of it `OpenQuantumControlsWindow`; navigate it by card (`_add_*_card`). |
+| `mot_workers.py` | One QThread per device: both DPS supplies, the Koheron setpoints, the DAC Click (V_tune), the repump GPIO gate, the PSD client, the USB probe and the serial-port watcher. |
+| `linien_worker.py` | The linien acquisition/lock client — connect with retries, the spectrum poll, autolock, the server heartbeat. |
+| `linien_widget.py` | The spectroscopy plot: trace drawing, sweep range, line selection, lock buttons, the Red Pitaya banner. |
+| `psd_window.py` | The lock-noise (PSD) panel, ported from linien's noise-analysis window. |
+| `mot_logging.py` | `EventLog`: the JSONL record, correlated transactions, fault-repeat collapsing, and the bridge that captures third-party logging. |
+| `styles.py` | Colours, fonts, and the shared widget builders (sliders, readouts, cards). |
+| `tests/` | Five hardware-free suites; `smoke_ui.py` is the big one and writes the screenshot. |
+| `CLAUDE.md` | The rules: invariants, state ownership, what was tried and reverted. Read before changing behaviour. |
+| `ROADMAP.md` | What is left, and what was decided against. |
+
+## Red Pitaya client notes
+
+Four RPyC clients talk to the one server — acquisition/lock, V_tune, repump
+gate, and PSD. Do not add a fifth (a linien GUI). The V_tune and gate clients
+start only once the acquisition client reports connected.
+
+- The parameter cache must be **off** for the V_tune and gate clients
+  (`use_parameter_cache=False`): with it on, a value read straight back after a
+  write returns the stale cached copy until the next queue drain.
+- Each DAC update costs ~0.3 s on the server (a deliberate chip-select retry
+  loop), so only the most recent slider value is pushed.
+- Unit constants come from `linien_common.common`, never a local literal: `Vpp`
+  per volt peak-to-peak for `modulation_amplitude`, `MHz` for
+  `modulation_frequency`, `V` counts per volt for PSD amplitudes.
+
+## Linien GPIO mapping
+
+Linien exposes GPIO outputs as bitfields (`gpio_n_out`: `DIO0_N`–`DIO7_N`). The
+repump gate is fixed at `DIO1_N` (bank `n`, bit 1, Click Shield socket 2),
+active-low; `DIO3_N` is the DAC Click chip select and the gate never touches it.
+Both mappings were verified empirically in `qmot-linien-controls` — change
+`_start_repump_workers()` in `mot_control.py` if the wiring changes.
+
+## DPS register scaling
+
+The supplies use different Modbus resolutions: **DPS5005** is 0.001 A and
+0.01 W per LSB, **DPS5020** is 0.01 A and 0.1 W per LSB. The wrong one
+misreports current by 10x. On first connect, check the app's readback against
+each supply's front panel.
+
+## DPS protection
+
+The protection register is decoded on every poll. A trip (OVP/OCP/OPP) turns the
+header chip to `COILS TRIP` and logs a `protection_trip` fault naming which
+protection fired.
 
 ## Laser temperature
 
-The Laser card's Temperature slider is in °C (16–38), which is what you
-actually set. It is converted to a thermistor resistance with the
-Steinhart–Hart coefficients for the laser head's 10 k NTC before being sent
-to the Koheron — the ohms are an implementation detail of how the
-controller holds the setpoint, not a number worth showing.
+The Laser card's Temperature slider is in °C (16–38), which is what you actually
+set. It is converted to a thermistor resistance with the Steinhart–Hart
+coefficients for the head's 10 k NTC before being sent to the Koheron; the ohms
+are an implementation detail of how the controller holds the setpoint.
 
 ## Fonts
 
-Body text is **IBM Plex Sans**; titles (app header, card/section titles)
-are **Space Grotesk**. Both are bundled in `fonts/` under the SIL Open
-Font License, so the app looks the same on a fresh clone. Any extra font
-files dropped into `fonts/` are also registered but stay local (licensed
-files such as `PP*`/`Aptos*` are gitignored). A missing family falls
-back to Helvetica Neue, logged as a `font` fault. Note: fonts are
-registered from bytes (`addApplicationFontFromData`) because the
-path-based Qt API silently fails on Qt 6.11/macOS. The smoke test
-asserts the *resolved* families on real widgets, so a regression here
-fails CI rather than just looking wrong.
+Body text is **IBM Plex Sans**, titles are **Space Grotesk**, both bundled in
+`fonts/` under the SIL Open Font License. Extra font files dropped into `fonts/`
+are registered but stay local (licensed `PP*`/`Aptos*` files are gitignored). A
+missing family falls back to Helvetica Neue and logs a `font` fault. Fonts are
+registered from bytes, because the path-based Qt API silently fails on Qt 6.11.
 
-## Packaged builds (Mac / Linux / Windows)
+## Tests
 
-GitHub Actions (`.github/workflows/build.yml`) runs all five suites on
-every push to `main` or `v1` and on every pull request, and builds
-standalone executables for all three platforms on
-a version tag (`v*`) or a manual workflow run. Artifacts:
-`OpenQuantumControls-macos.zip` (an .app bundle),
-`OpenQuantumControls-linux.tar.gz`, and
-`OpenQuantumControls-windows.zip`; a tag also attaches them to a GitHub
-release.
+Five hardware-free suites, run directly. CI runs all five on every push to
+`main` or `v1` and on every pull request.
 
-Local build (any platform):
+```powershell
+.venv\Scripts\python.exe tests\test_logging.py     # event log: correlation, faults, retention
+.venv\Scripts\python.exe tests\test_workers.py     # linien unit conversions, link health, stalls
+.venv\Scripts\python.exe tests\test_dispenser.py   # fire/cooldown state machine
+.venv\Scripts\python.exe tests\test_probe.py       # USB port identification logic
+.venv\Scripts\python.exe tests\smoke_ui.py         # offscreen UI build + behaviour checks
+```
+
+All five are hardware-free, so green says nothing about the devices. A green run
+says the UI *constructed* — read `mot-ui-smoke.png`, which the smoke test writes
+(gitignored; it is a build output, read once right after the run that made it).
+
+## Packaged builds
+
+`.github/workflows/build.yml` runs the suites on every push and pull request,
+and builds standalone executables for macOS, Linux and Windows on a version tag
+(`v*`) or a manual run. A tag also attaches them to a GitHub release.
 
 ```bash
 pip install pyinstaller
 pyinstaller OpenQuantumControls.spec --noconfirm   # -> dist/
 ```
 
-Notes:
-
-- The binaries are unsigned. First launch on macOS needs
-  right-click → Open (or `xattr -dr com.apple.quarantine <app>`);
-  Windows SmartScreen needs "More info → Run anyway".
-- Packaged builds write logs and data to the OS per-user app-data
-  directory (macOS:
-  `~/Library/Application Support/OQ-Controls/OpenQuantumControls/logs`)
-  instead of a `logs/` folder next to the executable.
-- On Linux, serial access usually requires
-  `sudo usermod -a -G dialout $USER` (log out/in afterwards).
-
-## Tests
-
-`tests/` contains five hardware-free suites, run directly. CI runs all
-five on every push to `main` or `v1` and on every pull request.
-
-```bash
-.venv/bin/python tests/test_logging.py     # event log: correlation, faults, retention
-.venv/bin/python tests/test_workers.py     # linien unit conversions, stall detection
-.venv/bin/python tests/test_dispenser.py   # fire/cooldown state machine
-.venv/bin/python tests/test_probe.py       # USB port identification logic
-.venv/bin/python tests/smoke_ui.py         # offscreen UI build + behavior checks
-```
-
-A green run says the UI *constructed*, not that it looks right — read the
-screenshot the smoke test writes.
-
-The smoke test uses isolated settings/log files and writes
-`mot-ui-smoke.png`, which is gitignored: it is a build output, read once
-right after the run that made it.
-
-## Parameter persistence
-
-All control parameters are saved to `QSettings` as they change and restored
-on the next launch: Linien modulation frequency/phase/strength and sweep
-speed, laser current and thermistor setpoints, MOT coil voltage/current,
-the V_tune slider, and the dispenser fire settings. Restoring a parameter only
-sets the UI — nothing is pushed to hardware until you move a control (and
-the laser sliders re-adopt the Koheron's actual setpoints on connect, as
-the V_tune slider does from the DAC).
-
-## DPS register scaling
-
-The two supplies use different Modbus current/power resolutions: DPS5005 is
-0.001 A and 0.01 W per LSB, DPS5020 is 0.01 A and 0.1 W per LSB. On first
-connect, sanity-check the app's readback against each supply's front panel.
-
-## Run
-
-The repo stands alone — clone, install, run:
-
-```bash
-git clone https://github.com/OpenQuantum-Org/oq-controls.git
-cd oq-controls
-uv venv --python 3.12 .venv
-uv pip install -r requirements.txt
-uv run python mot_control.py \
-  --rp-host rp-f0f2b5.local \
-  --laser-port /dev/ttyUSB0 \
-  --mot-coil-port /dev/ttyUSB1 \
-  --dispenser-port /dev/ttyUSB2
-```
-
-(The port arguments are optional — the startup USB probe finds and
-verifies the devices automatically.)
-
-The app persists connection settings in `QSettings` and re-verifies them at
-startup, so command-line arguments are mostly needed for first launch or
-scripted startup.
-
-Use `Devices -> Configure Devices...` to inspect discovered USB serial devices,
-apply best guesses, or enter ports manually (the same dialog pops up
-automatically at startup when auto-detection fails).
-
-## Linien GPIO mapping
-
-Linien exposes GPIO outputs as bitfields (`gpio_n_out`: `DIO0_N` through
-`DIO7_N`). The repump gate is fixed in code at `DIO1_N` (bank `n`, bit 1,
-Click Shield socket 2), active-low; `DIO3_N` (bit 3) is the DAC Click chip
-select and is never touched by the gate. Both mappings were verified
-empirically in `qmot-linien-controls` — change `_start_repump_workers()` in
-`mot_control.py` if the wiring ever changes.
+- The binaries are unsigned: macOS needs right-click → Open (or
+  `xattr -dr com.apple.quarantine <app>`), Windows SmartScreen needs
+  "More info → Run anyway".
+- Packaged builds write logs and data to the OS per-user app-data directory
+  (macOS: `~/Library/Application Support/OQ-Controls/OpenQuantumControls/logs`).
