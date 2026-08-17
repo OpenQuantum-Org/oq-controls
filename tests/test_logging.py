@@ -15,7 +15,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mot_logging import NULL_LOG, EventLog  # noqa: E402
+from mot_logging import (  # noqa: E402
+    NULL_LOG,
+    EventLog,
+    capture_library_logging,
+)
 
 
 def read(log):
@@ -106,6 +110,87 @@ def main():
     assert header["rp_host"] == "rp-test.local"
     for field in ("schema", "python", "platform", "machine", "pid", "frozen"):
         assert field in header, field
+
+    # --- a failure repeating at the poll rate is counted, not copied -------
+    # Unplugging a supply raised twice a second and wrote every one of them:
+    # 400 identical records in a session, burying everything around them.
+    before = len(read(log))
+    for _ in range(50):
+        log.fault("fault", device="coils", message="WriteFile failed")
+    assert len(read(log)) - before == 1, "repeats were written"
+
+    # Two devices failing at once alternate, and both must still collapse --
+    # a single "last fault" slot would collapse neither.
+    before = len(read(log))
+    for _ in range(20):
+        log.fault("fault", device="coils", message="WriteFile failed")
+        log.fault("linien", message="acquisition failed: stream closed")
+    assert len(read(log)) - before == 1, read(log)[before:]
+
+    # The count is not lost. It lands when the run's window closes...
+    log.FAULT_REPEAT_WINDOW_S = 0.0
+    log.fault("fault", device="coils", message="WriteFile failed")
+    repeats = [r for r in read(log) if r["event"] == "fault_repeated"]
+    summary = next(r for r in repeats if r["device"] == "coils")
+    assert summary["kind"] == "fault" and summary["count"] == 69, summary
+    assert "over_s" in summary
+    # Both devices' runs are counted, each on its own.
+    linien = next(r for r in repeats if r["of"] == "linien")
+    assert linien["count"] == 19, linien
+    log.FAULT_REPEAT_WINDOW_S = EventLog.FAULT_REPEAT_WINDOW_S
+
+    # ...and on the way out, for a run whose window is still open.
+    before = len(read(log))
+    for _ in range(5):
+        log.fault("fault", device="dispenser", message="port closed")
+    log.flush_repeats()
+    summary = read(log)[-1]
+    assert summary["event"] == "fault_repeated" and summary["count"] == 4
+
+    # A different failure is its own record, not a repeat.
+    before = len(read(log))
+    log.fault("fault", device="coils", message="a brand new failure")
+    log.fault("fault", device="coils", message="something else entirely")
+    assert len(read(log)) - before == 2, read(log)[before:]
+
+    # --- third-party logging is captured, not printed ---------------------
+    # linien logs the reason a connect failed to its own console handler and
+    # then raises a message-less exception, so the console was the only
+    # place the reason existed.
+    import logging
+
+    fake_console = logging.StreamHandler()
+    linien = logging.getLogger("linien_client")
+    linien.addHandler(fake_console)
+    capture_library_logging(log)
+    assert fake_console not in linien.handlers, "console handler survived"
+
+    before = len(read(log))
+    logging.getLogger("linien_client.connection").info("Try to connect to rp")
+    logging.getLogger("linien_client.connection").error("host not found")
+    routine, failure = read(log)[before:]
+    assert routine["kind"] == "state" and routine["event"] == "library"
+    assert routine["logger"] == "linien_client.connection"
+    assert "Try to connect" in routine["message"]
+    # WARNING and worse are faults: that is the filter axis a reader uses.
+    assert failure["kind"] == "fault" and "host not found" in failure["message"]
+
+    # Called again on reconnect, it must not stack a second handler.
+    handlers = list(linien.handlers)
+    capture_library_logging(log)
+    assert linien.handlers == handlers, linien.handlers
+
+    # Four workers import linien_client and any of them may be the one that
+    # loads it, so every import site sweeps -- with no event log to hand.
+    # The sweep must still find the console handler and keep writing to the
+    # log the window installed.
+    late_console = logging.StreamHandler()
+    linien.addHandler(late_console)
+    capture_library_logging()
+    assert late_console not in linien.handlers, "no-arg sweep missed it"
+    before = len(read(log))
+    logging.getLogger("linien_client.connection").info("still routed")
+    assert len(read(log)) == before + 1
 
     # --- retention -------------------------------------------------------
     stale = os.path.join(tmp, "mot-19700101.jsonl")

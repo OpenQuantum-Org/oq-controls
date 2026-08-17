@@ -35,6 +35,12 @@ never carries forward:
 - Setpoint change on a locked system
 - DPS output enable
 
+**Load Config is an exemption, decided 2026-08-17.** It pushes every setpoint in
+the file to its connected device immediately, with no prompt, including to a
+running laser and a locked system. What it can never do is switch an output on or
+off: a config carries setpoints only, and `_reject_state_keys` drops any key that
+describes an output (`_CONFIG_STATE_KEYS`) on the way both out and in.
+
 Laser operating point is **80 mA** (`mot_control.py:1850`). Do not widen slider
 ranges or nudge it as a side effect of other work. On connect the sliders adopt
 the Koheron's actual setpoints — keep that direction.
@@ -70,11 +76,44 @@ The DPS, DAC Click and GPIO workers *do* use the queue pattern
 4 holds: no `print`s remain anywhere. Faults go to `EventLog`; `LinienWorker._log`
 is the shim for what used to be printed.
 
+Third-party logging goes there too. `capture_library_logging` (`mot_logging.py`)
+detaches `linien_client`'s own console handler and routes linien/RPyC/SSH records
+into the log as `library` events — WARNING and worse as faults. It must run
+**after** those imports: `linien_client/__init__.py` installs its console handler
+and sets its module loggers to DEBUG at import time, so raising a level before
+that (what `quiet_console` used to do) is overwritten and does nothing anyway.
+Four workers import `linien_client` and any of them may be the one that loads it,
+so **every import site calls the no-arg sweep**; the window installs the bridge
+itself at startup. Two console paths remain and are outside `logging`:
+`start_remote_server` writes remote command output to `sys.stdout` and
+`connection.py` calls `print_exc()`. Both fire only when the RP answers but its
+server is down.
+
+The log pane renders through `_log_line` (`mot_control.py`): a timestamp, a
+padded source column (the device for a generic fault, the short library name for
+captured chatter, otherwise the event) and the message, coloured by severity.
+Records are one line each (`NoWrap`), trimmed per field and then per line.
+
+6 has two halves, and both are easy to get wrong in a poll loop. A failure that
+repeats at the poll rate is reported **once**: `LinkHealth` (`mot_workers.py`)
+turns a run of failures into a down edge (three in a row → `connection_status`
+goes to error, so the row and the DEVICES count say so) and an up edge on
+recovery, and `EventLog.fault` collapses identical repeats into one record plus a
+`fault_repeated` count. Unplugging a supply used to write ~400 identical lines.
+
+The Koheron is the exception that needs its own answer: it has no poll loop at
+all, so nothing notices it being unplugged. `SerialPresenceWorker` enumerates
+ports (never opens them, so it costs nothing on the wire) and the window marks a
+device whose port has vanished. It reports only — reconnecting stays the
+operator's call.
+
 ## State ownership
 
 - Desired (what the user set) and actual (what the device reports) are separate.
-  A readback never overwrites a control the user is touching.
-  `_sync_filters_from_device` violates this today.
+  A readback never overwrites a control the user is touching. Both readbacks
+  that could (`_sync_filters_from_device`, `_on_modulation_readback`) hold off
+  behind a "touched" flag and log a `*_divergence` fault instead; the flag
+  clears once the operator's own value has been pushed, so it is not a latch.
 - Show divergence, don't paper over it — it means a failed write, a front-panel
   override, or a device in protection.
 - Setpoints conflate (latest value wins); side-effecting actions queue normally.
@@ -110,7 +149,17 @@ MCP4921 patch applied on the device). Client pinned to 2.1.0 to match.
   on `ServerNotInstalled` or `InvalidServerVersion`.
 - A client version containing `dev` skips the compatibility check entirely. Not
   a strategy — it turns a loud failure silent.
-- Never point two clients at one RP.
+- Never point two clients at one RP — but note this app already opens **four**
+  to the same server: acquisition (`linien_worker`), the vtune DAC, the repump
+  gate and PSD. They are all ours, and each costs a per-client parameter queue on
+  the server. The vtune and gate clients only start once the acquisition client
+  reports connected (`_on_linien_connection`), so an absent RP produces one set of
+  connect attempts rather than three. Consolidating the four into one connection
+  is still open, and has to resolve `use_parameter_cache` being True for
+  acquisition and False for the writers.
+- The acquisition client tries `CONNECT_ATTEMPTS` (3) times, 2 s apart, then
+  stops and the plot shows a banner naming the host and Auto-connect. Reconnect
+  stays a decision the operator makes; nothing retries on a timer forever.
 - `rp-f0f2b4.local` is a different RP, one character off.
 - The fallback host is `DEFAULT_RP_HOST` in `linien_widget.py` and
   `linien_worker.py`, now `rp-f0f2b5.local`. It used to be `rp-F0C6AD.local`, a

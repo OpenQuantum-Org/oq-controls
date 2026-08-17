@@ -10,8 +10,8 @@ coils run from a DPS5005 supply; the dispenser runs from a DPS5020 with a
 timed 10 s fire and a 15 min lockout cooldown.
 """
 
+import html
 import json
-import logging
 import os
 import sys
 import time
@@ -31,6 +31,7 @@ from linien_widget import LinienWidget
 from styles import (
     ACCENT,
     APP_STYLESHEET,
+    PLOT_COLUMN_MARGINS,
     UI_FONT_PX,
     NEON_BLUE,
     add_readout_row,
@@ -41,7 +42,7 @@ from styles import (
     style_plot_axes,
 )
 
-from mot_logging import EventLog
+from mot_logging import EventLog, capture_library_logging
 from psd_window import PsdWindow
 from mot_workers import (
     DacClickWorker,
@@ -51,6 +52,7 @@ from mot_workers import (
     LinienServerRestartWorker,
     PsdWorker,
     RidenDPSWorker,
+    SerialPresenceWorker,
     SerialProbeWorker,
 )
 
@@ -882,15 +884,21 @@ class LiveOutput:
 
     ``mandatory`` marks an output that is not the operator's to leave on
     -- the dispenser at 7.5 A into a consumable is the only one.
+
+    ``backed_by`` is how we know it is on: ``"device"`` if a readback said
+    so, ``"ui"`` if the only evidence is a control the operator or a
+    restored setting left in that position. Without the distinction a
+    restored preference got reported as an energised output.
     """
 
-    __slots__ = ("key", "label", "detail", "mandatory")
+    __slots__ = ("key", "label", "detail", "mandatory", "backed_by")
 
-    def __init__(self, key, label, detail, mandatory=False):
+    def __init__(self, key, label, detail, mandatory=False, backed_by="ui"):
         self.key = key
         self.label = label
         self.detail = detail
         self.mandatory = mandatory
+        self.backed_by = backed_by
 
 
 class ShutdownDialog(QtWidgets.QDialog):
@@ -1018,6 +1026,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._psd_prev_status = {}
         self._psd_prev_status = {}
         self._filters_syncing = False
+        # Set once the operator has adjusted a filter control, so the
+        # connect-time readback shows the divergence instead of stomping it.
+        self._filters_touched = False
 
         self._chip_state = {}
         self._device_connected = {}
@@ -1027,8 +1038,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._server_stalled = False
         self._server_restarting = False
         self._rp_last_status = "disconnected"
+        # Outputs whose "is it on" has come from a device rather than from a
+        # restored setting. live_outputs() reports it as backed_by, and the
+        # startup report will not name an output that is not in here.
+        self._readback_seen = set()
+        # Dither amplitude in mV as last reported by linien, None until a
+        # connect answers. Not the slider: that is what the operator wants.
+        self._mod_actual_mv = None
+        # Set once the operator touches the modulation controls, so a
+        # connect-time readback cannot overwrite them.
+        self._mod_touched = False
+        self._startup_report_retried = 0
+        # device key -> True once its serial port stopped being enumerated.
+        self._port_missing = {}
         self._event_log = EventLog(logs_dir())
-        self._readback_log_t = {}
+        # Installed before anything imports linien: the sweep itself has to
+        # run after each import (see capture_library_logging), but the
+        # handler has to exist first so those sweeps have somewhere to go.
+        capture_library_logging(self._event_log)
         self._readback_log_output = {}
         self._readback_log_protection = {}
         self._log_debounce = {}
@@ -1084,6 +1111,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             lambda msg: self._log_fault("linien", msg)
         )
         self.linien_widget.server_stalled.connect(self._on_server_stalled)
+        self.linien_widget.modulation_state.connect(
+            self._on_modulation_readback
+        )
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1205,6 +1235,103 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "ui/camera_visible", self.camera_toggle.isChecked()
         )
 
+    # Fields that are plumbing rather than content: they either name the
+    # line already (event), belong only to the file (traceback), or are
+    # rendered into the source column.
+    # "message"/"error" lead the line, so they must not also appear in the
+    # field list; the rest either name the line already or belong only to
+    # the file.
+    _LOG_PANE_SKIP = (
+        "t", "kind", "event", "traceback", "logger", "level",
+        "message", "error",
+    )
+    # A minimum, not a maximum: event names run to "startup_outputs_live",
+    # and cutting one to fit a column would lose the only word that says
+    # what the line is.
+    _LOG_SOURCE_WIDTH = 14
+    _LOG_VALUE_CHARS = 60
+    _LOG_LINE_CHARS = 150
+    _LOG_COLOURS = {
+        "fault": "#b56a6a",
+        "warn": "#b9924f",
+        "quiet": "#6b6b6b",
+        "plain": "#b2b2b2",
+    }
+    # linien_client.connection -> linien; paramiko.transport -> paramiko.
+    _LOG_LIBRARY_NAMES = {
+        "linien_client": "linien",
+        "linien_common": "linien",
+        "rpyc": "rpyc",
+        "paramiko": "ssh",
+        "fabric": "ssh",
+        "invoke": "ssh",
+    }
+
+    def _log_line(self, record):
+        """Render one event-log record as (source, text, colour).
+
+        The pane used to join every field as ``k=v`` in dict order and cut
+        the result at 300 characters, so the part worth reading was last
+        and usually the part that got cut -- and a fault looked exactly
+        like a readback.
+        """
+        event = record.get("event", "?")
+        message = record.get("message") or record.get("error") or ""
+
+        if event == "library":
+            level = str(record.get("level", "INFO"))
+            root = str(record.get("logger", "")).split(".")[0]
+            colour = (
+                self._LOG_COLOURS["fault"] if level in ("ERROR", "CRITICAL")
+                else self._LOG_COLOURS["warn"] if level == "WARNING"
+                else self._LOG_COLOURS["quiet"]
+            )
+            return self._LOG_LIBRARY_NAMES.get(root, root), message, colour
+
+        if event == "fault_repeated":
+            text = (
+                f"{message}  \N{MULTIPLICATION SIGN}{record.get('count', '?')}"
+                f" over {record.get('over_s', '?')} s"
+            )
+            return (
+                record.get("device") or record.get("of", event),
+                text,
+                self._LOG_COLOURS["warn"],
+            )
+
+        # The device takes the source column only when the event name says
+        # nothing: "coils  WriteFile failed" beats "fault  device=coils",
+        # but "port_vanished" is the whole point of its own record and
+        # must not be replaced by the device it happened to.
+        is_fault = record.get("kind") == "fault"
+        device = record.get("device")
+        named_by_device = bool(device) and event in ("fault", "connection")
+        source = device if named_by_device else event
+        skip = self._LOG_PANE_SKIP + (("device",) if named_by_device else ())
+        fields = [
+            f"{key}={self._short(value)}"
+            for key, value in sorted(record.items())
+            if key not in skip
+        ]
+        text = " ".join(filter(None, [self._short(message), *fields]))
+        if len(text) > self._LOG_LINE_CHARS:
+            # Per-field trimming is not enough on its own: a record with
+            # several long fields (usb_probe carries three dicts) still
+            # runs off the pane.
+            text = text[: self._LOG_LINE_CHARS - 1] + "\N{HORIZONTAL ELLIPSIS}"
+        return (
+            source,
+            text,
+            self._LOG_COLOURS["fault"] if is_fault else self._LOG_COLOURS["plain"],
+        )
+
+    def _short(self, value):
+        """One field, trimmed on its own so the line never ends mid-word."""
+        text = str(value)
+        if len(text) <= self._LOG_VALUE_CHARS:
+            return text
+        return text[: self._LOG_VALUE_CHARS - 1] + "\N{HORIZONTAL ELLIPSIS}"
+
     def _on_log_record(self, record):
         """Mirror an event-log record into the collapsible log pane."""
         if not hasattr(self, "log_view"):
@@ -1215,23 +1342,30 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # correlates them.
         if record.get("phase") == "start":
             return
+        # linien's DEBUG is per-step detail (credentials sent, device file
+        # read). It is worth having in the file and not worth a pane line.
+        if record.get("event") == "library" and record.get("level") == "DEBUG":
+            return
         timestamp = record.get("t", "")[11:19]
-        # "traceback" belongs in the file, not the pane -- it is many
-        # lines and would push everything else out of view.
-        extras = " ".join(
-            f"{k}={v}"
-            for k, v in record.items()
-            if k not in ("t", "kind", "event", "traceback")
+        source, text, colour = self._log_line(record)
+        line = f"{timestamp}  {str(source):<{self._LOG_SOURCE_WIDTH}}  {text}"
+        # Rich text, so severity can carry colour; the padding above only
+        # survives with white-space:pre, and &nbsp; is what makes Qt keep
+        # the runs of spaces inside it.
+        self.log_view.appendHtml(
+            f'<span style="color:{colour}; white-space:pre">'
+            f'{html.escape(line).replace(" ", "&nbsp;")}</span>'
         )
-        line = f"{timestamp}  {record.get('event', '?')}"
-        if extras:
-            line += f"  {extras}"
-        self.log_view.appendPlainText(line[:300])
         # The card header rebuilds on every set_status, so routine device
         # traffic must not drive it -- during a slider drag that is the
         # GUI doing layout work several times a second for a chip nobody
         # is reading. Faults and state changes still surface there.
-        if record.get("kind") in ("command", "readback"):
+        # "library" is third-party logging (linien, RPyC, SSH) captured by
+        # capture_library_logging: routine traffic, same as a readback.
+        if (
+            record.get("kind") in ("command", "readback")
+            or record.get("event") == "library"
+        ):
             return
         summary = f"{timestamp} {record.get('event', '?')}"
         if len(summary) > 28:
@@ -1241,8 +1375,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Event logging helpers
     # ------------------------------------------------------------------
-
-    READBACK_LOG_PERIOD_S = 10.0
 
     def _log_connection(self, device, status):
         self._event_log.log("connection", device=device, status=status)
@@ -1314,22 +1446,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         timer.start(delay_ms)
 
     def _log_readback(self, channel, state):
-        """Decimated supply readback logging: every 10 s, plus immediately
-        on any output-enable or protection change."""
-        now = time.monotonic()
+        """Supply readback logging, on change only.
+
+        There used to be a 10 s heartbeat as well. At 0.0 A into a supply
+        nobody is touching it wrote the same line all afternoon, which
+        buries the records that mean something. The first readback of a
+        session still lands, because the remembered output is None and
+        ``None != False`` -- that is what keeps the state-at-connect
+        evidence.
+        """
         output = bool(state.get("output_enabled"))
         protection = int(state.get("protection", 0) or 0)
-        due = (
-            now - self._readback_log_t.get(channel, -1e9)
-            >= self.READBACK_LOG_PERIOD_S
-        )
         output_changed = self._readback_log_output.get(channel) != output
         protection_changed = (
             self._readback_log_protection.get(channel) != protection
         )
-        if not (due or output_changed or protection_changed):
+        if not (output_changed or protection_changed):
             return
-        self._readback_log_t[channel] = now
         self._readback_log_output[channel] = output
         self._readback_log_protection[channel] = protection
         self._event_log.readback(
@@ -1422,7 +1555,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Sweep speed sits with the sweep slider it belongs to, directly
         # above the plot, rather than in the lock card.
         sweep_row = QtWidgets.QHBoxLayout()
-        sweep_row.setContentsMargins(20, 0, 8, 0)
+        # Shared with the Red Pitaya banner in LinienWidget, so the two line
+        # up against the same edge.
+        sweep_row.setContentsMargins(*PLOT_COLUMN_MARGINS)
         sweep_row.setSpacing(8)
         sweep_row.addStretch()
         sweep_row.addWidget(self._small_label("Sweep Speed:"))
@@ -1632,13 +1767,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self.auto_discover_btn = QtWidgets.QPushButton("Auto-connect")
         self.auto_discover_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.auto_discover_btn.clicked.connect(
-            lambda: self._run_usb_probe(startup=False)
-        )
+        self.auto_discover_btn.clicked.connect(self._auto_connect)
         self._tip(
-            "Re-run the USB probe: identify each device with read-only\n"
-            "commands and reassign ports (briefly disconnects the serial\n"
-            "workers).",
+            "Connect everything that is not connected: the Red Pitaya, and\n"
+            "the USB devices via a read-only probe that identifies each one\n"
+            "and reassigns ports (briefly disconnects the serial workers).\n"
+            "A Red Pitaya that is already connected is left alone, so this\n"
+            "never drops a lock.",
             self.auto_discover_btn,
         )
         layout.addWidget(self.auto_discover_btn)
@@ -1678,7 +1813,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         value.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         edit.textChanged.connect(value.setText)
         row.addWidget(value, stretch=1)
-        status = QtWidgets.QLabel("--")
+        # "..." rather than a fourth word for "nothing has happened yet":
+        # the workers start moments later, so an attempt really is pending.
+        status = QtWidgets.QLabel("...")
         status.setStyleSheet(
             "color: #ababab; font-size: 13px; font-weight: 700; border: none;"
         )
@@ -1773,9 +1910,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.save_config_btn.clicked.connect(self._save_config_dialog)
         config_row.addWidget(self.save_config_btn)
         self._tip(
-            "Snapshot every control setting (connections, lock + PID,\n"
-            "filters, laser, repump, supplies, dispenser, PSD) to a JSON\n"
-            "file.",
+            "Snapshot every setpoint (connections, filters, laser, repump,\n"
+            "supplies, dispenser, PSD) to a JSON file. Setpoints only: a\n"
+            "config never records whether an output is on.",
             self.save_config_btn,
         )
         self.load_config_btn = QtWidgets.QPushButton("Load Config...")
@@ -1784,8 +1921,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         config_row.addWidget(self.load_config_btn)
         self._tip(
             "Apply a saved config: setpoints go to the hardware where\n"
-            "connected. Dispenser settings ask for confirmation; port\n"
-            "changes take effect on Connect.",
+            "connected. It never switches an output on or off — the laser,\n"
+            "coils, repump, dither and dispenser stay as they are.\n"
+            "Dispenser settings ask for confirmation; port changes take\n"
+            "effect on Connect.",
             self.load_config_btn,
         )
         layout.addLayout(config_row)
@@ -1799,6 +1938,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
+        # One record, one line. Wrapping spent three of the seven visible
+        # lines on a single usb_probe record and broke the column
+        # alignment; the horizontal scrollbar is the cheaper cost.
+        self.log_view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.log_view.setFixedHeight(150)
         self.log_view.setStyleSheet(
             "QPlainTextEdit { background: #0b0b0b; color: #b2b2b2;"
@@ -2022,6 +2165,81 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_modulation_amplitude(
                 self.mod_strength_slider.value() if on else 0
             )
+        self._note_mod_touched(pushed=worker is not None)
+
+    def _note_mod_touched(self, pushed):
+        """Record that the operator set the dither, or that we reconciled.
+
+        ``pushed`` means the value reached a worker, so desired and actual
+        agree and the flag can go. Without that half this would be a
+        one-way latch: one slider touch and every later reconnect reported
+        a divergence instead of adopting the device.
+        """
+        self._mod_touched = not pushed
+
+    def _on_modulation_readback(self, mv):
+        """What the dither is actually doing, reported once per connect.
+
+        The button used to be a saved preference displayed as device state:
+        nothing read modulation_amplitude back, so a launch with the Red
+        Pitaya unplugged still claimed the dither was running. This is the
+        readback that makes it a fact -- the same direction the laser
+        sliders take, where connecting adopts the device's own setpoints.
+        """
+        try:
+            actual_mv = float(mv)
+        except (TypeError, ValueError):
+            return
+        self._mod_actual_mv = actual_mv
+        on = actual_mv > 0
+        ui_mv = self.mod_strength_slider.value()
+
+        if self._mod_touched:
+            # Show divergence, do not paper over it: the operator's value
+            # stands and the disagreement goes in the record.
+            self._event_log.fault(
+                "mod_divergence",
+                device_mv=round(actual_mv, 3),
+                ui_mv=ui_mv,
+                ui_enabled=self.mod_enable_btn.isChecked(),
+            )
+            # Deliberately not device-backed: the device answered, but what
+            # is on screen is no longer what it said, so nothing may report
+            # the displayed dither as the Red Pitaya's state.
+            self._readback_seen.discard("modulation")
+            return
+        self._readback_seen.add("modulation")
+
+        # Signals blocked and the setting written by hand: routing this
+        # through _on_mod_enabled would push the value we just read
+        # straight back at the device, which is an actuation nobody asked
+        # for (CLAUDE.md: restoring state sets the UI only).
+        self.mod_enable_btn.blockSignals(True)
+        self.mod_enable_btn.setChecked(on)
+        self.mod_enable_btn.blockSignals(False)
+        self._settings.setValue("linien/mod_enabled", on)
+        if on:
+            # Clamped for the slider, logged raw: a device set past the
+            # slider's range is real and worth seeing, but widening the
+            # range is not this change's business.
+            self.mod_strength_slider.blockSignals(True)
+            self.mod_strength_slider.setValue(
+                max(0, min(1000, int(round(actual_mv))))
+            )
+            self.mod_strength_slider.blockSignals(False)
+            self.mod_strength_edit.setText(
+                f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp"
+            )
+            self._settings.setValue(
+                "linien/mod_strength_mv", self.mod_strength_slider.value()
+            )
+        # Off leaves the slider alone -- it is the level to restore, not the
+        # level being driven.
+        self._apply_mod_enabled(on)
+        self._event_log.log(
+            "mod_adopted", device_mv=round(actual_mv, 3), was_ui_mv=ui_mv,
+            enabled=on,
+        )
 
     def _add_laser_card(self, parent):
         card = CollapsibleCard("Laser", collapsed=True)
@@ -2407,10 +2625,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if self._rp_host:
             self.linien_widget.start()
         self._connect_lock_signal()
-        self._start_repump_workers()
+        # The vtune DAC and the repump gate are two more RPyC clients to
+        # the same linien-server, so they used to repeat the acquisition
+        # client's connect attempt and its failure -- one absent Red Pitaya
+        # produced three of everything. They start from
+        # _on_linien_connection once that client says the server answered.
         # Serial workers start once the USB probe has decided which port
         # hosts which device (see _on_probe_result).
         self._run_usb_probe(startup=True)
+        self._start_port_watch()
         # Outputs survive this app. The repump gate is a Red Pitaya GPIO
         # bit and the dither a linien parameter the server restores, so
         # an exit that skipped teardown -- a crash, a kill -- leaves them
@@ -2419,14 +2642,81 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # leaving it to be noticed.
         QtCore.QTimer.singleShot(4000, self._report_startup_outputs)
 
+    # Devices with a serial port: the status row each one owns, and the
+    # live-output key whose state stops being device-backed if it vanishes.
+    _SERIAL_DEVICES = (
+        ("laser", "laser_edit", "laser_usb_status", "laser"),
+        ("mot_coil", "mot_coil_port_edit", "coil_usb_status", "coils"),
+        ("dispenser", "dispenser_port_edit", "dispenser_usb_status", "dispenser"),
+    )
+
+    def _start_port_watch(self):
+        self.port_watch_worker = SerialPresenceWorker()
+        self.port_watch_worker.ports_present.connect(self._on_ports_present)
+        self.port_watch_worker.start()
+
+    def _on_ports_present(self, present):
+        """A serial device's port has appeared or vanished.
+
+        The supplies find out by failing to poll, but nothing polls the
+        Koheron -- so without this, unplugging the laser changed nothing on
+        screen. Enumeration is not device I/O, so this costs no traffic and
+        works for a device that is only ever written to.
+
+        Reports only. Re-opening a port that came back is a connection, and
+        connections stay the operator's call (the Auto-connect button).
+        """
+        for key, edit_attr, row_attr, output_key in self._SERIAL_DEVICES:
+            port = getattr(self, edit_attr).text().strip()
+            if not port:
+                continue
+            gone = port not in present
+            if gone == self._port_missing.get(key, False):
+                continue  # no edge, nothing to say
+            self._port_missing[key] = gone
+            row = getattr(self, row_attr)
+            if gone:
+                self._set_usb_status_label(
+                    row, f"error:port {port} is not there", key
+                )
+                # What is on screen for it is no longer the device's state.
+                self._readback_seen.discard(output_key)
+                self._event_log.fault(
+                    "port_vanished", device=key, port=port,
+                )
+            else:
+                # Still Error: the port exists again, but nothing has
+                # reopened it. The tooltip is what says so.
+                self._set_usb_status_label(
+                    row, f"error:port {port} is back — press Auto-connect", key
+                )
+                self._event_log.log("port_returned", device=key, port=port)
+
     def _report_startup_outputs(self):
         """Name anything that was already energised when we connected.
 
         Reports only; nothing is actuated. Switching an output off at
         startup would be an actuation nobody asked for, and it would
         stomp a state left on deliberately.
+
+        Only device-backed outputs are named. This used to report whatever
+        the UI showed, so a restored dither setting was announced as a
+        running dither one second before the connect to the Red Pitaya
+        failed. What we could not check is recorded as unknown instead,
+        which is a different claim from "nothing was on".
         """
         live = self.live_outputs()
+        unknown = [o for o in live if o.backed_by != "device"]
+        if unknown and self._await_startup_answer():
+            return
+        live = [o for o in live if o.backed_by == "device"]
+        if unknown:
+            self._event_log.log(
+                "startup_outputs_unknown",
+                outputs=[o.key for o in unknown],
+                detail="; ".join(f"{o.label} {o.detail}" for o in unknown),
+                rp_status=self._rp_last_status,
+            )
         if not live:
             return
         self._event_log.fault(
@@ -2440,12 +2730,51 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "#b9924f",
         )
 
+    # Three re-checks at 6 s covers three connect attempts 2 s apart; a
+    # host that is simply off still gets reported, just later.
+    _STARTUP_REPORT_RETRIES = 3
+
+    def _await_startup_answer(self):
+        """Re-arm the report while the Red Pitaya is still being tried.
+
+        The first attempt fires 4 s in and a connect run takes longer than
+        that, so the report used to run before the RP had said anything at
+        all -- and then call it unknown.
+        """
+        if self._startup_report_retried >= self._STARTUP_REPORT_RETRIES:
+            return False
+        if not self._rp_host or not self._rp_last_status.startswith("connecting"):
+            return False
+        self._startup_report_retried += 1
+        QtCore.QTimer.singleShot(6000, self._report_startup_outputs)
+        return True
+
     def _connect_lock_signal(self):
         try:
             self.linien_widget.lock_state_changed.disconnect(self._on_lock_state)
         except TypeError:
             pass
         self.linien_widget.lock_state_changed.connect(self._on_lock_state)
+
+    def _auto_connect(self):
+        """Connect whatever is not connected: the Red Pitaya, then USB.
+
+        The button used to run the USB probe alone, so a Red Pitaya that
+        was down at startup could only be brought up from Manual setup --
+        the one place an operator would not think to look for "connect".
+
+        A Red Pitaya that is already connected is left alone on purpose:
+        restarting the acquisition client runs LinienWorker.stop(), which
+        starts a sweep unless unlock_on_stop is False, and that drops a
+        lock. Manual Connect still does the full restart, and says so.
+        """
+        self._save_connection_settings()
+        rp_host = self.rp_edit.text().strip()
+        if rp_host and not self._rp_last_status.startswith("connected"):
+            self.linien_widget.set_host(rp_host)
+            self._connect_lock_signal()
+        # Restarts the serial workers itself once it knows the ports.
+        self._run_usb_probe(startup=False)
 
     def _connect_all(self):
         self._save_connection_settings()
@@ -2461,7 +2790,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker = getattr(self, attr, None)
             if worker is not None:
                 worker.stop()
-        self._start_repump_workers()
+                setattr(self, attr, None)
+        # Not started here: set_host() above restarts the acquisition
+        # client, and these follow it once the server has answered.
 
         self._stop_serial_workers()
         self._start_serial_workers()
@@ -2481,7 +2812,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         self._set_chip("usb", "DEVICES ...", "#ababab")
         for attr in self._USB_STATUS_ROWS:
-            self._set_colored_text(getattr(self, attr), "Probing…", "#ababab")
+            self._set_usb_status_label(
+                getattr(self, attr), "connecting:probing the USB ports"
+            )
 
         self.probe_worker = SerialProbeWorker(
             saved={
@@ -2514,21 +2847,21 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             if assignments.get(key):
                 edit.setText(assignments[key])
 
+        # Through the same label helper as the live handlers, so a probe
+        # result and a worker reconnect can never disagree about the count.
         for key, attr in (
             ("laser", "laser_usb_status"),
             ("mot_coil", "coil_usb_status"),
             ("dispenser", "dispenser_usb_status"),
         ):
-            if status.get(key) == "verified":
-                self._set_colored_text(getattr(self, attr), "Verified", "#6f9e7c")
-            else:
-                self._set_colored_text(getattr(self, attr), "Not found", "#b56a6a")
-
-        # Seed the same state the live handlers use, so a probe result and
-        # a worker reconnect can never disagree about the count.
-        for key in ("laser", "mot_coil", "dispenser"):
-            self._device_connected[key] = status.get(key) == "verified"
-        self._refresh_device_count()
+            verified = status.get(key) == "verified"
+            self._set_usb_status_label(
+                getattr(self, attr),
+                f"connected:{assignments.get(key, '')} (verified by probe)"
+                if verified
+                else f"error:not found by the USB probe ({status.get(key)})",
+                key,
+            )
 
         self._save_connection_settings()
 
@@ -2608,7 +2941,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.mot_coil_worker.readback.connect(self._on_mot_coil_readback)
         self.mot_coil_worker.fault.connect(
-            lambda msg: self._show_fault(self.coil_usb_status, "coil", msg)
+            lambda msg: self._show_fault(
+                self.coil_usb_status, "coil", msg, "mot_coil"
+            )
         )
         self.mot_coil_worker.start()
 
@@ -2638,11 +2973,33 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._on_dispenser_cooldown_started
         )
         self.dispenser_worker.fault.connect(
-            lambda msg: self._show_fault(self.dispenser_usb_status, "dispenser", msg)
+            lambda msg: self._show_fault(
+                self.dispenser_usb_status, "dispenser", msg, "dispenser"
+            )
         )
         self.dispenser_worker.start()
 
     def _start_repump_workers(self):
+        """Start the two other RPyC clients, once the RP is known to answer.
+
+        Each is checked on its own. The guard used to return if *either*
+        was alive, which meant one survivor masked one corpse: when the
+        server dropped the gate client and the DAC client's thread kept
+        running (faulting every poll), the gate was never rebuilt and the
+        repump button silently did nothing for the rest of the session.
+        """
+        self._start_vtune_worker()
+        self._start_gate_worker()
+
+    @staticmethod
+    def _is_running(worker):
+        return worker is not None and worker.isRunning()
+
+    def _start_vtune_worker(self):
+        # LinkHealth re-emits "connected" on every up edge, so this must be
+        # idempotent or a blip would spawn a second client on the same DAC.
+        if self._is_running(getattr(self, "vtune_worker", None)):
+            return
         self._vtune_slider_synced = False
         self.vtune_worker = DacClickWorker(
             host=self.rp_edit.text().strip(),
@@ -2659,6 +3016,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.vtune_worker.start()
 
+    def _start_gate_worker(self):
+        if self._is_running(getattr(self, "repump_gpio_worker", None)):
+            return
         # The repump RF gate is fixed at DIO1_N (bank n, bit 1), active-low
         # — the empirically verified mapping from qmot-linien-controls.
         self.repump_gpio_worker = LinienGpioWorker(
@@ -2669,7 +3029,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             event_log=self._event_log,
         )
         self.repump_gpio_worker.connection_status.connect(
-            lambda status: self._log_connection("repump_gate", status)
+            lambda status: self._on_repump_gate_status(status)
         )
         self.repump_gpio_worker.output_state.connect(self._on_repump_gpio_state)
         self.repump_gpio_worker.fault.connect(
@@ -2735,10 +3095,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # With modulation off the device stays at zero regardless; the
         # slider only records what to restore when it is switched on.
         if not self.mod_enable_btn.isChecked():
+            self._note_mod_touched(pushed=False)
             return
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_amplitude(value)
+        self._note_mod_touched(pushed=worker is not None)
 
     def _on_sweep_speed(self, combo_index):
         self._settings.setValue("linien/sweep_speed_index", combo_index)
@@ -2755,6 +3117,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._set_chip("lock", "LOCKED", "#6f9e7c")
         else:
             self._set_chip("lock", "UNLOCKED", "#b56a6a")
+        self._readback_seen.add("lock")
         self._event_log.log("lock", locked=bool(locked))
 
     # ------------------------------------------------------------------
@@ -2762,6 +3125,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_laser_init(self, values):
+        # The Koheron answered, so the laser button and these sliders are
+        # its state rather than a restored preference.
+        self._readback_seen.add("laser")
         self.current_slider.blockSignals(True)
         self.current_slider.setValue(int(values["current"]))
         self.current_slider.blockSignals(False)
@@ -2956,11 +3322,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._set_chip("coils", f"COILS {state['i_out']:.1f} A", "#6f9e7c")
         else:
             self._set_chip("coils", "COILS OFF", "#ababab")
+        self._readback_seen.add("coils")
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
         # No readback row on this card -- the fire button and the header
         # chip carry the state. Protections still reach the event log.
+        self._readback_seen.add("dispenser")
         self._log_readback("dispenser", state)
 
     def _sync_output_button(self, button, state, on_text, off_text, key):
@@ -3004,6 +3372,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_dispenser_fire_state(self, state):
         phase = state.get("phase", "idle")
         remaining = float(state.get("remaining_s", 0.0))
+        self._readback_seen.add("dispenser")
         if phase != self._dispenser_phase:
             if phase == "firing":
                 self._event_log.log(
@@ -3117,12 +3486,31 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._expect_output("repump", checked)
         self._event_log.user("repump_gate", on=bool(checked))
         worker = getattr(self, "repump_gpio_worker", None)
-        if worker is not None:
-            worker.set_output(checked)
+        if worker is None or not worker.isRunning():
+            # The press used to end here in silence: the button moved, the
+            # log recorded the intent, and the GPIO bit never heard about
+            # it. Say so, and stop the chip claiming the gate followed.
+            self._log_fault(
+                "repump_gate",
+                "gate not connected — the press did not reach the Red "
+                "Pitaya; press Auto-connect",
+            )
+            self._readback_seen.discard("repump")
+            self._set_chip("repump", "REPUMP NO LINK", "#b56a6a")
+            return
+        worker.set_output(checked)
+
+    def _on_repump_gate_status(self, status):
+        """The gate's own connection, which has no status row of its own."""
+        self._log_connection("repump_gate", status)
+        if not str(status).startswith("connected"):
+            # Whatever the button shows is no longer the GPIO bit.
+            self._readback_seen.discard("repump")
 
     def _on_repump_gpio_state(self, enabled):
         # Same rule as the supplies: a readback must not overwrite a
         # button the user just pressed while the write is in flight.
+        self._readback_seen.add("repump")
         desired, deadline = self._pending_output.get("repump", (None, 0.0))
         if desired is not None:
             if bool(enabled) == desired:
@@ -3185,6 +3573,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _on_filter_changed(self, *_args):
         if self._filters_syncing:
             return
+        # Deliberately not _filters_syncing: that flag is re-entrancy
+        # protection for _set_filters_ui, and it is False again by the time
+        # a connect-time readback could land on top of the operator.
+        self._filters_touched = True
         self._debounced_log(
             "error_filters",
             "setpoint",
@@ -3197,12 +3589,26 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_filters(self._filters_from_ui())
+            # Desired and actual agree now, so a later readback is welcome
+            # to drive these again. Without this the flag would be a
+            # one-way latch and every reconnect would report a divergence.
+            self._filters_touched = False
 
     def _sync_filters_from_device(self):
         worker = self._get_lock_worker()
         filters = worker.get_filters() if worker is not None else None
         if filters is None:
             self._log_fault("linien", "error filter read skipped: not connected")
+            return
+        if self._filters_touched:
+            # A readback must never overwrite a control the operator is
+            # working in. Show the divergence instead: it means a failed
+            # write, a front-panel change, or a device in protection.
+            self._event_log.fault(
+                "filter_divergence",
+                device=filters,
+                ui=self._filters_from_ui(),
+            )
             return
         self._set_filters_ui(filters)
 
@@ -3215,9 +3621,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """
         self._server_stalled = bool(stalled)
         if stalled:
-            self.rp_usb_status.setText("Stalled")
-            self.rp_usb_status.setStyleSheet(
-                "color: #b9924f; font-size: 13px; font-weight: 700; border: none;"
+            # The chip carries the word "stalled"; the row says Error like
+            # every other way a device stops being usable.
+            self._set_usb_status_label(
+                self.rp_usb_status,
+                "error:server heartbeat stopped — it is wedged, restart it",
+                "rp",
             )
             self._set_chip("lock", "RP STALLED", "#b9924f")
         else:
@@ -3287,6 +3696,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._rp_last_status = status
         self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
+            # The server answered, so the two other clients to it have
+            # somewhere to connect. Guarded against the repeat emissions
+            # LinkHealth makes on recovery.
+            self._start_repump_workers()
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
             # Push the saved offset preference; the server default is True
@@ -3321,9 +3734,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._event_log.log("pid_set", p=p_value, i=i_value, d=d_value)
 
     def _collect_config(self):
-        """Snapshot of every control setting, for the JSON export."""
-        worker = self._get_lock_worker()
-        pid = worker.get_pid() if worker is not None else None
+        """Snapshot of every control setpoint, for the JSON export.
+
+        Setpoints only. Nothing here may describe whether an output is on
+        -- no laser enable, no coil output, no repump gate, no lock state,
+        no fire -- so that loading a config can never switch anything on or
+        off. _reject_state_keys enforces that; see _CONFIG_STATE_KEYS.
+
+        Every value comes from the UI or from QSettings. Nothing is read
+        off a device, which is what makes this a record of what the
+        operator set rather than of what the hardware was doing.
+        """
         # Sliders read in physical units now; the config keeps hardware
         # units so files written by either build stay interchangeable.
         vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)
@@ -3345,9 +3766,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "mod_phase_deg": self.mod_phase_slider.value(),
                 "mod_strength_mv": self.mod_strength_slider.value(),
                 "sweep_speed_index": self.sweep_speed_combo.currentIndex(),
-                "pid": (
-                    {"p": pid[0], "i": pid[1], "d": pid[2]} if pid else None
-                ),
+                # No "pid": it lives only on the server (the dialog reads it
+                # live and writes it straight back), so saving it meant
+                # reading the hardware. Older files that carry one are still
+                # applied on load.
                 "filters": self._filters_from_ui(),
             },
             "laser": {
@@ -3380,8 +3802,41 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             },
         }
 
+    # Key names that describe an output rather than a setpoint. A config
+    # may not carry one: loading a file must never switch the laser, the
+    # coils, the repump gate, the dither or the dispenser on or off.
+    # "fire_current_a"/"fire_seconds" are absent on purpose -- they size a
+    # fire the operator presses, they do not start one.
+    _CONFIG_STATE_KEYS = frozenset({
+        "output", "enabled", "locked", "lock", "firing", "fire_now",
+    })
+    _CONFIG_STATE_SUFFIXES = ("_on", "_enabled", "_output", "_locked")
+
+    def _reject_state_keys(self, config, path=()):
+        """Drop any output state from a config, and say so.
+
+        The rule held by accident for as long as nobody added such a key.
+        This is what makes it hold on purpose: a new "output_enabled" in
+        _collect_config would otherwise make loading a file energise a
+        supply, and no test would be looking.
+        """
+        for key in list(config):
+            value = config[key]
+            if key in self._CONFIG_STATE_KEYS or key.endswith(
+                self._CONFIG_STATE_SUFFIXES
+            ):
+                del config[key]
+                self._event_log.fault(
+                    "config_state_key_dropped",
+                    key=".".join(path + (key,)),
+                    value=str(value),
+                )
+            elif isinstance(value, dict):
+                self._reject_state_keys(value, path + (key,))
+        return config
+
     def _write_config_json(self, path):
-        config = self._collect_config()
+        config = self._reject_state_keys(self._collect_config())
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
         self._event_log.log("config_saved", path=str(path))
@@ -3427,11 +3882,21 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _apply_config(self, config, path=None):
         """Apply a config snapshot to the UI (handlers push to hardware).
 
+        Setpoints only, and every one of them reaches its device
+        immediately where that device is connected -- that is what loading
+        a config is for. What it must never do is switch an output on or
+        off, so nothing here touches the laser, coil, repump, dither or
+        fire controls; state keys are stripped on the way in as well as on
+        the way out (see _CONFIG_STATE_KEYS).
+
         Missing keys are left unchanged, so partial configs are fine.
         Ports/hosts only update the fields — press Connect / Reconnect to
         use them. Dispenser settings are confirmation-gated. The fire
         history and cooldown are device truth and are never loaded.
         """
+        # A hand-edited or older file could carry one; nothing below reads
+        # it, but the record should say it was there and ignored.
+        self._reject_state_keys(config)
         connection = config.get("connection", {})
         for key, edit in (
             ("rp_host", self.rp_edit),
@@ -3612,22 +4077,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
 
     def _set_usb_status_label(self, label, status, key=None):
-        """Compact status for the fixed-width USB card rows.
+        """The status of one device row. Three outcomes, and only three.
 
-        The full status string (port path, error detail) goes in the
-        tooltip so the label never overflows its 84 px column.
+        OK means connected, "..." means an attempt is in flight, and
+        everything else is Error. The rows used to carry nine different
+        words -- No port, Probing, Verified, Not found, Unplugged, Port
+        back, Stalled, Fault -- which is more vocabulary than a glance can
+        hold, and most of them were written straight onto the label by
+        other methods, bypassing the _device_connected accounting below.
+        The reason is not lost: it is the whole status string, and it is on
+        the tooltip.
         """
         if status.startswith("connected"):
             text, color = "OK", "#6f9e7c"
         elif status.startswith("connecting"):
             # Amber, not green: an attempt in progress is not a device.
             text, color = "...", "#b9924f"
-        elif status in ("no_port", "no_host"):
-            text, color = "No port", "#ababab"
-        elif status.startswith("error"):
-            text, color = "Error", "#b56a6a"
         else:
-            text, color = "--", "#ababab"
+            text, color = "Error", "#b56a6a"
         label.setText(text)
         label.setToolTip(status)
         label.setStyleSheet(
@@ -3635,10 +4102,27 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         if key is not None:
             self._device_connected[key] = text == "OK"
+            if text != "OK":
+                # Its last readback is stale now, so nothing may keep
+                # reporting what is on screen as this device's own state.
+                for output in self._DEVICE_OUTPUTS.get(key, ()):
+                    self._readback_seen.discard(output)
             self._refresh_device_count()
 
     # Every device with a status row, so the count matches what is listed.
     _DEVICE_KEYS = ("rp", "laser", "mot_coil", "dispenser")
+
+    # Which live outputs each device is the authority for. Used to drop the
+    # device-backed claim when that device stops answering.
+    # Not "repump": the gate is a separate RPyC connection of its own
+    # (LinienGpioWorker), so the acquisition row says nothing about it. Its
+    # own status handler drops that claim -- see _start_repump_workers.
+    _DEVICE_OUTPUTS = {
+        "rp": ("lock", "modulation"),
+        "laser": ("laser",),
+        "mot_coil": ("coils",),
+        "dispenser": ("dispenser",),
+    }
 
     def _refresh_device_count(self):
         """Header count, derived from live connection state.
@@ -3659,11 +4143,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._CHIP_NEUTRAL if n_ok == 0 else "#b9924f",
         )
 
-    def _show_fault(self, label, device, message):
-        label.setText("Fault")
-        label.setStyleSheet(
-            "color: #b56a6a; font-size: 13px; font-weight: 700; border: none;"
-        )
+    def _show_fault(self, label, device, message, key=None):
+        """A worker fault, on its row and in the log.
+
+        Through _set_usb_status_label like everything else: writing the
+        label directly left the row red while the DEVICES count still had
+        the device as connected.
+        """
+        self._set_usb_status_label(label, f"error:{message}", key)
         self._log_fault(device, message)
 
     # ------------------------------------------------------------------
@@ -3676,22 +4163,38 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         Read from the UI's own state rather than by querying devices: the
         close path must not block on a device that has stopped answering,
         which is exactly when you most want to be told what is still on.
+
+        Two callers, and they want different things from ``backed_by``:
+        ``closeEvent`` ignores it deliberately -- an output we cannot verify
+        still has to be offered for driving safe -- while
+        ``_report_startup_outputs`` reports only device-backed entries,
+        because announcing a restored setting as an energised output is what
+        made a launch with the Red Pitaya unplugged accuse it of dithering.
+        Anything added here needs its ``backed_by`` decided on the same
+        rule: did a readback say so, or is a control the only evidence?
         """
+        def source(key):
+            return "device" if key in self._readback_seen else "ui"
+
         outputs = []
         if self._dispenser_phase == "firing":
             outputs.append(LiveOutput(
                 "dispenser", "Dispenser",
                 f"firing, {self._dispenser_fire_current:.1f} A",
                 mandatory=True,
+                # The phase only reaches "firing" through the worker.
+                backed_by="device",
             ))
         if self.laser_btn.isChecked():
             outputs.append(LiveOutput(
                 "laser", "Laser",
                 f"{self.current_slider.value()} mA",
+                backed_by=source("laser"),
             ))
         if self.chip_text("lock") == "LOCKED":
             outputs.append(LiveOutput(
                 "lock", "Lock", "engaged",
+                backed_by=source("lock"),
             ))
         # The slider holds a value even when the dither is switched off --
         # it is the level to restore, not the level being driven, and
@@ -3701,14 +4204,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             outputs.append(LiveOutput(
                 "modulation", "Dither",
                 f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp",
+                backed_by=source("modulation"),
             ))
         if self.mot_coil_output_btn.isChecked():
             outputs.append(LiveOutput(
                 "coils", "Coils",
                 f"{self.mot_coil_current_slider.value() / 1000.0:.1f} A",
+                backed_by=source("coils"),
             ))
         if self.repump_gpio_btn.isChecked():
-            outputs.append(LiveOutput("repump", "Repump", "on"))
+            outputs.append(LiveOutput(
+                "repump", "Repump", "on", backed_by=source("repump"),
+            ))
         return outputs
 
     def _drive_outputs_safe(self, keys):
@@ -3720,11 +4227,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         lock_worker = self._get_lock_worker()
         laser_worker = getattr(self, "laser_worker", None)
 
-        if "modulation" in keys and lock_worker is not None:
+        if "modulation" in keys:
             # A linien parameter, not a worker output, so nothing else
             # would zero it -- it would keep dithering after we exit.
-            lock_worker.set_modulation_amplitude(0)
+            # Driven through the button rather than straight at the worker:
+            # _on_mod_enabled also clears the persisted linien/mod_enabled,
+            # and writing 0 without clearing it meant the next launch came
+            # up claiming a dither that had been switched off on the way
+            # out. It runs with no worker at all, which is the case that
+            # left the flag set for days.
             self._event_log.log("modulation_auto_off", reason="app_exit")
+            self.mod_enable_btn.setChecked(False)
         if lock_worker is not None:
             lock_worker.unlock_on_stop = "lock" in keys
         if laser_worker is not None:
@@ -3761,6 +4274,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             keys = set()
 
         self._save_ui_state()
+        # Before app_stop, so a still-open run of suppressed faults is
+        # counted in the record rather than dying with the process.
+        self._event_log.flush_repeats()
         self._event_log.log("app_stop")
         if self._dispenser_phase == "firing":
             # Closing mid-fire skips the worker's cooldown transition; the
@@ -3775,6 +4291,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.camera_widget.stop()
         self.linien_widget.stop()
         self._stop_hardware_workers()
+        watcher = getattr(self, "port_watch_worker", None)
+        if watcher is not None:
+            watcher.stop()
         probe = getattr(self, "probe_worker", None)
         if probe is not None:
             probe.wait(3000)
@@ -3789,14 +4308,19 @@ def quiet_console():
     """Keep third-party chatter off the console.
 
     Qt's multimedia backend announces its FFmpeg build on the first
-    camera query, and linien_client logs every connection attempt at
-    INFO. Neither is ours and neither is actionable, but the console is
+    camera query. It is not ours and not actionable, but the console is
     where a real traceback shows up, so noise there costs something.
 
     Nothing is discarded: Qt messages are re-emitted through the event
     log once the window opens (see OpenQuantumControlsWindow), and this
     only lowers what reaches stdout. Must run before QApplication --
     the multimedia backend prints during its own initialisation.
+
+    linien's own chatter is not handled here. It cannot be: linien_client
+    installs a console handler and sets its module loggers to DEBUG when
+    it is imported, which happens long after this runs, so anything done
+    to those loggers now is overwritten. capture_library_logging() does
+    it after the import instead.
     """
     os.environ.setdefault(
         "QT_LOGGING_RULES",
@@ -3805,8 +4329,6 @@ def quiet_console():
     # FFmpeg's own logger writes at the C level, beneath Qt's categories.
     os.environ.setdefault("QT_FFMPEG_DEBUG", "0")
     os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
-    for name in ("linien_client", "linien_common", "rpyc"):
-        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def main():

@@ -15,7 +15,7 @@ import time
 
 from pyqtgraph.Qt import QtCore
 
-from mot_logging import NULL_LOG
+from mot_logging import NULL_LOG, capture_library_logging
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +59,52 @@ def _list_candidate_ports():
     except Exception:
         return []
     return [p.device for p in list_ports.comports() if _is_likely_usb_serial(p)]
+
+
+class SerialPresenceWorker(QtCore.QThread):
+    """Watch for serial ports appearing and disappearing.
+
+    The Koheron worker has no poll loop -- it reads two setpoints at
+    connect and then only writes, from GUI slots, which is the accepted
+    exception to invariant 1. That leaves nobody to notice the laser being
+    unplugged: its row read OK for the rest of the session.
+
+    Enumerating ports is not device I/O. It does not open anything, does
+    not touch the handles the other workers hold, and costs nothing on the
+    wire, so it can watch every serial device at once -- including the one
+    that is never polled.
+
+    Signals:
+        ports_present(object): set of device names currently enumerated.
+    """
+
+    ports_present = QtCore.pyqtSignal(object)
+
+    POLL_MS = 3000
+
+    def __init__(self, poll_ms=None):
+        super().__init__()
+        self.poll_ms = int(poll_ms or self.POLL_MS)
+        self.running = False
+
+    def run(self):
+        self.running = True
+        last = None
+        while self.running:
+            try:
+                from serial.tools import list_ports
+
+                present = {p.device for p in list_ports.comports()}
+            except Exception:
+                present = None  # enumeration itself failed: claim nothing
+            if present is not None and present != last:
+                last = present
+                self.ports_present.emit(present)
+            self.msleep(self.poll_ms)
+
+    def stop(self):
+        self.running = False
+        self.wait()
 
 
 def drain_parameter_queue(client):
@@ -228,6 +274,42 @@ DPS_MODELS = {
 }
 
 
+class LinkHealth:
+    """Turns a stream of per-poll failures into two edges: down, and back.
+
+    A poll loop that fails keeps failing -- an unplugged supply raises
+    every 500 ms -- but the operator needs to be told once, and told again
+    when it recovers. ``connection_status`` was only ever emitted at
+    connect, so a device that went away mid-session still read as OK.
+
+    One failure is not a disconnection: a single bad frame on a 9600-baud
+    line is ordinary, so the down edge waits for a few in a row.
+    """
+
+    FAILURES_BEFORE_DOWN = 3
+
+    def __init__(self, threshold=None):
+        self.threshold = int(threshold or self.FAILURES_BEFORE_DOWN)
+        self.failures = 0
+        self.down = False
+
+    def failed(self):
+        """True exactly once, on the poll that makes this a disconnection."""
+        self.failures += 1
+        if self.down or self.failures < self.threshold:
+            return False
+        self.down = True
+        return True
+
+    def ok(self):
+        """True exactly once, on the poll that brings the link back."""
+        self.failures = 0
+        if not self.down:
+            return False
+        self.down = False
+        return True
+
+
 class RidenDPSWorker(QtCore.QThread):
     """Control a Riden DPS supply (MOT coils or dispenser)."""
 
@@ -268,6 +350,7 @@ class RidenDPSWorker(QtCore.QThread):
         self._client = None
         self._mutex = QtCore.QMutex()
         self._pending = []
+        self._link = LinkHealth()
 
     def run(self):
         if not self.port:
@@ -301,7 +384,17 @@ class RidenDPSWorker(QtCore.QThread):
                 self._service(state)
                 self.readback.emit(state)
             except Exception as e:
+                if self._link.failed():
+                    # Say it once, in the place that means "this device is
+                    # not there": the row and the DEVICES count, not another
+                    # line in the log.
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(
+                        f"connected:{self.port}@{self.address}"
+                    )
             self.msleep(self.poll_ms)
 
         if self.disable_on_stop and self._client is not None:
@@ -792,6 +885,7 @@ class DacClickWorker(QtCore.QThread):
         self._parameter = None
         self._mutex = QtCore.QMutex()
         self._pending_voltage = None
+        self._link = LinkHealth()
 
     def run(self):
         if not self.host:
@@ -801,6 +895,10 @@ class DacClickWorker(QtCore.QThread):
         try:
             from linien_client.connection import LinienClient
             from linien_client.device import Device
+
+            # This import may be the one that loaded linien_client, which
+            # attaches its own console handler as it goes.
+            capture_library_logging()
 
             dev = Device(
                 host=self.host, username=self.username, password=self.password
@@ -841,7 +939,12 @@ class DacClickWorker(QtCore.QThread):
                 elif ticks % 20 == 0:
                     self.voltage_readback.emit(float(self._parameter.value))
             except Exception as e:
+                if self._link.failed():
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
             ticks += 1
             self.msleep(100)
 
@@ -916,6 +1019,8 @@ class PsdWorker(QtCore.QThread):
         try:
             from linien_client.connection import LinienClient
             from linien_client.device import Device
+
+            capture_library_logging()  # see DacClickWorker.run
 
             dev = Device(
                 host=self.host, username=self.username, password=self.password
@@ -1092,6 +1197,7 @@ class LinienGpioWorker(QtCore.QThread):
         self._parameter = None
         self._mutex = QtCore.QMutex()
         self._pending_state = None
+        self._link = LinkHealth()
 
     def run(self):
         if not self.host:
@@ -1109,6 +1215,8 @@ class LinienGpioWorker(QtCore.QThread):
         try:
             from linien_client.connection import LinienClient
             from linien_client.device import Device
+
+            capture_library_logging()  # see DacClickWorker.run
 
             dev = Device(
                 host=self.host, username=self.username, password=self.password
@@ -1138,7 +1246,12 @@ class LinienGpioWorker(QtCore.QThread):
                 else:
                     self._emit_state_from_raw(int(self._parameter.value))
             except Exception as e:
+                if self._link.failed():
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
             self.msleep(250)
 
         if self.disable_on_stop:
@@ -1302,6 +1415,8 @@ class LinienServerRestartWorker(QtCore.QThread):
         try:
             from linien_client.deploy import start_remote_server
             from linien_client.device import Device
+
+            capture_library_logging()  # see DacClickWorker.run
         except Exception as e:
             self.finished_ok.emit(False, f"linien_client unavailable: {e}")
             return

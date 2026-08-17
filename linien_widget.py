@@ -11,7 +11,14 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 from superqt import QRangeSlider
 
-from styles import UI_FONT_PX, plot_label_style, style_plot_axes
+from mot_logging import capture_library_logging
+from styles import (
+    PLOT_COLUMN_MARGINS,
+    STATUS_BAD,
+    UI_FONT_PX,
+    plot_label_style,
+    style_plot_axes,
+)
 
 # This experiment's Red Pitaya. The old fallback was rp-F0C6AD,
 # a different device -- an empty host field quietly connected to
@@ -60,6 +67,8 @@ class LinienWidget(QtWidgets.QWidget):
     fault = QtCore.pyqtSignal(str)
     # The server's heartbeat stopped/resumed -- see LinienWorker.
     server_stalled = QtCore.pyqtSignal(bool)
+    # The dither amplitude in mV that the server was found running.
+    modulation_state = QtCore.pyqtSignal(object)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
                  show_stop_button=False, sweep_range=(-1.0, 1.0),
@@ -77,6 +86,27 @@ class LinienWidget(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        # Shown only when the Red Pitaya has stopped being tried for. It
+        # sits where the trace would be, because a missing spectrum is
+        # exactly the symptom the operator is looking at, and the Devices
+        # row alone (a red "Error" in a collapsed card) never said what to
+        # do about it.
+        self.rp_banner = QtWidgets.QLabel()
+        self.rp_banner.setWordWrap(True)
+        self.rp_banner.setStyleSheet(
+            f"color: {STATUS_BAD}; background: #1a1010;"
+            f"border: 1px solid {STATUS_BAD}; padding: 6px 8px;"
+            f"font-size: {UI_FONT_PX}px;"
+        )
+        self.rp_banner.hide()
+        # Inset to the same edge as the Sweep Speed row above it; without
+        # this the banner ran the full width of the column and read as
+        # belonging to the window rather than to the plot.
+        banner_row = QtWidgets.QHBoxLayout()
+        banner_row.setContentsMargins(*PLOT_COLUMN_MARGINS)
+        banner_row.addWidget(self.rp_banner)
+        layout.addLayout(banner_row)
 
         pg.setConfigOptions(useOpenGL=False, enableExperimental=False, imageAxisOrder="row-major")
         self.pg_widget = pg.GraphicsLayoutWidget()
@@ -280,19 +310,44 @@ class LinienWidget(QtWidgets.QWidget):
             self.fault.emit(f"linien_worker not importable, plot is static: {e}")
             return
 
-        # Connecting takes seconds (RPyC handshake, possibly an SSH
-        # server start). Say so, or the row reads "--" and looks broken.
-        self.connection_status_changed.emit(f"connecting:{self._linien_host}")
+        # Only now: importing linien_worker is what pulls in linien_client,
+        # and linien_client installs its own console handler on import.
+        capture_library_logging()
+
+        # Connecting takes seconds (RPyC handshake, possibly an SSH server
+        # start, and up to three attempts). Say so, or the row reads "--"
+        # and looks broken. Through the same handler as the worker's own
+        # statuses, so starting again clears a banner from last time.
+        self._on_connection_status(f"connecting:{self._linien_host}")
         self.linien_thread = LinienWorker(
             host=self._linien_host, event_log=self._event_log
         )
         self.linien_thread.new_data.connect(self._update_plot)
         self.linien_thread.initial.connect(self._initialize_slider)
         self.linien_thread.lock_state.connect(self._on_lock_state)
-        self.linien_thread.connection_status.connect(self.connection_status_changed.emit)
+        self.linien_thread.connection_status.connect(self._on_connection_status)
         self.linien_thread.fault.connect(self.fault.emit)
         self.linien_thread.server_stalled.connect(self.server_stalled.emit)
+        self.linien_thread.modulation_state.connect(self.modulation_state.emit)
         self.linien_thread.start()
+
+    def _on_connection_status(self, status):
+        """Re-emit the worker's status, and say so on the plot when it gave up."""
+        if status.startswith("error"):
+            # The worker owns the count; stop() clears the thread, so a
+            # status that lands after teardown still needs a number.
+            attempts = getattr(self.linien_thread, "CONNECT_ATTEMPTS", 3)
+            self.rp_banner.setText(
+                f"Red Pitaya {self._linien_host} did not answer after "
+                f"{attempts} attempts. Check the host under Devices, then "
+                f"press Auto-connect. It can take a couple of goes a minute "
+                f"or two apart — a Red Pitaya that was just powered on is "
+                f"slow to answer, and its hostname takes a while to resolve."
+            )
+            self.rp_banner.show()
+        else:
+            self.rp_banner.hide()
+        self.connection_status_changed.emit(status)
 
     # --- Slots ---
 

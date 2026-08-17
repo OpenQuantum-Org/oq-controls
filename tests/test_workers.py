@@ -53,6 +53,10 @@ class FakeClient:
     def __init__(self):
         self.parameters = FakeParams()
         self.connection = types.SimpleNamespace(root=FakeRoot())
+        # linien sets this only once connect() has reached the server, and
+        # the worker's write guards read it. A fake that stands for a
+        # connected client has to carry it, or every setter below refuses.
+        self.connected = True
 
 
 def worker():
@@ -72,6 +76,32 @@ def test_modulation_amplitude_is_dac_units_not_volts():
     assert w.client.parameters.modulation_amplitude.value == 2048
     w.set_modulation_amplitude(1000)
     assert w.client.parameters.modulation_amplitude.value == 4096
+
+
+def test_modulation_amplitude_is_read_back_in_mv():
+    """The inverse of the write above, used at connect.
+
+    Nothing read this parameter before, so the dither button was a saved
+    preference displayed as device state -- it claimed a running dither on
+    a launch that never reached the Red Pitaya.
+    """
+    w = worker()
+    seen = []
+    w.modulation_state.connect(seen.append)
+    w.client.parameters.modulation_amplitude.value = 2048  # 0.5 Vpp
+    w._emit_modulation_state()
+    assert seen and abs(seen[0] - 500.0) < 0.1, seen
+
+    # A failed read is logged, not emitted as a zero: "the dither is off"
+    # and "we could not ask" are different claims.
+    class Exploding:
+        @property
+        def value(self):
+            raise RuntimeError("rpyc is down")
+
+    w.client.parameters._params["modulation_amplitude"] = Exploding()
+    w._emit_modulation_state()
+    assert len(seen) == 1, seen
 
 
 def test_modulation_frequency_is_phase_accumulator_units_not_hz():
@@ -370,6 +400,103 @@ def test_faults_go_to_the_log_not_stdout():
         w.set_modulation_phase(90)
     assert captured.getvalue() == "", captured.getvalue()
     assert records and records[0][0] == "fault", records
+
+
+def test_connect_tries_a_few_times_then_says_so():
+    """One attempt was not enough to act on.
+
+    An RP that is booting, or an mDNS name that has not propagated, fails
+    once and then works. A host that is off fails every time, and then the
+    operator has to be told it stopped trying.
+    """
+    import linien_worker
+
+    w = LinienWorker(host="fake.local")
+    w.RETRY_DELAY_S = 0  # the test is about the count, not the wait
+    statuses = []
+    w.connection_status.connect(statuses.append)
+
+    attempts = []
+
+    def always_fails():
+        attempts.append(1)
+        raise RuntimeError("no route to host")
+
+    w._connect_once = always_fails
+    assert w._connect_with_retries() is False
+    assert len(attempts) == w.CONNECT_ATTEMPTS, attempts
+    # Two "still trying" statuses, then exactly one error.
+    assert [s.split(":")[0] for s in statuses] == [
+        "connecting", "connecting", "error"
+    ], statuses
+    assert "3 attempts" in statuses[-1], statuses[-1]
+    assert "RuntimeError" in statuses[-1], statuses[-1]
+
+    # A connect that comes good on a later attempt is not an error at all.
+    w = LinienWorker(host="fake.local")
+    w.RETRY_DELAY_S = 0
+    statuses = []
+    w.connection_status.connect(statuses.append)
+    calls = []
+
+    def fails_once():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("not yet")
+
+    w._connect_once = fails_once
+    assert w._connect_with_retries() is True
+    assert not any(s.startswith("error") for s in statuses), statuses
+
+
+def test_link_health_reports_one_edge_each_way():
+    """A poll loop that fails keeps failing; the operator is told once.
+
+    connection_status used to be emitted only at connect, so a device that
+    went away mid-session still read as OK -- and its failure was written
+    to the log at the poll rate instead.
+    """
+    from mot_workers import LinkHealth
+
+    link = LinkHealth()
+    # One bad frame on a 9600-baud line is not a disconnection.
+    assert not link.failed()
+    assert not link.failed()
+    assert link.failed(), "third consecutive failure is the down edge"
+    assert not link.failed(), "down edge must not repeat"
+    assert link.ok(), "recovery is the up edge"
+    assert not link.ok(), "up edge must not repeat"
+
+    # A success resets the run, so intermittent failures never latch down.
+    link = LinkHealth()
+    for _ in range(10):
+        assert not link.failed()
+        assert not link.ok()
+
+
+def test_writes_are_refused_when_the_connect_never_succeeded():
+    """`self.client` exists before connect() runs, so it is not proof.
+
+    A failed connect leaves a live LinienClient with no `parameters`, and
+    every later write reported `'LinienClient' object has no attribute
+    'parameters'` -- an AttributeError where the answer was "there is no
+    server to write to".
+    """
+    import mot_logging
+
+    w = worker()
+    records = []
+    w.event_log = mot_logging.EventLog(".")
+    w.event_log._write = lambda kind, event, fields: records.append(
+        (kind, fields.get("message", ""))
+    )
+    w.client.connected = False
+
+    w.set_modulation_amplitude(500)
+    assert w.client.parameters.modulation_amplitude.value == 0, "wrote anyway"
+    assert not w.client.connection.root.calls, w.client.connection.root.calls
+    assert records and records[0][0] == "fault", records
+    assert "not connected" in records[0][1], records
 
 
 def main():

@@ -16,7 +16,7 @@ from time import monotonic, sleep
 from linien_common.common import MHz, AutolockMode, Vpp
 
 from mot_logging import NULL_LOG
-from mot_workers import drain_parameter_queue
+from mot_workers import LinkHealth, drain_parameter_queue
 
 # See linien_widget: rp-F0C6AD was a different Red Pitaya.
 DEFAULT_RP_HOST = "rp-f0f2b5.local"
@@ -30,6 +30,9 @@ class LinienWorker(QtCore.QThread):
     fault = QtCore.pyqtSignal(str)  # anything that would otherwise be silent
     # True when the server's heartbeat has stopped, False when it resumes.
     server_stalled = QtCore.pyqtSignal(bool)
+    # The dither amplitude the server is actually running, in mV, read once
+    # at connect. Nothing else told the UI whether the dither was on.
+    modulation_state = QtCore.pyqtSignal(object)
 
     # linien-server increments ``ping`` once a second from a thread of its
     # own (linien_server/server.py:181). If it stops advancing the server's
@@ -37,6 +40,12 @@ class LinienWorker(QtCore.QThread):
     # you by itself: a static spectrum is legitimate, a static heartbeat
     # is not.
     STALL_AFTER_S = 5.0
+
+    # A few attempts, then stop and say so. An RP that is still booting, or
+    # an mDNS name that has not propagated yet, fails once and then works;
+    # a host that is off fails every time and the operator needs telling.
+    CONNECT_ATTEMPTS = 3
+    RETRY_DELAY_S = 2.0
 
     def __init__(self, host=DEFAULT_RP_HOST, username="root", password="root",
                  event_log=None, unlock_on_stop=True):
@@ -62,6 +71,7 @@ class LinienWorker(QtCore.QThread):
         self._ping_ever_moved = False
         self._stalled = False
         self._last_lock_read_error = None
+        self._link = LinkHealth()
 
     def _check_server_alive(self):
         """Watch the server's heartbeat; report the edges, not every poll."""
@@ -103,47 +113,91 @@ class LinienWorker(QtCore.QThread):
             self.server_stalled.emit(True)
 
     def run(self):
-        try:
-            dev = Device(host=self.host, username=self.username, password=self.password)
-            self.client = LinienClient(dev)
-            self.client.connect(autostart_server=True, use_parameter_cache=True)
-
-            # Initialize sweep params
-            self.current_amplitude = float(self.client.parameters.sweep_amplitude.value)
-            self.current_center = float(self.client.parameters.sweep_center.value)
-
-            self.initial.emit(
-                {"center": self.current_center, "amplitude": self.current_amplitude}
-            )
-
-            # Force the SIMPLE autolock. This must be the *preference*:
-            # the server derives autolock_mode from it when a lock starts,
-            # so setting autolock_mode here would be overwritten.
-            # autolock_determine_offset is left alone -- it is a user
-            # setting the UI owns.
-            try:
-                p = self.client.parameters
-                p.fetch_additional_signals.value = False
-                p.autolock_mode_preference.value = AutolockMode.SIMPLE
-                self.client.connection.root.write_registers()
-            except Exception as e:
-                self.fault.emit(f"autolock setup failed: {e}")
-
-            self.event_log.log("linien_connected", host=self.host)
-            self.connection_status.emit(f"connected:{self.host}")
-
-            # Emit initial lock state (best-effort)
-            self._emit_lock_state_best_effort()
-
-        except Exception as e:
-            self._log(f"connect failed ({self.host}): {e}")
-            # "error:" rather than "disconnected": never having reached
-            # the device is a different thing from losing it, and only
-            # the first one means check the host and the cabling.
-            self.connection_status.emit(f"error:{e}")
+        if not self._connect_with_retries():
             return
-
         # Main acquisition loop
+        self._acquire()
+
+    def _connect_with_retries(self):
+        """Connect, trying a few times. True once the server answered.
+
+        One attempt was not enough to act on: an RP that is booting, or a
+        laptop whose mDNS has not caught up, fails once and then works.
+        Bounded on purpose -- after the last attempt the widget says to use
+        Auto-connect, which keeps reconnecting the operator's decision
+        rather than something the app does on a timer forever.
+        """
+        for attempt in range(1, self.CONNECT_ATTEMPTS + 1):
+            try:
+                self._connect_once()
+                return True
+            except Exception as e:
+                # Class name, not just str(e): linien raises a message-less
+                # GeneralConnectionError for host-not-found (it logs the
+                # real reason to its own logger, which
+                # capture_library_logging routes into ours).
+                detail = (
+                    f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                )
+                self._log(
+                    f"connect failed ({self.host}) "
+                    f"attempt {attempt}/{self.CONNECT_ATTEMPTS}: {detail}"
+                )
+                if attempt < self.CONNECT_ATTEMPTS:
+                    self.connection_status.emit(
+                        f"connecting:{self.host} — attempt {attempt + 1} of "
+                        f"{self.CONNECT_ATTEMPTS}"
+                    )
+                    sleep(self.RETRY_DELAY_S)
+                    continue
+                # "error:" rather than "disconnected": never having reached
+                # the device is a different thing from losing it, and only
+                # the first one means check the host and the cabling.
+                self.connection_status.emit(
+                    f"error:{detail} (after {self.CONNECT_ATTEMPTS} attempts)"
+                )
+                return False
+        return False
+
+    def _connect_once(self):
+        dev = Device(host=self.host, username=self.username, password=self.password)
+        self.client = LinienClient(dev)
+        self.client.connect(autostart_server=True, use_parameter_cache=True)
+
+        # Initialize sweep params
+        self.current_amplitude = float(self.client.parameters.sweep_amplitude.value)
+        self.current_center = float(self.client.parameters.sweep_center.value)
+
+        self.initial.emit(
+            {"center": self.current_center, "amplitude": self.current_amplitude}
+        )
+
+        # Force the SIMPLE autolock. This must be the *preference*:
+        # the server derives autolock_mode from it when a lock starts,
+        # so setting autolock_mode here would be overwritten.
+        # autolock_determine_offset is left alone -- it is a user
+        # setting the UI owns.
+        try:
+            p = self.client.parameters
+            p.fetch_additional_signals.value = False
+            p.autolock_mode_preference.value = AutolockMode.SIMPLE
+            self.client.connection.root.write_registers()
+        except Exception as e:
+            self.fault.emit(f"autolock setup failed: {e}")
+
+        # What the dither is actually doing, before anything is written.
+        # Read here rather than from a GUI slot: it is one more hop on a
+        # connection that is already open, and the answer is needed
+        # before the startup report decides what to claim.
+        self._emit_modulation_state()
+
+        self.event_log.log("linien_connected", host=self.host)
+        self.connection_status.emit(f"connected:{self.host}")
+
+        # Emit initial lock state (best-effort)
+        self._emit_lock_state_best_effort()
+
+    def _acquire(self):
         self.running = True
         while self.running:
             # Refreshes the local parameter cache and, just as
@@ -199,7 +253,14 @@ class LinienWorker(QtCore.QThread):
                     }
                 )
             except Exception as e:
+                if self._link.failed():
+                    # A closed RPyC stream never recovers on its own, so
+                    # the row must stop saying OK. Once, not per poll.
+                    self.connection_status.emit(f"error:{type(e).__name__}: {e}")
                 self._log("acquisition failed: " + str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
 
             self._emit_lock_state_best_effort()
             self._check_server_alive()
@@ -213,7 +274,7 @@ class LinienWorker(QtCore.QThread):
         # drifts off the line with nothing watching it. Skipped when the
         # operator chose to leave it engaged.
         try:
-            if self.unlock_on_stop and getattr(self, "client", None):
+            if self.unlock_on_stop and self.connected:
                 self.client.connection.root.start_sweep()
             elif not self.unlock_on_stop:
                 self.event_log.log("lock_left_engaged", reason="operator_choice")
@@ -225,8 +286,48 @@ class LinienWorker(QtCore.QThread):
         """Record what would otherwise have gone to stdout."""
         self.event_log.fault("linien", message=str(message))
 
+    def _emit_modulation_state(self):
+        """Report the dither amplitude the server is running, in mV.
+
+        ``modulation_amplitude`` is in DAC units -- ``Vpp`` of them per volt
+        peak-to-peak -- so this is the inverse of set_modulation_amplitude.
+        Best-effort: a connect that otherwise worked must stand.
+        """
+        try:
+            counts = float(self.client.parameters.modulation_amplitude.value)
+        except Exception as e:
+            self._log(f"mod amplitude read failed: {e}")
+            return
+        self.modulation_state.emit(counts / Vpp * 1000.0)
+
+    @property
+    def connected(self):
+        """True once connect() reached the server.
+
+        ``self.client`` is assigned before ``connect()`` runs, so its mere
+        existence proves nothing: after a failed connect it is a live
+        object with no ``parameters``, which is why writes used to report
+        ``'LinienClient' object has no attribute 'parameters'`` instead of
+        saying they had nowhere to go.
+
+        This is "the handshake succeeded", not "the link is up now" --
+        linien clears its flag only in ``disconnect()``, so a cable pulled
+        mid-session leaves it True. That is the right test for the guards
+        below; the ``except`` arms are what cover a link that dies later.
+        """
+        return bool(getattr(getattr(self, "client", None), "connected", False))
+
+    def _require_connection(self, what):
+        """Guard a write. Logs and returns False when there is no server."""
+        if self.connected:
+            return True
+        self._log(f"{what} failed: not connected")
+        return False
+
     def stop_sweep(self):
         """Stop the sweep and hold the output at the current center voltage."""
+        if not self._require_connection("stop sweep"):
+            return
         try:
             self.client.parameters.sweep_amplitude.value = 0
             self.client.connection.root.write_registers()
@@ -240,6 +341,8 @@ class LinienWorker(QtCore.QThread):
         own ``Vpp`` constant (= 4095.75) is units per volt peak-to-peak.
         Writing volts here made the dither ~4096x too small.
         """
+        if not self._require_connection("mod amplitude update"):
+            return
         try:
             self.client.parameters.modulation_amplitude.value = int(
                 round(amplitude_mV / 1000.0 * Vpp)
@@ -255,6 +358,8 @@ class LinienWorker(QtCore.QThread):
         Hz: linien's ``MHz`` constant (= 0x10000000/8) is units per MHz.
         Writing Hz here made the frequency ~33.55x too low.
         """
+        if not self._require_connection("mod freq update"):
+            return
         try:
             self.client.parameters.modulation_frequency.value = int(
                 round(freq_khz / 1000.0 * MHz)
@@ -265,6 +370,8 @@ class LinienWorker(QtCore.QThread):
 
     def set_modulation_phase(self, phase_deg: float):
         """Set the demodulation phase in degrees."""
+        if not self._require_connection("mod phase update"):
+            return
         try:
             self.client.parameters.demodulation_phase_a.value = int(phase_deg)
             self.client.connection.root.write_registers()
@@ -273,6 +380,8 @@ class LinienWorker(QtCore.QThread):
 
     def set_sweep_speed(self, speed: int):
         """Set the sweep speed (0–15, see Linien sweep speed table)."""
+        if not self._require_connection("sweep speed update"):
+            return
         try:
             self.client.parameters.sweep_speed.value = int(speed)
             self.client.connection.root.write_registers()
@@ -281,7 +390,7 @@ class LinienWorker(QtCore.QThread):
 
     def get_pid(self):
         """Read the lock PID gains as (p, i, d), or None if unavailable."""
-        if not hasattr(self, "client"):
+        if not self.connected:
             return None
         try:
             params = self.client.parameters
@@ -296,8 +405,7 @@ class LinienWorker(QtCore.QThread):
 
     def set_pid(self, p_value: int, i_value: int, d_value: int):
         """Write the lock PID gains (each 0–8191)."""
-        if not hasattr(self, "client"):
-            self._log("PID update failed: not connected")
+        if not self._require_connection("PID update"):
             return
         try:
             params = self.client.parameters
@@ -310,7 +418,7 @@ class LinienWorker(QtCore.QThread):
 
     def get_filters(self):
         """Read the channel-A error-signal filter settings, or None."""
-        if not hasattr(self, "client"):
+        if not self.connected:
             return None
         try:
             params = self.client.parameters
@@ -329,8 +437,7 @@ class LinienWorker(QtCore.QThread):
 
     def set_filters(self, settings: dict):
         """Write the channel-A error-signal filters (see get_filters)."""
-        if not hasattr(self, "client"):
-            self._log("filter update failed: not connected")
+        if not self._require_connection("filter update"):
             return
         try:
             params = self.client.parameters
@@ -350,6 +457,8 @@ class LinienWorker(QtCore.QThread):
             self._log(f"filter update failed: {e}")
 
     def request_sweep_change(self, center: float, amplitude: float):
+        if not self._require_connection("sweep update"):
+            return
         try:
             self.current_center = center
             self.current_amplitude = amplitude
@@ -392,6 +501,11 @@ class LinienWorker(QtCore.QThread):
         handing it volts degrades the lock badly. linien likewise sends
         the unscaled signal and divides only when drawing.
         """
+        if not self.connected:
+            # fault, not _log: this one is a button press, so it needs to
+            # answer the operator rather than only reach the file.
+            self.fault.emit("cannot lock: not connected to the Red Pitaya")
+            return
         params = self.client.parameters
         try:
             self.client.connection.root.start_sweep()
@@ -467,6 +581,8 @@ class LinienWorker(QtCore.QThread):
         The server reads this parameter inside exposed_start_autolock, so
         it only has to be set before a lock starts.
         """
+        if not self._require_connection("determine-offset update"):
+            return
         try:
             self.client.parameters.autolock_determine_offset.value = bool(
                 enabled
@@ -475,7 +591,8 @@ class LinienWorker(QtCore.QThread):
             self.fault.emit(f"determine-offset update failed: {e}")
 
     def unlock_laser(self):
-        
+        if not self._require_connection("unlock"):
+            return
         try:
             self.client.connection.root.start_sweep()
             if self._wait_for_lock(False, timeout_s=10):
@@ -489,7 +606,7 @@ class LinienWorker(QtCore.QThread):
             self._emit_lock_state_best_effort()
 
     def _emit_lock_state_best_effort(self, force_value=None):
-        if not hasattr(self, "client"):
+        if not self.connected:
             return
         try:
             if force_value is None:

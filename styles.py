@@ -243,6 +243,12 @@ STATUS_BAD = "#b56a6a"
 # Retained so older imports keep working; prefer ACCENT in new code.
 NEON_BLUE = ACCENT
 
+# Left/right insets for anything stacked in the spectroscopy column, so the
+# Sweep Speed row, the plot and the Red Pitaya banner share one edge. Lives
+# here because the row is built in mot_control and the banner in
+# linien_widget, and the two drifted apart when only one of them had them.
+PLOT_COLUMN_MARGINS = (20, 0, 8, 0)
+
 
 def make_section_title(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text.upper())

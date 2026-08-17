@@ -476,12 +476,19 @@ try:
     )
     assert window.chip_text("coils") == "COILS 1.0 A"
 
-    # USB row statuses stay compact (the 84 px column must never clip
-    # text, which previously showed "Not configured" as "t configured").
+    # Three words, and only three: OK when connected, "..." while an
+    # attempt is in flight, Error for everything else. Nine different words
+    # across four rows was more vocabulary than a glance can hold, and the
+    # reason still reaches the operator through the tooltip. The 84 px
+    # column must also never clip (it once showed "Not configured" as
+    # "t configured").
     for status, expected in (
-        ("no_port", "No port"),
+        ("no_port", "Error"),
+        ("no_host", "Error"),
+        ("connecting:probing the USB ports", "..."),
         ("connected:/dev/cu.usbserial-14230@1", "OK"),
         ("error:something long and detailed", "Error"),
+        ("anything else at all", "Error"),
     ):
         window._set_usb_status_label(window.coil_usb_status, status)
         assert window.coil_usb_status.text() == expected
@@ -527,7 +534,19 @@ try:
     assert "could not open port" in log_text
 
     # The repump gate and the dither both follow the laser off -- they are
-    # meaningless without it.
+    # meaningless without it. With a live gate client, so this tests the
+    # follow-off rule rather than the no-link path below.
+    class _StubGate:
+        def __init__(self):
+            self.writes = []
+
+        def isRunning(self):
+            return True
+
+        def set_output(self, enabled):
+            self.writes.append(bool(enabled))
+
+    window.repump_gpio_worker = _StubGate()
     window.laser_btn.setChecked(True)
     window.repump_gpio_btn.setChecked(True)
     window.mod_enable_btn.setChecked(True)
@@ -537,12 +556,16 @@ try:
     assert not window.repump_gpio_btn.isChecked()
     assert not window.mod_enable_btn.isChecked()
     assert window.chip_text("repump") == "REPUMP OFF"
+    assert window.repump_gpio_worker.writes == [True, False], (
+        window.repump_gpio_worker.writes
+    )
     assert window.mod_enable_btn.text() == "Modulation Off"
     # ...but neither follows it back on: that stays a deliberate act.
     window.laser_btn.setChecked(True)
     assert not window.repump_gpio_btn.isChecked()
     assert not window.mod_enable_btn.isChecked()
     window.laser_btn.setChecked(False)
+    window.repump_gpio_worker = None
 
     # --- Autolock line selection ---
     # The bug this replaced: each selection added marker lines that were
@@ -623,20 +646,149 @@ try:
     )
     assert not window._device_connected["rp"]
 
+    # Giving up on the Red Pitaya has to say what to do about it. A red
+    # "Error" in a collapsed Devices card never did.
+    assert not lw.rp_banner.isVisible()
+    lw._on_connection_status("error:GeneralConnectionError (after 3 attempts)")
+    assert lw.rp_banner.isVisible()
+    banner = lw.rp_banner.text()
+    assert lw._linien_host in banner, banner
+    assert "Auto-connect" in banner, banner
+    assert "3 attempts" in banner, banner
+    # Trying again clears it, without waiting for the attempt to land.
+    lw._on_connection_status("connecting:rp.local")
+    assert not lw.rp_banner.isVisible()
+
+    # The vtune DAC and the repump gate are two more clients to the same
+    # server, so they wait for it to answer instead of repeating the same
+    # failed connect. LinkHealth re-emits "connected" on every recovery,
+    # which must not spawn a second pair on one GPIO bit.
+    window.vtune_worker = None
+    window.repump_gpio_worker = None
+    started = []
+    orig_start_repump = window._start_repump_workers
+    window._start_repump_workers = lambda: started.append(1)
+    try:
+        window._on_linien_connection("error:nope")
+        assert started == [], "started them for a Red Pitaya that never answered"
+        window._on_linien_connection("connected:rp.local")
+        assert started == [1]
+    finally:
+        window._start_repump_workers = orig_start_repump
+
+    # The guard itself, against the real method: a second "connected" must
+    # not build a second pair on top of the running one.
+    class _Running:
+        def isRunning(self):
+            return True
+
+    window.vtune_worker = _Running()
+    window.repump_gpio_worker = _Running()
+    window._start_repump_workers()
+    assert isinstance(window.vtune_worker, _Running), "spawned a duplicate"
+    window.vtune_worker = None
+    window.repump_gpio_worker = None
+    # Put the connection state back: the checks further down read it, and
+    # _on_linien_connection above moved it to "connected".
+    window._rp_last_status = "disconnected"
+    window._device_connected["rp"] = False
+    window._readback_seen.discard("modulation")
+
+    # Unplugging a device has to show. Nothing polls the Koheron -- it reads
+    # two setpoints at connect and then only writes -- so its row read OK for
+    # the rest of the session no matter what happened to the cable.
+    window.laser_edit.setText("COM77")
+    window._device_connected["laser"] = True
+    window._readback_seen.add("laser")
+    # Everything else stays plugged in, so only the laser's edge is under
+    # test here.
+    others = {
+        window.mot_coil_port_edit.text().strip(),
+        window.dispenser_port_edit.text().strip(),
+    }
+    window._on_ports_present(others | {"COM77"})
+    assert "not there" not in window.laser_usb_status.toolTip()
+    before = len(_records())
+    window._on_ports_present(others)  # COM77 gone
+    # The row says Error like every other way a device stops being usable;
+    # which way it was is on the tooltip.
+    assert window.laser_usb_status.text() == "Error"
+    assert "COM77 is not there" in window.laser_usb_status.toolTip()
+    assert not window._device_connected["laser"]
+    # Its last readback is stale, so it is no longer the device's state.
+    assert "laser" not in window._readback_seen
+    vanished = next(
+        r for r in _records()[before:] if r["event"] == "port_vanished"
+    )
+    assert vanished["kind"] == "fault" and vanished["port"] == "COM77"
+
+    # Said once, not once per sweep of the port list.
+    before = len(_records())
+    window._on_ports_present(others)
+    window._on_ports_present(others)
+    assert len(_records()) == before, _records()[before:]
+
+    # And the return is reported too, without reconnecting anything: opening
+    # a port is a connection, and connections stay the operator's call.
+    window._on_ports_present(others | {"COM77"})
+    # Still Error: the port exists again but nothing has reopened it, and
+    # the tooltip is what says what to do about that.
+    assert window.laser_usb_status.text() == "Error"
+    assert "Auto-connect" in window.laser_usb_status.toolTip()
+    assert any(r["event"] == "port_returned" for r in _records()[before:])
+    window.laser_edit.setText("")
+
     # Anything already energised when the app connects gets named. The
     # repump gate is a Red Pitaya GPIO bit and the dither a linien
     # parameter the server restores, so an exit that skipped teardown
     # leaves them on and the next launch adopts them silently.
+    # With a live gate client: an output is only reportable as live if a
+    # device said so, and a press that cannot reach the Red Pitaya drops
+    # that claim (see the no-link check above).
+    window.repump_gpio_worker = _StubGate()
+    window._on_repump_gpio_state(True)
     window.repump_gpio_btn.setChecked(True)
+    before = len(_records())
     window._report_startup_outputs()
     found = next(
-        r for r in reversed(_records()) if r["event"] == "startup_outputs_live"
+        r for r in _records()[before:] if r["event"] == "startup_outputs_live"
     )
     assert found["kind"] == "fault"
     assert "repump" in found["outputs"], found
     assert "Repump on" in found["detail"], found
     assert "WERE ON" in window.chip_text("lock")
     window.repump_gpio_btn.setChecked(False)
+    window.repump_gpio_worker = None
+
+    # A restored setting is not a readback. With the dither on in the UI and
+    # nothing yet heard from the Red Pitaya, the report must say it could not
+    # tell -- it used to name the dither as live one second before failing to
+    # connect to the RP at all.
+    window.mod_enable_btn.setChecked(True)
+    window._mod_touched = False  # as if restored, not typed
+    assert "modulation" not in window._readback_seen
+    before = len(_records())
+    window._report_startup_outputs()
+    fresh = _records()[before:]
+    # The coils did report, so they are still named; the dither must not be.
+    assert not any(
+        "modulation" in r.get("outputs", [])
+        for r in fresh
+        if r["event"] == "startup_outputs_live"
+    ), fresh
+    unknown = next(r for r in fresh if r["event"] == "startup_outputs_unknown")
+    assert "modulation" in unknown["outputs"], unknown
+    assert unknown["rp_status"] == "disconnected", unknown
+
+    # Once the device has answered, the same state is a fact and reportable.
+    window._on_modulation_readback(400.0)
+    before = len(_records())
+    window._report_startup_outputs()
+    live = next(
+        r for r in _records()[before:] if r["event"] == "startup_outputs_live"
+    )
+    assert "modulation" in live["outputs"], live
+    window.mod_enable_btn.setChecked(False)
 
     # Nothing energised: no report, no chip change.
     window.mod_enable_btn.setChecked(False)
@@ -651,14 +803,121 @@ try:
     assert len(_records()) == before
     assert window.chip_text("lock") == "UNLOCKED"
 
+    # A worker fault drops the device out of the count too. It used to
+    # write "Fault" straight onto the label, so the row went red while the
+    # header still counted the device as connected.
+    window._set_usb_status_label(
+        window.coil_usb_status, "connected:/dev/cu.fakeB@1", "mot_coil"
+    )
+    assert window._device_connected["mot_coil"]
+    window._show_fault(
+        window.coil_usb_status, "coil", "WriteFile failed", "mot_coil"
+    )
+    assert window.coil_usb_status.text() == "Error"
+    assert "WriteFile failed" in window.coil_usb_status.toolTip()
+    assert not window._device_connected["mot_coil"]
+
+    # Auto-connect brings up the Red Pitaya as well as probing USB: it used
+    # to run the USB probe alone, so an RP that was down at startup could
+    # only be reached from Manual setup.
+    hosts = []
+    orig_set_host = window.linien_widget.set_host
+    orig_probe = window._run_usb_probe
+    orig_rp_host = window.rp_edit.text()
+    window.linien_widget.set_host = hosts.append
+    window._run_usb_probe = lambda startup=False: None
+    try:
+        window.rp_edit.setText("rp-auto.local")
+        window._rp_last_status = "error:nope"
+        window._auto_connect()
+        assert hosts == ["rp-auto.local"], hosts
+        # ...but a Red Pitaya that is already connected is left alone:
+        # restarting the client sweeps, and that drops a lock.
+        window._rp_last_status = "connected:rp-auto.local"
+        window._auto_connect()
+        assert hosts == ["rp-auto.local"], hosts
+    finally:
+        window.linien_widget.set_host = orig_set_host
+        window._run_usb_probe = orig_probe
+        window._rp_last_status = "disconnected"
+        window.rp_edit.setText(orig_rp_host)  # the screenshot shows this row
+
+    # One live Red Pitaya client must not mask a dead one. The start guard
+    # used to return if *either* was running, so when the server dropped
+    # the gate client while the DAC client's thread stayed up faulting, the
+    # gate was never rebuilt and the repump button silently did nothing for
+    # the rest of the session (2026-08-17, 16:24 onward).
+    class _FakeRPWorker:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def __getattr__(self, name):  # every signal: .connect(...)
+            return types.SimpleNamespace(connect=lambda *a, **k: None)
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            self.started = True
+
+    class _LiveWorker(_FakeRPWorker):
+        def isRunning(self):
+            return True
+
+    orig_gate_cls = mot_control.LinienGpioWorker
+    orig_dac_cls = mot_control.DacClickWorker
+    mot_control.LinienGpioWorker = _FakeRPWorker
+    mot_control.DacClickWorker = _FakeRPWorker
+    try:
+        live_dac = _LiveWorker()
+        window.vtune_worker = live_dac
+        window.repump_gpio_worker = None  # its thread exited on a failed connect
+        window._start_repump_workers()
+        assert window.vtune_worker is live_dac, "rebuilt a client that was fine"
+        assert isinstance(window.repump_gpio_worker, _FakeRPWorker)
+        assert window.repump_gpio_worker.started, "the dead gate was not rebuilt"
+
+        # And the reverse, so neither can hide behind the other.
+        live_gate = _LiveWorker()
+        window.vtune_worker = None
+        window.repump_gpio_worker = live_gate
+        window._start_repump_workers()
+        assert window.repump_gpio_worker is live_gate
+        assert window.vtune_worker.started
+    finally:
+        mot_control.LinienGpioWorker = orig_gate_cls
+        mot_control.DacClickWorker = orig_dac_cls
+        # Not left behind: a later slider change would call set_voltage on
+        # the fake and raise inside a Qt slot.
+        window.vtune_worker = None
+        window.repump_gpio_worker = None
+
+    # A press that cannot reach the Red Pitaya must not look like one that
+    # did: the button moved, the log recorded the intent, and the GPIO bit
+    # never heard about it.
+    window.repump_gpio_worker = None
+    window.repump_gpio_btn.setChecked(True)
+    assert "NO LINK" in window.chip_text("repump"), window.chip_text("repump")
+    gate_fault = next(
+        r for r in reversed(_records())
+        if r["event"] == "fault" and r.get("device") == "repump_gate"
+    )
+    assert "not connected" in gate_fault["message"], gate_fault
+    assert "repump" not in window._readback_seen
+    window.repump_gpio_btn.setChecked(False)
+    window._set_repump_ui(False)
+
     # A wedged server answers RPyC but its threads are dead, so the plot
     # just stops. Reconnecting does not help; only a restart does, and
     # the UI has to say which failure this is.
     window._on_server_stalled(True)
-    assert window.rp_usb_status.text() == "Stalled"
+    # The chip carries the word; the row is Error with the reason on hover.
+    assert window.rp_usb_status.text() == "Error"
+    assert "wedged" in window.rp_usb_status.toolTip()
+    assert not window._device_connected["rp"]
     assert window.chip_text("lock") == "RP STALLED"
     window._on_server_stalled(False)
-    assert window.rp_usb_status.text() != "Stalled"
+    assert "wedged" not in window.rp_usb_status.toolTip()
     assert window.chip_text("lock") == "UNLOCKED"
 
     # The restart action guards against a double press.
@@ -806,6 +1065,69 @@ try:
     assert "dispenser_fire_end" in window.log_view.toPlainText()
     assert window.log_card.header_status.text() != ""
 
+    # --- Log pane formatting ---
+    # The pane used to join every field as k=v in dict order and cut the
+    # line at 300 chars, so the part worth reading was last and usually the
+    # part that got cut -- and a fault read exactly like a readback.
+    RED = window._LOG_COLOURS["fault"]
+    AMBER = window._LOG_COLOURS["warn"]
+
+    # A generic fault is named by its device, and is red.
+    source, text, colour = window._log_line({
+        "kind": "fault", "event": "fault", "device": "coils",
+        "message": "WriteFile failed",
+    })
+    assert (source, colour) == ("coils", RED)
+    assert text == "WriteFile failed"
+
+    # A collapsed run says how many and over how long, in amber.
+    source, text, colour = window._log_line({
+        "kind": "fault", "event": "fault_repeated", "of": "fault",
+        "device": "coils", "message": "WriteFile failed",
+        "count": 148, "over_s": 30.0,
+    })
+    assert (source, colour) == ("coils", AMBER)
+    assert "148" in text and "30.0" in text
+
+    # An event that names itself keeps its name: the device must not take
+    # the column and leave "laser  port=COM6" saying nothing.
+    source, text, _ = window._log_line({
+        "kind": "state", "event": "port_vanished",
+        "device": "laser", "port": "COM6",
+    })
+    assert source == "port_vanished", source
+    assert "laser" in text and "COM6" in text
+
+    # Library records are the library's short name and its message.
+    source, text, colour = window._log_line({
+        "kind": "state", "event": "library", "level": "INFO",
+        "logger": "linien_client.connection",
+        "message": "Try to connect to rp-f0f2b5.local:18862",
+    })
+    assert source == "linien" and text.startswith("Try to connect")
+    assert colour == window._LOG_COLOURS["quiet"]
+    assert window._log_line({
+        "kind": "fault", "event": "library", "level": "ERROR",
+        "logger": "linien_client.connection", "message": "host not found",
+    })[2] == RED
+
+    # DEBUG belongs in the file, not in a 500-line pane.
+    before = window.log_view.toPlainText()
+    window._on_log_record({
+        "t": "2026-08-17T13:00:00.000", "kind": "state", "event": "library",
+        "level": "DEBUG", "logger": "linien_client.connection",
+        "message": "Sent authentication hash",
+    })
+    assert window.log_view.toPlainText() == before
+
+    # No field runs off the pane, and neither does the whole line.
+    _, text, _ = window._log_line({
+        "kind": "state", "event": "usb_probe",
+        "assignments": {"laser": "COM%d" % i for i in range(40)},
+        "status": {"laser": "verified" * 40},
+    })
+    assert len(text) <= window._LOG_LINE_CHARS, len(text)
+
     # High-contrast palette: after the remap sweep and all the runtime
     # status updates above, no widget stylesheet may still carry the old
     # dim text colors.
@@ -856,6 +1178,43 @@ try:
     assert window.filter1_freq_spin.isEnabled()
     window._sync_filters_from_device()  # no linien connection: harmless no-op
 
+    # A connect-time readback must not overwrite filter controls the
+    # operator is working in. It lands 1.5 s after connect, which is well
+    # inside the time it takes to type a frequency.
+    device_filters = {
+        "automatic": False,
+        "filter_1_enabled": True,
+        "filter_1_type": 0,
+        "filter_1_frequency": 3000,
+        "filter_2_enabled": False,
+        "filter_2_type": 0,
+        "filter_2_frequency": 10000,
+    }
+    window.linien_widget.linien_thread = types.SimpleNamespace(
+        get_filters=lambda: device_filters,
+        set_filters=lambda settings: None,
+    )
+    window.filter1_freq_spin.setValue(31000)  # the operator, mid-edit
+    assert window._filters_touched
+    before = len(_records())
+    window._sync_filters_from_device()
+    assert window.filter1_freq_spin.value() == 31000, "readback overwrote it"
+    divergence = next(
+        r for r in _records()[before:] if r["event"] == "filter_divergence"
+    )
+    assert divergence["kind"] == "fault"
+    assert divergence["device"]["filter_1_frequency"] == 3000
+    assert divergence["ui"]["filter_1_frequency"] == 31000
+
+    # Once their own value has been pushed, the device may drive these again.
+    window._push_filters()
+    assert not window._filters_touched
+    window._sync_filters_from_device()
+    assert window.filter1_freq_spin.value() == 3000
+    window.linien_widget.linien_thread = None
+    window._set_filters_ui({"automatic": True, "filter_1_frequency": 12000})
+    window._filters_touched = False
+
     # --- Config snapshot + JSON export round-trip ---
     window.current_slider.setValue(85)
     window.mot_coil_current_slider.setValue(2200)
@@ -869,7 +1228,9 @@ try:
     assert config["repump"]["vco_mhz"] == round(
         window.vtune_slider.value() / 10.0, 1
     )
-    assert config["linien"]["pid"] is None  # no linien connection in smoke
+    # No PID: it lives only on the server, so saving it meant reading the
+    # hardware. A config records what the operator set, nothing else.
+    assert "pid" not in config["linien"], config["linien"]
     assert config["saved_at"]
     assert config["linien"]["filters"]["filter_1_frequency"] == 12000
     config_path = os.path.join(TMP, "config-export.json")
@@ -908,6 +1269,105 @@ try:
     assert window.current_slider.value() == 92
     assert window.mot_coil_current_slider.value() == 2200
 
+    # --- A config is setpoints. It can never switch an output. ---
+    # Nothing in _collect_config describes an output today, but that held
+    # by accident: one key called "output_enabled" would have made loading
+    # a file energise a supply.
+    outputs = (
+        window.laser_btn,
+        window.mot_coil_output_btn,
+        window.repump_gpio_btn,
+        window.mod_enable_btn,
+    )
+    switched = []
+
+    class _RecordingWorker:
+        def __getattr__(self, name):
+            def record(*args):
+                if name in ("set_output", "laser_on", "fire", "start_fire"):
+                    switched.append((name, args))
+            return record
+
+    window.laser_worker = _RecordingWorker()
+    window.mot_coil_worker = _RecordingWorker()
+    window.repump_gpio_worker = _RecordingWorker()
+    window.linien_widget.linien_thread = _RecordingWorker()
+    try:
+        for button in outputs:
+            button.setChecked(True)
+        switched.clear()
+        on_path = os.path.join(TMP, "config-outputs-on.json")
+        window._write_config_json(on_path)
+        with open(on_path, encoding="utf-8") as f:
+            on_config = json.load(f)
+
+        for button in outputs:
+            button.setChecked(False)
+        switched.clear()
+        window._apply_config(on_config, path=on_path)
+        assert not any(b.isChecked() for b in outputs), [
+            b.text() for b in outputs if b.isChecked()
+        ]
+        assert switched == [], switched
+
+        # The load side has to hold on its own. A file saved by this app
+        # cannot contain an output key, so round-tripping one proves
+        # nothing about _apply_config -- hand it a file that says, as
+        # loudly as JSON can, "turn everything on".
+        hostile = {
+            "coils": {"current_a": 1.0, "output_enabled": True},
+            "laser": {"current_ma": 85, "laser_on": True},
+            "repump": {"gate_on": True},
+            "linien": {"mod_enabled": True, "locked": True},
+            "dispenser": {"firing": True, "fire_now": True},
+        }
+        switched.clear()
+        window._apply_config(hostile)
+        assert not any(b.isChecked() for b in outputs), [
+            b.text() for b in outputs if b.isChecked()
+        ]
+        assert switched == [], switched
+        # ...and the setpoints in that same file still landed.
+        assert window.current_slider.value() == 85
+        assert window.mot_coil_current_slider.value() == 1000
+
+        # It must not switch a running experiment off either.
+        for button in outputs:
+            button.setChecked(True)
+        switched.clear()
+        window._apply_config(hostile)
+        assert all(b.isChecked() for b in outputs)
+        assert switched == [], switched
+        for button in outputs:
+            button.setChecked(False)
+
+        # A key that describes an output never reaches the file, and its
+        # removal is recorded rather than silent.
+        # A key name of its own: identical faults collapse into a count, and
+        # the hostile config above already dropped coils.output_enabled.
+        orig_collect = window._collect_config
+        window._collect_config = lambda: dict(
+            orig_collect(), coils={"current_a": 1.0, "mot_coil_output": True}
+        )
+        try:
+            before = len(_records())
+            planted = window._write_config_json(
+                os.path.join(TMP, "config-planted.json")
+            )
+        finally:
+            window._collect_config = orig_collect
+        assert "mot_coil_output" not in planted["coils"], planted["coils"]
+        dropped = next(
+            r for r in _records()[before:]
+            if r["event"] == "config_state_key_dropped"
+        )
+        assert dropped["key"] == "coils.mot_coil_output", dropped
+    finally:
+        window.laser_worker = None
+        window.mot_coil_worker = None
+        window.repump_gpio_worker = None
+        window.linien_widget.linien_thread = None
+
     # --- Probe-result handling ---
     window._on_probe_result(
         {
@@ -940,7 +1400,8 @@ try:
         window.coil_usb_status, "connected:COM5", "mot_coil"
     )
     assert window.chip_text("usb") == "DEVICES 4/4"
-    assert window.laser_usb_status.text() == "Verified"
+    assert window.laser_usb_status.text() == "OK"
+    assert "verified by probe" in window.laser_usb_status.toolTip()
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     assert hasattr(window, "laser_worker")  # serial workers were started
 
@@ -959,7 +1420,8 @@ try:
     )
     assert "DEVICES 2/4" in window.usb_card.header_status.text()
     assert window.chip_text("usb") == "DEVICES 2/4"
-    assert window.coil_usb_status.text() == "Not found"
+    assert window.coil_usb_status.text() == "Error"
+    assert "not found by the USB probe" in window.coil_usb_status.toolTip()
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     app.processEvents()
 
@@ -1034,6 +1496,47 @@ try:
     assert not any(o.key == "modulation" for o in window.live_outputs())
     window.mod_enable_btn.setChecked(True)
     assert any(o.key == "modulation" for o in window.live_outputs())
+
+    # --- The dither answers to the device once there is one ---
+    # Adoption, not actuation: the readback sets the UI and must never push
+    # the value it just read back at the Red Pitaya.
+    pushed = []
+    window.linien_widget.linien_thread = types.SimpleNamespace(
+        set_modulation_amplitude=lambda mv: pushed.append(mv),
+    )
+    window._mod_touched = False
+    window._on_modulation_readback(300.0)
+    assert window.mod_enable_btn.isChecked()
+    assert window.mod_strength_slider.value() == 300
+    assert pushed == [], pushed
+    assert window._mod_actual_mv == 300.0
+
+    # Zero means the dither is not running. The slider keeps its value --
+    # that is the level to restore, not the level being driven.
+    window._on_modulation_readback(0.0)
+    assert not window.mod_enable_btn.isChecked()
+    assert window.mod_strength_slider.value() == 300
+    assert pushed == [], pushed
+
+    # A control the operator has touched is not overwritten by a readback:
+    # the disagreement is recorded and their value stands.
+    window.mod_strength_slider.setValue(250)  # a real touch, with a worker
+    assert pushed == [] or pushed[-1] == 250, pushed
+    window._mod_touched = True
+    before = len(_records())
+    window._on_modulation_readback(900.0)
+    assert window.mod_strength_slider.value() == 250, "readback overwrote it"
+    divergence = next(
+        r for r in _records()[before:] if r["event"] == "mod_divergence"
+    )
+    assert divergence["kind"] == "fault"
+    assert divergence["device_mv"] == 900.0 and divergence["ui_mv"] == 250
+    # ...and nothing may report the displayed dither as the device's state.
+    assert "modulation" not in window._readback_seen
+    window.linien_widget.linien_thread = None
+    window._mod_touched = False
+    window.mod_enable_btn.setChecked(True)
+    window.mod_strength_slider.setValue(400)
 
     window.mot_coil_output_btn.setChecked(True)
     window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 30.0})
@@ -1113,6 +1616,9 @@ try:
         def stop(self):
             pass
 
+    # Checked before the fake worker is installed, so only the close's own
+    # write lands in `zeroed`.
+    w1.mod_enable_btn.setChecked(True)
     w1.linien_widget.linien_thread = _FakeLockWorker()
     w1.close()
     assert zeroed == [0], zeroed
@@ -1131,6 +1637,12 @@ try:
     assert w2.dispenser_current_slider.value() == 9000
     assert w2.dispenser_fire_btn.text() == "Fire Dispenser (20 s)"
     assert not w2.usb_card.content.isVisibleTo(w2.usb_card)
+    # The dither was silenced on the way out, so this launch must not claim
+    # it is running. Writing 0 to the device while leaving
+    # linien/mod_enabled True is what made every launch since 2026-08-14
+    # report a dither that had been switched off.
+    assert not w2.mod_enable_btn.isChecked(), "exit left the dither flag set"
+    assert not any(o.key == "modulation" for o in w2.live_outputs())
 
     # Restoring the UI must never actuate. Connecting the toggled signal
     # before setChecked() made startup write a dither amplitude to the

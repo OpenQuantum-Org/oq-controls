@@ -32,6 +32,7 @@ thing that broke).
 
 import glob
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -183,6 +184,11 @@ class EventLog:
         self.on_record = on_record
         self._lock = threading.Lock()
         self._op_seq = 0
+        # Repeat-collapse state for fault(). Its own lock: the file lock is
+        # held during the write, and this has to be decided before it.
+        self._fault_lock = threading.Lock()
+        # signature -> [suppressed_count, run_started_monotonic]
+        self._fault_runs = {}
 
     def path_for_today(self):
         return os.path.join(
@@ -203,9 +209,77 @@ class EventLog:
         """Hardware reported a value."""
         self._write("readback", event, fields)
 
+    # A failure inside a poll loop repeats at the poll rate. Unplugging a
+    # supply used to write the same line 2x a second -- 400 identical
+    # records in one session, which buries everything that happened around
+    # them. Repeats are counted instead of written, and the count is
+    # written, so nothing is lost: "this failed 148 times over 30 s" is
+    # better evidence than 148 copies of it.
+    FAULT_REPEAT_WINDOW_S = 30.0
+
     def fault(self, event, /, **fields):
         """Something went wrong. This path must never be lossy."""
-        self._write("fault", event, fields)
+        # Every field, not just the message: two faults of the same event
+        # can be different things (one startup report naming the coils,
+        # another naming the dither), and keying on the event alone
+        # collapsed the second into the first.  "traceback" is left out --
+        # it is identical for a repeat and huge for a key.
+        signature = (event,) + tuple(
+            (key, str(value)[:200])
+            for key, value in sorted(fields.items())
+            if key != "traceback"
+        )
+        now = time.monotonic()
+        with self._fault_lock:
+            run = self._fault_runs.get(signature)
+            suppress = run is not None and now - run[1] < self.FAULT_REPEAT_WINDOW_S
+            if suppress:
+                run[0] += 1
+                summaries = []
+            else:
+                # Its own count first: a failure that outlasts the window
+                # starts a new run, and the old one's tally is due now.
+                summaries = (
+                    [self._summary_record(signature, run[0], now - run[1])]
+                    if run is not None and run[0]
+                    else []
+                )
+                self._fault_runs[signature] = [0, now]
+            # Runs are per signature, not one "last fault": two devices
+            # failing at once alternate, and a single slot would collapse
+            # neither of them.
+            summaries += self._expired_summaries(now, keep=signature)
+        for record in summaries:
+            self._emit(record)
+        if not suppress:
+            self._write("fault", event, fields)
+
+    def _expired_summaries(self, now, keep=None):
+        """Records for runs whose window has closed. Caller holds the lock.
+
+        Returns records rather than writing them, so the file write happens
+        outside the lock.
+        """
+        records = []
+        for signature, (count, t0) in list(self._fault_runs.items()):
+            if signature == keep or now - t0 < self.FAULT_REPEAT_WINDOW_S:
+                continue
+            del self._fault_runs[signature]
+            if not count:
+                continue  # nothing repeated: the one record already stands
+            records.append(self._summary_record(signature, count, now - t0))
+        return records
+
+    def _summary_record(self, signature, count, over_s):
+        """One record standing for a run of identical faults."""
+        fields = dict(signature[1:])
+        return self._compose("fault", "fault_repeated", {
+            "of": signature[0],
+            "device": fields.get("device", ""),
+            "message": fields.get("message") or fields.get("error") or "",
+            "count": count,
+            "over_s": round(over_s, 1),
+        })
 
     def command(self, event, /, **fields):
         """Open a correlated hardware transaction::
@@ -221,6 +295,20 @@ class EventLog:
             self._op_seq += 1
             op_id = self._op_seq
         return Operation(self, event, op_id, fields)
+
+    def flush_repeats(self):
+        """Write the counts for every open run of suppressed faults.
+
+        Called on the way out: a run whose window has not closed yet still
+        has to reach the file, or a failure that ended just before shutdown
+        would take its own count with it.
+        """
+        with self._fault_lock:
+            records = self._expired_summaries(
+                time.monotonic() + self.FAULT_REPEAT_WINDOW_S
+            )
+        for record in records:
+            self._emit(record)
 
     def session_start(self, **context):
         """Open the log with everything needed to read it standalone."""
@@ -294,7 +382,7 @@ class EventLog:
 
     # -- internals -------------------------------------------------------
 
-    def _write(self, kind, event, fields):
+    def _compose(self, kind, event, fields):
         # fields arrives as a dict, not **kwargs: callers legitimately log
         # a field called "kind" (DPS protection kind), which as a keyword
         # would collide with this record's own key.
@@ -308,6 +396,20 @@ class EventLog:
             # so silently destroys the category a reader filters on. Keep
             # the value under a suffixed name rather than dropping it.
             record[f"{key}_" if key in record else key] = value
+        return record
+
+    def _write(self, kind, event, fields):
+        if kind != "fault":
+            # Closed runs are flushed on the way past, so a count lands in
+            # the timeline near the failures it stands for rather than
+            # waiting for the same failure to happen again.
+            with self._fault_lock:
+                summaries = self._expired_summaries(time.monotonic())
+            for record in summaries:
+                self._emit(record)
+        self._emit(self._compose(kind, event, fields))
+
+    def _emit(self, record):
         if self.on_record is not None:
             try:
                 self.on_record(record)
@@ -318,7 +420,7 @@ class EventLog:
         except Exception as e:
             line = json.dumps({
                 "t": record["t"], "kind": "fault", "event": "log_encode_failed",
-                "of": event, "error": str(e),
+                "of": record.get("event"), "error": str(e),
             }) + "\n"
         try:
             with self._lock:
@@ -330,3 +432,93 @@ class EventLog:
             # (CLAUDE.md invariant 4) and raising would take down the
             # caller over a logging problem.
             pass
+
+
+# -- third-party logging ------------------------------------------------
+
+# Libraries whose connection chatter belongs in the record, and the level
+# to take each at.
+_LIBRARY_LOGGERS = {
+    # The whole connection story -- the attempt, the host that could not be
+    # resolved, the decision to start the server -- is DEBUG and INFO here,
+    # and it is a handful of lines per attempt.
+    "linien_client": logging.DEBUG,
+    "linien_common": logging.DEBUG,
+    # The SSH and RPyC stack underneath, at INFO rather than DEBUG on
+    # purpose: paramiko debug-logs every SSH packet, which would bury the
+    # experimental record under thousands of lines per connect.
+    "rpyc": logging.INFO,
+    "paramiko": logging.INFO,
+    "fabric": logging.INFO,
+    "invoke": logging.INFO,
+}
+
+
+class _EventLogHandler(logging.Handler):
+    """A logging handler that writes into an :class:`EventLog`."""
+
+    def __init__(self, event_log):
+        super().__init__(level=logging.DEBUG)
+        self.event_log = event_log
+
+    def emit(self, record):
+        try:
+            fields = {
+                "logger": record.name,
+                "level": record.levelname,
+                "message": record.getMessage(),
+            }
+            if record.levelno >= logging.WARNING:
+                self.event_log.fault("library", **fields)
+            else:
+                self.event_log.log("library", **fields)
+        except Exception:
+            # A bridge that raises inside a worker thread is worse than the
+            # console noise it was installed to remove.
+            pass
+
+
+_bridge = None
+
+
+def capture_library_logging(event_log=None):
+    """Route third-party logging into ``event_log`` instead of the console.
+
+    The sweep must run *after* the libraries are imported, and it has to be
+    re-run at every import site. ``linien_client`` attaches its own console
+    handler when the package first loads, and four different workers import
+    it -- whichever gets there first is not fixed, so no single call site
+    can be the one that cleans up. Anything done *before* the import is
+    doubly useless: each linien module sets its own logger to DEBUG (a
+    child's record is filtered by the child's level, then handed to every
+    ancestor's handlers regardless of the ancestor's level), and the import
+    overwrites the level anyway.
+
+    ``event_log`` is optional so an import site can sweep without having a
+    log to hand; the window installs the real one at startup. Idempotent:
+    called again it re-points the one handler rather than stacking another.
+    """
+    global _bridge
+    if event_log is not None:
+        if _bridge is None:
+            _bridge = _EventLogHandler(event_log)
+        else:
+            _bridge.event_log = event_log
+    elif _bridge is None:
+        return None  # nothing to route into yet; the window installs it
+    for name, level in _LIBRARY_LOGGERS.items():
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            # type(), not isinstance(): RotatingFileHandler subclasses
+            # StreamHandler, and linien's own debug file should survive.
+            # It is only the console copy that competes with tracebacks.
+            if type(handler) is logging.StreamHandler:
+                logger.removeHandler(handler)
+        if _bridge not in logger.handlers:
+            logger.addHandler(_bridge)
+        logger.setLevel(level)
+        # Nothing above these loggers may print: if anything ever calls
+        # logging.basicConfig(), root would grow a console handler and the
+        # noise would be back without this.
+        logger.propagate = False
+    return _bridge
