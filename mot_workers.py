@@ -1,9 +1,8 @@
 """
 Worker threads for rubidium MOT control hardware.
 
-These workers follow the same QThread pattern used by the EIT control app:
-the GUI thread calls small set_* methods, and the worker owns blocking
-hardware I/O.
+One QThread per device: the GUI thread calls small set_* methods, and the
+worker owns the blocking hardware I/O.
 
 Hardware handled here:
 - Riden DPS5005 (MOT coils) and DPS5020 (dispenser) over Modbus RTU
@@ -15,6 +14,8 @@ Hardware handled here:
 import time
 
 from pyqtgraph.Qt import QtCore
+
+from mot_logging import NULL_LOG, capture_library_logging
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,76 @@ def _list_candidate_ports():
     except Exception:
         return []
     return [p.device for p in list_ports.comports() if _is_likely_usb_serial(p)]
+
+
+class SerialPresenceWorker(QtCore.QThread):
+    """Watch for serial ports appearing and disappearing.
+
+    The Koheron worker has no poll loop -- it reads two setpoints at
+    connect and then only writes, from GUI slots, which is the accepted
+    exception to invariant 1. That leaves nobody to notice the laser being
+    unplugged: its row read OK for the rest of the session.
+
+    Enumerating ports is not device I/O. It does not open anything, does
+    not touch the handles the other workers hold, and costs nothing on the
+    wire, so it can watch every serial device at once -- including the one
+    that is never polled.
+
+    Signals:
+        ports_present(object): set of device names currently enumerated.
+    """
+
+    ports_present = QtCore.pyqtSignal(object)
+
+    POLL_MS = 3000
+
+    def __init__(self, poll_ms=None):
+        super().__init__()
+        self.poll_ms = int(poll_ms or self.POLL_MS)
+        self.running = False
+
+    def run(self):
+        self.running = True
+        last = None
+        while self.running:
+            try:
+                from serial.tools import list_ports
+
+                present = {p.device for p in list_ports.comports()}
+            except Exception:
+                present = None  # enumeration itself failed: claim nothing
+            if present is not None and present != last:
+                last = present
+                self.ports_present.emit(present)
+            self.msleep(self.poll_ms)
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+
+def drain_parameter_queue(client):
+    """Drain this client's parameter-change queue on the server.
+
+    Every client that connects gets a listener registered for every
+    cacheable parameter (linien_server/parameters.py:617), and each change
+    is appended to a per-client list. ``get_changed_parameters_queue`` --
+    which this call issues -- is the only thing that empties it. Nothing
+    in this app called it, so those lists grew for the lifetime of every
+    connection, on a 512 MB Red Pitaya, across four connections.
+
+    It is also what refreshes the local cache: with ``use_parameter_cache``
+    on, ``parameters.x.value`` returns a value frozen at connect time
+    until this runs. That made the server's ``ping`` heartbeat look dead
+    on a perfectly healthy server.
+
+    The call is asynchronous inside linien (it issues, then collects on
+    the next call), so this is cheap enough to run every poll.
+    """
+    try:
+        client.parameters.check_for_changed_parameters()
+    except Exception:
+        pass  # a failed drain is a connection problem, reported elsewhere
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +274,42 @@ DPS_MODELS = {
 }
 
 
+class LinkHealth:
+    """Turns a stream of per-poll failures into two edges: down, and back.
+
+    A poll loop that fails keeps failing -- an unplugged supply raises
+    every 500 ms -- but the operator needs to be told once, and told again
+    when it recovers. ``connection_status`` was only ever emitted at
+    connect, so a device that went away mid-session still read as OK.
+
+    One failure is not a disconnection: a single bad frame on a 9600-baud
+    line is ordinary, so the down edge waits for a few in a row.
+    """
+
+    FAILURES_BEFORE_DOWN = 3
+
+    def __init__(self, threshold=None):
+        self.threshold = int(threshold or self.FAILURES_BEFORE_DOWN)
+        self.failures = 0
+        self.down = False
+
+    def failed(self):
+        """True exactly once, on the poll that makes this a disconnection."""
+        self.failures += 1
+        if self.down or self.failures < self.threshold:
+            return False
+        self.down = True
+        return True
+
+    def ok(self):
+        """True exactly once, on the poll that brings the link back."""
+        self.failures = 0
+        if not self.down:
+            return False
+        self.down = False
+        return True
+
+
 class RidenDPSWorker(QtCore.QThread):
     """Control a Riden DPS supply (MOT coils or dispenser)."""
 
@@ -218,9 +325,16 @@ class RidenDPSWorker(QtCore.QThread):
         baudrate=9600,
         disable_on_stop=True,
         poll_ms=500,
+        event_log=None,
+        log_name="dps",
     ):
         super().__init__()
         spec = DPS_MODELS[model]
+        # Transactions are logged here rather than in the GUI: this is
+        # where the write actually happens and where its duration and
+        # outcome are known.
+        self.event_log = event_log or NULL_LOG
+        self.log_name = log_name
         self.port = port
         self.address = int(address)
         self.model = model
@@ -236,6 +350,7 @@ class RidenDPSWorker(QtCore.QThread):
         self._client = None
         self._mutex = QtCore.QMutex()
         self._pending = []
+        self._link = LinkHealth()
 
     def run(self):
         if not self.port:
@@ -269,12 +384,28 @@ class RidenDPSWorker(QtCore.QThread):
                 self._service(state)
                 self.readback.emit(state)
             except Exception as e:
+                if self._link.failed():
+                    # Say it once, in the place that means "this device is
+                    # not there": the row and the DEVICES count, not another
+                    # line in the log.
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(
+                        f"connected:{self.port}@{self.address}"
+                    )
             self.msleep(self.poll_ms)
 
         if self.disable_on_stop and self._client is not None:
+            # The safety-critical write of the whole class: this is what
+            # makes CLAUDE.md invariant 7 true, so it is logged even
+            # though nothing is left alive to react to a failure.
             try:
-                self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
+                with self.event_log.command(
+                    f"{self.log_name}.output", value=False, reason="worker_stop"
+                ):
+                    self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
             except Exception:
                 pass
         if self._client is not None:
@@ -321,18 +452,22 @@ class RidenDPSWorker(QtCore.QThread):
             self._apply(kind, value)
 
     def _apply(self, kind, value):
-        if kind == "voltage":
-            self._client.write_register(
-                RidenDPSClient.REG_V_SET, int(round(value * 100))
-            )
-        elif kind == "current":
-            self._client.write_register(
-                RidenDPSClient.REG_I_SET, int(round(value * self.current_scale))
-            )
-        elif kind == "output":
-            self._client.write_register(
-                RidenDPSClient.REG_OUTPUT, 1 if value else 0
-            )
+        with self.event_log.command(
+            f"{self.log_name}.{kind}", value=value, port=self.port
+        ):
+            if kind == "voltage":
+                self._client.write_register(
+                    RidenDPSClient.REG_V_SET, int(round(value * 100))
+                )
+            elif kind == "current":
+                self._client.write_register(
+                    RidenDPSClient.REG_I_SET,
+                    int(round(value * self.current_scale)),
+                )
+            elif kind == "output":
+                self._client.write_register(
+                    RidenDPSClient.REG_OUTPUT, 1 if value else 0
+                )
 
     def _service(self, state):
         """Per-poll hook for subclasses (runs after the state read)."""
@@ -364,12 +499,12 @@ class DispenserWorker(RidenDPSWorker):
     while the app is connected.
 
     The dispense operating point is not adjustable through the normal
-    supply API (set_voltage/set_current are inert), to protect the
-    dispenser and the pump. The only sanctioned way to change it is
-    set_fire_parameters(), which the UI gates behind an explicit
-    confirmation dialog. The dispenser is a near-short (<~0.1 V at
-    7.5 A), so the supply runs current-limited (CC); the voltage setpoint
-    is only headroom and is never reached.
+    supply API (set_voltage/set_current are inert), so a stray call cannot
+    move it. The only way in is set_fire_parameters(), which the UI drives
+    from the dispenser card's voltage/current sliders and from the
+    Override dialog. The dispenser is a near-short (<~0.1 V at 7.5 A), so
+    the supply runs current-limited (CC); the voltage setpoint is only
+    headroom and is never reached.
 
     The auto-off runs in this worker thread, so it only holds while the
     app is running and the serial link is alive.
@@ -396,6 +531,7 @@ class DispenserWorker(RidenDPSWorker):
         cooldown_until=0.0,
         fire_seconds=None,
         dispense_current_a=None,
+        dispense_voltage_v=None,
         **kwargs,
     ):
         kwargs.setdefault("model", "DPS5020")
@@ -403,6 +539,9 @@ class DispenserWorker(RidenDPSWorker):
         self.fire_seconds = self._clamp_seconds(fire_seconds or self.FIRE_SECONDS)
         self.dispense_current_a = self._clamp_current(
             dispense_current_a or self.DISPENSE_CURRENT_A
+        )
+        self.dispense_voltage_v = self._clamp_voltage(
+            dispense_voltage_v or self.DISPENSE_VOLTAGE_V
         )
         remaining = max(0.0, float(cooldown_until or 0.0) - time.time())
         self._phase = "cooldown" if remaining > 0 else "idle"
@@ -412,6 +551,9 @@ class DispenserWorker(RidenDPSWorker):
 
     def _clamp_current(self, amps):
         return max(0.01, min(float(amps), self.max_current))
+
+    def _clamp_voltage(self, volts):
+        return max(0.0, min(float(volts), self.max_voltage))
 
     def _clamp_seconds(self, seconds):
         return max(self.MIN_FIRE_SECONDS, float(seconds))
@@ -438,14 +580,20 @@ class DispenserWorker(RidenDPSWorker):
     def set_current(self, amps: float):
         """Ignored: the dispenser operating point is fixed."""
 
-    def set_fire_parameters(self, current_a: float, seconds: float):
-        """Override the dispense current and fire duration.
+    def set_fire_parameters(
+        self, current_a: float, seconds: float, voltage_v: float = None
+    ):
+        """Override the dispense current, fire duration and voltage limit.
 
-        The UI confirms with the user before calling this. Takes effect
-        from the next fire (mid-fire, the new current is also enforced on
-        the next poll; the running fire keeps its original end time).
+        Takes effect from the next fire (mid-fire, the new setpoints are
+        also enforced on the next poll; the running fire keeps its
+        original end time). ``voltage_v`` is headroom only -- the
+        dispenser is a near-short, so the supply runs current-limited and
+        this setpoint is never reached.
         """
-        self._queue(("params", (float(current_a), float(seconds))))
+        self._queue(
+            ("params", (float(current_a), float(seconds), voltage_v))
+        )
 
     # --- worker-thread internals ---
 
@@ -455,9 +603,11 @@ class DispenserWorker(RidenDPSWorker):
         elif kind == "abort":
             self._end_fire(aborted=True)
         elif kind == "params":
-            current_a, seconds = value
+            current_a, seconds, voltage_v = value
             self.dispense_current_a = self._clamp_current(current_a)
             self.fire_seconds = self._clamp_seconds(seconds)
+            if voltage_v is not None:
+                self.dispense_voltage_v = self._clamp_voltage(voltage_v)
         elif kind == "output":
             # Should not happen (set_output is rerouted), but keep the
             # cooldown authoritative for any direct queued output command.
@@ -479,7 +629,7 @@ class DispenserWorker(RidenDPSWorker):
             return
         # Program the operating point before every enable so a front-panel
         # change can never carry into a fire.
-        super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
+        super()._apply("voltage", self.dispense_voltage_v)
         super()._apply("current", self.dispense_current_a)
         super()._apply("output", True)
         self._phase = "firing"
@@ -528,8 +678,8 @@ class DispenserWorker(RidenDPSWorker):
         self._emit_fire_state()
 
     def _enforce_setpoints(self, state):
-        if abs(state.get("v_set", 0.0) - self.DISPENSE_VOLTAGE_V) > 0.005:
-            super()._apply("voltage", self.DISPENSE_VOLTAGE_V)
+        if abs(state.get("v_set", 0.0) - self.dispense_voltage_v) > 0.005:
+            super()._apply("voltage", self.dispense_voltage_v)
         if abs(state.get("i_set", 0.0) - self.dispense_current_a) > 0.005:
             super()._apply("current", self.dispense_current_a)
 
@@ -720,8 +870,10 @@ class DacClickWorker(QtCore.QThread):
         max_voltage=5.0,
         username="root",
         password="root",
+        event_log=None,
     ):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
         self.host = host
         self.min_voltage = float(min_voltage)
         self.max_voltage = float(max_voltage)
@@ -733,6 +885,7 @@ class DacClickWorker(QtCore.QThread):
         self._parameter = None
         self._mutex = QtCore.QMutex()
         self._pending_voltage = None
+        self._link = LinkHealth()
 
     def run(self):
         if not self.host:
@@ -742,6 +895,10 @@ class DacClickWorker(QtCore.QThread):
         try:
             from linien_client.connection import LinienClient
             from linien_client.device import Device
+
+            # This import may be the one that loaded linien_client, which
+            # attaches its own console handler as it goes.
+            capture_library_logging()
 
             dev = Device(
                 host=self.host, username=self.username, password=self.password
@@ -767,16 +924,27 @@ class DacClickWorker(QtCore.QThread):
         ticks = 0
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 pending = self._take_pending_voltage()
                 if pending is not None:
-                    self._parameter.value = pending
-                    # Blocks ~0.3 s while the server runs its SPI retry loop.
-                    self._client.connection.root.write_registers()
+                    with self.event_log.command(
+                        "repump.vtune", volts=pending
+                    ) as op:
+                        self._parameter.value = pending
+                        # Blocks ~0.3 s while the server runs its SPI
+                        # retry loop.
+                        self._client.connection.root.write_registers()
+                        op.result(readback_v=float(self._parameter.value))
                     self.voltage_readback.emit(float(self._parameter.value))
                 elif ticks % 20 == 0:
                     self.voltage_readback.emit(float(self._parameter.value))
             except Exception as e:
+                if self._link.failed():
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
             ticks += 1
             self.msleep(100)
 
@@ -817,8 +985,8 @@ class PsdWorker(QtCore.QThread):
 
     The acquisition steps through decimations (each stage ~16x longer
     than the last); ``psd_acquisition_max_decimation`` bounds how low in
-    frequency (and how long) it runs. There is no server-side abort —
-    an in-flight acquisition finishes on its own.
+    frequency (and how long) it runs. ``stop_psd()`` aborts a run in
+    flight, the way linien's Stop button does.
     """
 
     connection_status = QtCore.pyqtSignal(str)
@@ -852,6 +1020,8 @@ class PsdWorker(QtCore.QThread):
             from linien_client.connection import LinienClient
             from linien_client.device import Device
 
+            capture_library_logging()  # see DacClickWorker.run
+
             dev = Device(
                 host=self.host, username=self.username, password=self.password
             )
@@ -866,6 +1036,7 @@ class PsdWorker(QtCore.QThread):
         self.running = True
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 self._process_pending()
                 self._poll()
             except Exception as e:
@@ -888,6 +1059,10 @@ class PsdWorker(QtCore.QThread):
 
     def start_pid_optimization(self):
         self._queue(("start_pid_opt", None))
+
+    def stop_psd(self):
+        """Abort a running acquisition, as linien's Stop button does."""
+        self._queue(("stop_psd", None))
 
     def set_algorithm(self, value: int):
         self._queue(("algorithm", int(value)))
@@ -915,6 +1090,11 @@ class PsdWorker(QtCore.QThread):
                 self._client.connection.root.start_psd_acquisition()
             elif kind == "start_pid_opt":
                 self._client.connection.root.start_pid_optimization()
+            elif kind == "stop_psd":
+                # linien's PSDWindow.stop_psd, verbatim.
+                if params.task.value is not None:
+                    params.task.value.stop()
+                    params.task.value = None
             elif kind == "algorithm":
                 params.psd_algorithm.value = value
             elif kind == "max_decimation":
@@ -1000,8 +1180,10 @@ class LinienGpioWorker(QtCore.QThread):
         username="root",
         password="root",
         disable_on_stop=True,
+        event_log=None,
     ):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
         self.host = host
         self.bank = str(bank or "n").lower()
         self.bit = int(bit)
@@ -1015,6 +1197,7 @@ class LinienGpioWorker(QtCore.QThread):
         self._parameter = None
         self._mutex = QtCore.QMutex()
         self._pending_state = None
+        self._link = LinkHealth()
 
     def run(self):
         if not self.host:
@@ -1032,6 +1215,8 @@ class LinienGpioWorker(QtCore.QThread):
         try:
             from linien_client.connection import LinienClient
             from linien_client.device import Device
+
+            capture_library_logging()  # see DacClickWorker.run
 
             dev = Device(
                 host=self.host, username=self.username, password=self.password
@@ -1051,13 +1236,22 @@ class LinienGpioWorker(QtCore.QThread):
         self.running = True
         while self.running:
             try:
+                drain_parameter_queue(self._client)
                 pending = self._take_pending_state()
                 if pending is not None:
-                    self._write_state(pending)
+                    with self.event_log.command(
+                        "repump.gate", enabled=bool(pending)
+                    ):
+                        self._write_state(pending)
                 else:
                     self._emit_state_from_raw(int(self._parameter.value))
             except Exception as e:
+                if self._link.failed():
+                    self.connection_status.emit(f"error:{e}")
                 self.fault.emit(str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
             self.msleep(250)
 
         if self.disable_on_stop:
@@ -1114,8 +1308,13 @@ class LaserSetpointWorker(QtCore.QThread):
     initial_values = QtCore.pyqtSignal(dict)
     connection_status = QtCore.pyqtSignal(str)
 
-    def __init__(self, port=None, baudrate=115200):
+    def __init__(self, port=None, baudrate=115200, event_log=None,
+                 disable_on_stop=True):
         super().__init__()
+        self.event_log = event_log or NULL_LOG
+        # Cleared by the shutdown dialog when the operator chooses to
+        # leave the laser running past the app.
+        self.disable_on_stop = bool(disable_on_stop)
         self._port = port
         self._baudrate = baudrate
         self._ser = None
@@ -1152,22 +1351,85 @@ class LaserSetpointWorker(QtCore.QThread):
 
     def set_current(self, current_mA: float):
         """Set laser diode current in mA."""
-        self._send(f"ilaser {current_mA}")
+        with self.event_log.command("laser.current", ma=current_mA):
+            self._send(f"ilaser {current_mA}")
 
     def set_thermistor(self, resistance_ohms: float):
         """Set thermistor setpoint in Ohms."""
-        self._send(f"rtset {resistance_ohms}")
+        with self.event_log.command("laser.thermistor", ohms=resistance_ohms):
+            self._send(f"rtset {resistance_ohms}")
 
     def laser_on(self, on: bool = True):
         """Enable or disable laser output."""
-        self._send(f"lason {1 if on else 0}")
+        with self.event_log.command("laser.enable", on=bool(on)):
+            self._send(f"lason {1 if on else 0}")
 
     def stop(self):
-        try:
-            self._send("lason 0")
-        except Exception:
-            pass
+        if self.disable_on_stop:
+            try:
+                with self.event_log.command(
+                    "laser.enable", on=False, reason="worker_stop"
+                ):
+                    self._send("lason 0")
+            except Exception:
+                pass
+        else:
+            self.event_log.log("laser_left_on", reason="operator_choice")
         if self._ser and self._ser.is_open:
             self._ser.close()
         self.wait()
 
+
+
+# ---------------------------------------------------------------------------
+class LinienServerRestartWorker(QtCore.QThread):
+    """Restart linien-server on the Red Pitaya, over SSH.
+
+    A wedged server answers RPyC but its acquisition and heartbeat threads
+    are dead, and the only cure is a restart. This does it from the app so
+    that does not mean an SSH session.
+
+    Deliberately a one-shot thread rather than a persistent worker: it
+    exists because ``start_remote_server`` blocks on SSH for several
+    seconds and the GUI thread must not. It owns no client and no port.
+
+    **Only ever calls ``start_remote_server``.** linien-gui's
+    ``install_remote_server`` runs ``pip3 uninstall linien-server -y``,
+    which would destroy the hand-applied dac_click_voltage patch on this
+    device (see CLAUDE.md).
+
+    Signals:
+        finished_ok(bool, str): success flag and a message for the log.
+    """
+
+    finished_ok = QtCore.pyqtSignal(bool, str)
+
+    def __init__(self, host, username="root", password="root", event_log=None):
+        super().__init__()
+        self.event_log = event_log or NULL_LOG
+        self.host = host
+        self.username = username
+        self.password = password
+
+    def run(self):
+        try:
+            from linien_client.deploy import start_remote_server
+            from linien_client.device import Device
+
+            capture_library_logging()  # see DacClickWorker.run
+        except Exception as e:
+            self.finished_ok.emit(False, f"linien_client unavailable: {e}")
+            return
+
+        device = Device(
+            host=self.host, username=self.username, password=self.password
+        )
+        try:
+            with self.event_log.command(
+                "linien.restart_server", host=self.host
+            ):
+                start_remote_server(device)
+        except Exception as e:
+            self.finished_ok.emit(False, str(e))
+            return
+        self.finished_ok.emit(True, f"linien-server restarted on {self.host}")

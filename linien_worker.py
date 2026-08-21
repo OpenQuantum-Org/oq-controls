@@ -12,8 +12,14 @@ from pyqtgraph.Qt import QtCore
 from linien_client.device import Device
 import pickle
 import numpy as np
-from time import sleep
-from linien_common.common import AutolockMode
+from time import monotonic, sleep
+from linien_common.common import MHz, AutolockMode, Vpp
+
+from mot_logging import NULL_LOG
+from mot_workers import LinkHealth, drain_parameter_queue
+
+# See linien_widget: rp-F0C6AD was a different Red Pitaya.
+DEFAULT_RP_HOST = "rp-f0f2b5.local"
 
 
 class LinienWorker(QtCore.QThread):
@@ -21,9 +27,34 @@ class LinienWorker(QtCore.QThread):
     initial = QtCore.pyqtSignal(object)
     lock_state = QtCore.pyqtSignal(bool)  # True if locked, False otherwise
     connection_status = QtCore.pyqtSignal(str)  # "connected:<host>" or "disconnected"
+    fault = QtCore.pyqtSignal(str)  # anything that would otherwise be silent
+    # True when the server's heartbeat has stopped, False when it resumes.
+    server_stalled = QtCore.pyqtSignal(bool)
+    # The dither amplitude the server is actually running, in mV, read once
+    # at connect. Nothing else told the UI whether the dither was on.
+    modulation_state = QtCore.pyqtSignal(object)
 
-    def __init__(self, host="rp-F0C6AD.local", username="root", password="root"):
+    # linien-server increments ``ping`` once a second from a thread of its
+    # own (linien_server/server.py:181). If it stops advancing the server's
+    # threads are dead, which is the one thing a frozen plot cannot tell
+    # you by itself: a static spectrum is legitimate, a static heartbeat
+    # is not.
+    STALL_AFTER_S = 5.0
+
+    # A few attempts, then stop and say so. An RP that is still booting, or
+    # an mDNS name that has not propagated yet, fails once and then works;
+    # a host that is off fails every time and the operator needs telling.
+    CONNECT_ATTEMPTS = 3
+    RETRY_DELAY_S = 2.0
+
+    def __init__(self, host=DEFAULT_RP_HOST, username="root", password="root",
+                 event_log=None, unlock_on_stop=True):
         super().__init__()
+        # Faults go to the log, never to stdout (CLAUDE.md invariant 4).
+        self.event_log = event_log or NULL_LOG
+        # Cleared by the shutdown dialog when the operator chooses to
+        # leave the laser locked past the app.
+        self.unlock_on_stop = bool(unlock_on_stop)
         self.host = host
         self.username = username
         self.password = password
@@ -35,46 +66,143 @@ class LinienWorker(QtCore.QThread):
         self.mon = np.array([])
         self.voltages = np.array([])
         self._last_ui_lock_state = None  # debounce UI lock-state updates
+        self._last_ping = None
+        self._ping_changed_at = None
+        self._ping_ever_moved = False
+        self._stalled = False
+        self._last_lock_read_error = None
+        self._link = LinkHealth()
+
+    def _check_server_alive(self):
+        """Watch the server's heartbeat; report the edges, not every poll."""
+        try:
+            ping = int(self.client.parameters.ping.value)
+        except Exception:
+            return  # a read that fails is a connection problem, not a stall
+        now = monotonic()
+        if ping != self._last_ping:
+            if self._last_ping is not None:
+                self._ping_ever_moved = True
+            self._last_ping = ping
+            self._ping_changed_at = now
+            if self._stalled:
+                self._stalled = False
+                self.event_log.log("linien_server_recovered", host=self.host)
+                self.server_stalled.emit(False)
+            return
+        if self._ping_changed_at is None:
+            self._ping_changed_at = now
+            return
+        quiet_s = now - self._ping_changed_at
+        if not self._ping_ever_moved:
+            # Never seen it tick, so a still value proves nothing about
+            # the server -- it is far more likely we are not reading it
+            # properly. Accusing a healthy server of being wedged is the
+            # worse error, so say nothing until the heartbeat is trusted.
+            return
+        if not self._stalled and quiet_s >= self.STALL_AFTER_S:
+            self._stalled = True
+            self.event_log.fault(
+                "linien",
+                message=(
+                    f"server heartbeat stopped {quiet_s:.0f} s ago — "
+                    "it is wedged, restart it"
+                ),
+                host=self.host,
+            )
+            self.server_stalled.emit(True)
 
     def run(self):
-        try:
-            dev = Device(host=self.host, username=self.username, password=self.password)
-            self.client = LinienClient(dev)
-            self.client.connect(autostart_server=True, use_parameter_cache=True)
-
-            # Initialize sweep params
-            self.current_amplitude = float(self.client.parameters.sweep_amplitude.value)
-            self.current_center = float(self.client.parameters.sweep_center.value)
-
-            self.initial.emit(
-                {"center": self.current_center, "amplitude": self.current_amplitude}
-            )
-
-            # Configure simple autolock preference
-            try:
-                p = self.client.parameters
-                p.fetch_additional_signals.value = False
-                p.autolock_mode.value = AutolockMode.SIMPLE
-                if hasattr(p, "autolock_determine_offset"):
-                    p.autolock_determine_offset.value = False
-                self.client.connection.root.write_registers()
-            except Exception as e:
-                print("Could not set autolock parameters:", e)
-
-            print(f"Linien initialized and running (host: {self.host})")
-            self.connection_status.emit(f"connected:{self.host}")
-
-            # Emit initial lock state (best-effort)
-            self._emit_lock_state_best_effort()
-
-        except Exception as e:
-            print(f"Failed to initialize linien (host: {self.host}): {e}")
-            self.connection_status.emit("disconnected")
+        if not self._connect_with_retries():
             return
-
         # Main acquisition loop
+        self._acquire()
+
+    def _connect_with_retries(self):
+        """Connect, trying a few times. True once the server answered.
+
+        One attempt was not enough to act on: an RP that is booting, or a
+        laptop whose mDNS has not caught up, fails once and then works.
+        Bounded on purpose -- after the last attempt the widget says to use
+        Auto-connect, which keeps reconnecting the operator's decision
+        rather than something the app does on a timer forever.
+        """
+        for attempt in range(1, self.CONNECT_ATTEMPTS + 1):
+            try:
+                self._connect_once()
+                return True
+            except Exception as e:
+                # Class name, not just str(e): linien raises a message-less
+                # GeneralConnectionError for host-not-found (it logs the
+                # real reason to its own logger, which
+                # capture_library_logging routes into ours).
+                detail = (
+                    f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                )
+                self._log(
+                    f"connect failed ({self.host}) "
+                    f"attempt {attempt}/{self.CONNECT_ATTEMPTS}: {detail}"
+                )
+                if attempt < self.CONNECT_ATTEMPTS:
+                    self.connection_status.emit(
+                        f"connecting:{self.host} — attempt {attempt + 1} of "
+                        f"{self.CONNECT_ATTEMPTS}"
+                    )
+                    sleep(self.RETRY_DELAY_S)
+                    continue
+                # "error:" rather than "disconnected": never having reached
+                # the device is a different thing from losing it, and only
+                # the first one means check the host and the cabling.
+                self.connection_status.emit(
+                    f"error:{detail} (after {self.CONNECT_ATTEMPTS} attempts)"
+                )
+                return False
+        return False
+
+    def _connect_once(self):
+        dev = Device(host=self.host, username=self.username, password=self.password)
+        self.client = LinienClient(dev)
+        self.client.connect(autostart_server=True, use_parameter_cache=True)
+
+        # Initialize sweep params
+        self.current_amplitude = float(self.client.parameters.sweep_amplitude.value)
+        self.current_center = float(self.client.parameters.sweep_center.value)
+
+        self.initial.emit(
+            {"center": self.current_center, "amplitude": self.current_amplitude}
+        )
+
+        # Force the SIMPLE autolock. This must be the *preference*:
+        # the server derives autolock_mode from it when a lock starts,
+        # so setting autolock_mode here would be overwritten.
+        # autolock_determine_offset is left alone -- it is a user
+        # setting the UI owns.
+        try:
+            p = self.client.parameters
+            p.fetch_additional_signals.value = False
+            p.autolock_mode_preference.value = AutolockMode.SIMPLE
+            self.client.connection.root.write_registers()
+        except Exception as e:
+            self.fault.emit(f"autolock setup failed: {e}")
+
+        # What the dither is actually doing, before anything is written.
+        # Read here rather than from a GUI slot: it is one more hop on a
+        # connection that is already open, and the answer is needed
+        # before the startup report decides what to claim.
+        self._emit_modulation_state()
+
+        self.event_log.log("linien_connected", host=self.host)
+        self.connection_status.emit(f"connected:{self.host}")
+
+        # Emit initial lock state (best-effort)
+        self._emit_lock_state_best_effort()
+
+    def _acquire(self):
         self.running = True
         while self.running:
+            # Refreshes the local parameter cache and, just as
+            # importantly, empties this client's queue on the server.
+            drain_parameter_queue(self.client)
             try:
                 fetched = pickle.loads(self.client.parameters.to_plot.value)
                 self.to_plot = fetched if isinstance(fetched, dict) else {}
@@ -125,66 +253,144 @@ class LinienWorker(QtCore.QThread):
                     }
                 )
             except Exception as e:
-                print("! Linien loop error:", e)
+                if self._link.failed():
+                    # A closed RPyC stream never recovers on its own, so
+                    # the row must stop saying OK. Once, not per poll.
+                    self.connection_status.emit(f"error:{type(e).__name__}: {e}")
+                self._log("acquisition failed: " + str(e))
+            else:
+                if self._link.ok():
+                    self.connection_status.emit(f"connected:{self.host}")
 
             self._emit_lock_state_best_effort()
+            self._check_server_alive()
             self.msleep(200)
 
-        print("Linien loop ended.")
+        self.event_log.log("linien_loop_ended", host=self.host)
 
     def stop(self):
         self.running = False
+        # Sweeping rather than held at a lock point: an unattended lock
+        # drifts off the line with nothing watching it. Skipped when the
+        # operator chose to leave it engaged.
         try:
-            if hasattr(self, "client") and self.client:
+            if self.unlock_on_stop and self.connected:
                 self.client.connection.root.start_sweep()
+            elif not self.unlock_on_stop:
+                self.event_log.log("lock_left_engaged", reason="operator_choice")
         except Exception as e:
-            print("Error starting sweep during stop():", e)
+            self._log("could not start sweep on stop: " + str(e))
         self.wait()
+
+    def _log(self, message):
+        """Record what would otherwise have gone to stdout."""
+        self.event_log.fault("linien", message=str(message))
+
+    def _emit_modulation_state(self):
+        """Report the dither amplitude the server is running, in mV.
+
+        ``modulation_amplitude`` is in DAC units -- ``Vpp`` of them per volt
+        peak-to-peak -- so this is the inverse of set_modulation_amplitude.
+        Best-effort: a connect that otherwise worked must stand.
+        """
+        try:
+            counts = float(self.client.parameters.modulation_amplitude.value)
+        except Exception as e:
+            self._log(f"mod amplitude read failed: {e}")
+            return
+        self.modulation_state.emit(counts / Vpp * 1000.0)
+
+    @property
+    def connected(self):
+        """True once connect() reached the server.
+
+        ``self.client`` is assigned before ``connect()`` runs, so its mere
+        existence proves nothing: after a failed connect it is a live
+        object with no ``parameters``, which is why writes used to report
+        ``'LinienClient' object has no attribute 'parameters'`` instead of
+        saying they had nowhere to go.
+
+        This is "the handshake succeeded", not "the link is up now" --
+        linien clears its flag only in ``disconnect()``, so a cable pulled
+        mid-session leaves it True. That is the right test for the guards
+        below; the ``except`` arms are what cover a link that dies later.
+        """
+        return bool(getattr(getattr(self, "client", None), "connected", False))
+
+    def _require_connection(self, what):
+        """Guard a write. Logs and returns False when there is no server."""
+        if self.connected:
+            return True
+        self._log(f"{what} failed: not connected")
+        return False
 
     def stop_sweep(self):
         """Stop the sweep and hold the output at the current center voltage."""
+        if not self._require_connection("stop sweep"):
+            return
         try:
             self.client.parameters.sweep_amplitude.value = 0
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien stop sweep failed: {e}")
+            self._log(f"stop sweep failed: {e}")
 
     def set_modulation_amplitude(self, amplitude_mV: float):
-        """Set the modulation amplitude in mV (0–1000)."""
+        """Set the modulation amplitude in mV (0-1000).
+
+        ``modulation_amplitude`` is in raw DAC units, not volts: linien's
+        own ``Vpp`` constant (= 4095.75) is units per volt peak-to-peak.
+        Writing volts here made the dither ~4096x too small.
+        """
+        if not self._require_connection("mod amplitude update"):
+            return
         try:
-            # Linien expects a value in Volts (0–1 V range for the DAC)
-            self.client.parameters.modulation_amplitude.value = amplitude_mV / 1000.0
+            self.client.parameters.modulation_amplitude.value = int(
+                round(amplitude_mV / 1000.0 * Vpp)
+            )
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien mod amplitude update failed: {e}")
+            self._log(f"mod amplitude update failed: {e}")
 
     def set_modulation_frequency(self, freq_khz: float):
-        """Set the lock-in modulation frequency in kHz."""
+        """Set the lock-in modulation frequency in kHz.
+
+        ``modulation_frequency`` is in raw phase-accumulator units, not
+        Hz: linien's ``MHz`` constant (= 0x10000000/8) is units per MHz.
+        Writing Hz here made the frequency ~33.55x too low.
+        """
+        if not self._require_connection("mod freq update"):
+            return
         try:
-            self.client.parameters.modulation_frequency.value = int(freq_khz * 1000)
+            self.client.parameters.modulation_frequency.value = int(
+                round(freq_khz / 1000.0 * MHz)
+            )
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien mod freq update failed: {e}")
+            self._log(f"mod freq update failed: {e}")
 
     def set_modulation_phase(self, phase_deg: float):
         """Set the demodulation phase in degrees."""
+        if not self._require_connection("mod phase update"):
+            return
         try:
             self.client.parameters.demodulation_phase_a.value = int(phase_deg)
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien mod phase update failed: {e}")
+            self._log(f"mod phase update failed: {e}")
 
     def set_sweep_speed(self, speed: int):
         """Set the sweep speed (0–15, see Linien sweep speed table)."""
+        if not self._require_connection("sweep speed update"):
+            return
         try:
             self.client.parameters.sweep_speed.value = int(speed)
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien sweep speed update failed: {e}")
+            self._log(f"sweep speed update failed: {e}")
 
     def get_pid(self):
         """Read the lock PID gains as (p, i, d), or None if unavailable."""
-        if not hasattr(self, "client"):
+        if not self.connected:
             return None
         try:
             params = self.client.parameters
@@ -194,13 +400,12 @@ class LinienWorker(QtCore.QThread):
                 int(params.d.value),
             )
         except Exception as e:
-            print(f"! Linien PID read failed: {e}")
+            self._log(f"PID read failed: {e}")
             return None
 
     def set_pid(self, p_value: int, i_value: int, d_value: int):
         """Write the lock PID gains (each 0–8191)."""
-        if not hasattr(self, "client"):
-            print("! Linien PID update failed: not connected")
+        if not self._require_connection("PID update"):
             return
         try:
             params = self.client.parameters
@@ -209,11 +414,11 @@ class LinienWorker(QtCore.QThread):
             params.d.value = int(d_value)
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien PID update failed: {e}")
+            self._log(f"PID update failed: {e}")
 
     def get_filters(self):
         """Read the channel-A error-signal filter settings, or None."""
-        if not hasattr(self, "client"):
+        if not self.connected:
             return None
         try:
             params = self.client.parameters
@@ -227,13 +432,12 @@ class LinienWorker(QtCore.QThread):
                 "filter_2_frequency": int(params.filter_2_frequency_a.value),
             }
         except Exception as e:
-            print(f"! Linien filter read failed: {e}")
+            self._log(f"filter read failed: {e}")
             return None
 
     def set_filters(self, settings: dict):
         """Write the channel-A error-signal filters (see get_filters)."""
-        if not hasattr(self, "client"):
-            print("! Linien filter update failed: not connected")
+        if not self._require_connection("filter update"):
             return
         try:
             params = self.client.parameters
@@ -250,9 +454,11 @@ class LinienWorker(QtCore.QThread):
             )
             self.client.connection.root.write_registers()
         except Exception as e:
-            print(f"! Linien filter update failed: {e}")
+            self._log(f"filter update failed: {e}")
 
     def request_sweep_change(self, center: float, amplitude: float):
+        if not self._require_connection("sweep update"):
+            return
         try:
             self.current_center = center
             self.current_amplitude = amplitude
@@ -260,9 +466,10 @@ class LinienWorker(QtCore.QThread):
             self.client.parameters.sweep_amplitude.value = amplitude
             self.client.connection.root.write_registers()
         except Exception as e:
-            print("! Linien sweep update failed:", e)
+            self._log("sweep update failed: " + str(e))
 
     def _wait_for_lock(self, should_be_locked: bool, timeout_s: int = 30):
+        failures = 0
         for _ in range(timeout_s):
             try:
                 t = pickle.loads(self.client.parameters.to_plot.value)
@@ -271,99 +478,163 @@ class LinienWorker(QtCore.QThread):
                 status = has_locked_key or param_lock
                 if status == should_be_locked:
                     return True
-            except Exception:
-                pass
+                failures = 0
+            except Exception as e:
+                # A read failing every second for 30 s is a broken
+                # connection, not a lock that is taking its time -- and
+                # the two are indistinguishable from the outside. Report
+                # once rather than waiting out the full timeout in
+                # silence.
+                failures += 1
+                if failures == 3:
+                    self._log(f"lock-state polling is failing: {e}")
             sleep(1)
         return False
 
-    def lock_laser(self, selected_positions):
+    def lock_laser(self, x0, x1, n_points):
+        """Start the autolock over a selected index range.
+
+        ``x0``/``x1`` are indices into the plotted trace and ``n_points``
+        its length. The spectrum itself is re-read here in **raw ADC
+        counts**: the plotted copy is divided by 8192 for display, and the
+        autolock's peak finding and line-width estimate work in counts, so
+        handing it volts degrades the lock badly. linien likewise sends
+        the unscaled signal and divides only when drawing.
+        """
+        if not self.connected:
+            # fault, not _log: this one is a button press, so it needs to
+            # answer the operator rather than only reach the file.
+            self.fault.emit("cannot lock: not connected to the Red Pitaya")
+            return
+        params = self.client.parameters
         try:
             self.client.connection.root.start_sweep()
-        except Exception:
-            pass
-        sleep(0.4)
-
-        to_plot = pickle.loads(self.client.parameters.to_plot.value)
-        if "error_signal_1" not in to_plot:
-            print("No spectrum available to lock on.")
-            return
-
-        raw_err = np.asarray(to_plot["error_signal_1"], dtype=np.int16)
-        N = raw_err.size
-        if N < 4:
-            print("Spectrum too small.")
-            return
-
-        cen = float(self.client.parameters.sweep_center.value)
-        amp = float(self.client.parameters.sweep_amplitude.value)
-        voltages = np.linspace(cen - amp, cen + amp, N)
-
-        x0_pos, x1_pos = selected_positions
-        i0 = int(np.argmin(np.abs(voltages - x0_pos)))
-        i1 = int(np.argmin(np.abs(voltages - x1_pos)))
-        if i0 > i1:
-            i0, i1 = i1, i0
-
-        if i0 == i1 or (i1 - i0) < 2:
-            i0 = max(0, i0 - 1)
-            i1 = min(N - 1, i1 + 1)
-        if not (0 <= i0 < i1 < N):
-            print(f"Invalid index window: ({i0}, {i1}) for N={N}")
-            return
-
-        payload = pickle.dumps(np.array(raw_err, dtype=np.int16))
+        except Exception as e:
+            # Not fatal -- the spectrum below may still be usable -- but
+            # it means the autolock is about to sample a trace that was
+            # not freshly swept, which is worth knowing if it then fails.
+            self._log(f"could not restart the sweep before locking: {e}")
+        sleep(0.4)  # let a full sweep land before sampling it
 
         try:
-            p = self.client.parameters
-            p.autolock_mode.value = AutolockMode.SIMPLE
-            if hasattr(p, "autolock_determine_offset"):
-                p.autolock_determine_offset.value = False
+            to_plot = pickle.loads(params.to_plot.value)
+        except Exception as e:
+            self.fault.emit(f"could not read spectrum: {e}")
+            return
+        key = next(
+            (k for k in ("error_signal_1", "error_signal") if k in to_plot),
+            None,
+        )
+        if key is None:
+            self.fault.emit("no spectrum available to lock on")
+            return
+
+        raw = np.asarray(to_plot[key], dtype=np.int16)
+        n = raw.size
+        if n < 4:
+            self.fault.emit("spectrum too small to lock on")
+            return
+
+        # The selection was made against a trace of n_points samples; map
+        # it onto this spectrum in case the two differ.
+        if n_points and n_points != n:
+            scale = (n - 1) / float(n_points - 1)
+            x0 = int(round(x0 * scale))
+            x1 = int(round(x1 * scale))
+        i0, i1 = sorted((int(x0), int(x1)))
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+        if i1 - i0 < 2:
+            self.fault.emit("selected range too narrow to lock on")
+            return
+
+        try:
+            # SIMPLE is forced through the *preference*: the server builds
+            # an AutolockAlgorithmSelector from autolock_mode_preference and
+            # assigns autolock_mode from it, so writing autolock_mode here
+            # would just be overwritten. A non-AUTO_DETECT preference
+            # short-circuits the selector.
+            params.autolock_mode_preference.value = AutolockMode.SIMPLE
+            params.fetch_additional_signals.value = False
+            params.autolock_target_position.value = 0
             self.client.connection.root.write_registers()
         except Exception as e:
-            print("Autolock parameter set warning:", e)
+            self.fault.emit(f"autolock parameter set failed: {e}")
 
-        print(f"Calling start_autolock(i0={i0}, i1={i1}, N={N})")
         try:
-            self.client.connection.root.start_autolock(i0, i1, payload)
+            self.client.connection.root.start_autolock(
+                i0, i1, pickle.dumps(raw)
+            )
         except Exception as e:
-            print(f"start_autolock raised: {e}")
+            self.fault.emit(f"start_autolock failed: {e}")
             return
 
         if self._wait_for_lock(True, timeout_s=30):
-            print("Lock engaged.")
             self._emit_lock_state_best_effort(force_value=True)
         else:
-            print("! Lock did not engage in time.")
+            self.fault.emit("lock did not engage within 30 s")
             self._emit_lock_state_best_effort()
 
+    def set_determine_offset(self, enabled: bool):
+        """linien's "Determine signal offset" checkbox.
+
+        The server reads this parameter inside exposed_start_autolock, so
+        it only has to be set before a lock starts.
+        """
+        if not self._require_connection("determine-offset update"):
+            return
+        try:
+            self.client.parameters.autolock_determine_offset.value = bool(
+                enabled
+            )
+        except Exception as e:
+            self.fault.emit(f"determine-offset update failed: {e}")
+
     def unlock_laser(self):
-        print("Attempting to unlock laser...")
+        if not self._require_connection("unlock"):
+            return
         try:
             self.client.connection.root.start_sweep()
             if self._wait_for_lock(False, timeout_s=10):
-                print("Laser unlocked (sweep started).")
+                pass
                 self._emit_lock_state_best_effort(force_value=False)
             else:
-                print("! Unlock not confirmed, but sweep requested.")
+                self._log("unlock not confirmed, but sweep was requested")
                 self._emit_lock_state_best_effort()
         except Exception as e:
-            print(f"Failed to unlock laser: {e}")
+            self._log(f"unlock failed: {e}")
             self._emit_lock_state_best_effort()
 
     def _emit_lock_state_best_effort(self, force_value=None):
-        if not hasattr(self, "client"):
+        if not self.connected:
             return
         try:
             if force_value is None:
-                t = pickle.loads(self.client.parameters.to_plot.value)
-                has_locked_key = "error_signal" in t
-                param_lock = bool(self.client.parameters.lock.value)
-                locked = has_locked_key or param_lock
+                # Reuse the dict the acquisition pass just unpickled.
+                # to_plot is a 2048-point array over RPyC and the only
+                # uncached read in the loop; fetching it again here made
+                # every poll carry it twice. linien names the signal
+                # "error_signal" only while locked and "error_signal_1"
+                # while sweeping (linien_server/acquisition.py:163-177).
+                t = self.to_plot
+                if not t:
+                    t = pickle.loads(self.client.parameters.to_plot.value)
+                locked = (
+                    "error_signal" in t
+                    or bool(self.client.parameters.lock.value)
+                )
             else:
                 locked = bool(force_value)
 
             if locked != self._last_ui_lock_state:
                 self._last_ui_lock_state = locked
                 self.lock_state.emit(locked)
-        except Exception:
-            pass
+        except Exception as e:
+            # This decides whether the UI says LOCKED. Swallowing it
+            # silently turns "the lock status is not updating" into an
+            # unreproducible report, which is exactly what happened.
+            # Logged once per distinct failure so a persistent one does
+            # not fill the log at 5 Hz.
+            if str(e) != self._last_lock_read_error:
+                self._last_lock_read_error = str(e)
+                self._log(f"lock-state read failed: {e}")

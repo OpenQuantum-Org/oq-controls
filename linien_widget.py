@@ -6,9 +6,38 @@ from the MOT GUI. The heavy linien_client import is deferred until start()
 is called to avoid slowing down UI construction.
 """
 
+import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 from superqt import QRangeSlider
+
+from mot_logging import capture_library_logging
+from styles import (
+    PLOT_COLUMN_MARGINS,
+    STATUS_BAD,
+    UI_FONT_PX,
+    plot_label_style,
+    style_plot_axes,
+)
+
+# This experiment's Red Pitaya. The old fallback was rp-F0C6AD,
+# a different device -- an empty host field quietly connected to
+# someone else's hardware.
+DEFAULT_RP_HOST = "rp-f0f2b5.local"
+
+
+class _ShortLineSample(pg.ItemSample):
+    """Legend swatch: a short line instead of pyqtgraph's wide default."""
+
+    def boundingRect(self):
+        return QtCore.QRectF(0, 0, 16, 14)
+
+    def paint(self, painter, *args):
+        opts = self.item.opts
+        pen = pg.mkPen(opts["pen"])
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(0, 7, 16, 7)
 
 
 class LinienWidget(QtWidgets.QWidget):
@@ -34,12 +63,20 @@ class LinienWidget(QtWidgets.QWidget):
     """
     lock_state_changed = QtCore.pyqtSignal(bool)
     connection_status_changed = QtCore.pyqtSignal(str)
+    selection_state_changed = QtCore.pyqtSignal(bool)
+    fault = QtCore.pyqtSignal(str)
+    # The server's heartbeat stopped/resumed -- see LinienWorker.
+    server_stalled = QtCore.pyqtSignal(bool)
+    # The dither amplitude in mV that the server was found running.
+    modulation_state = QtCore.pyqtSignal(object)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
                  show_stop_button=False, sweep_range=(-1.0, 1.0),
-                 v_to_freq_ghz=None, v_to_mhz=None, parent=None):
+                 v_to_freq_ghz=None, v_to_mhz=None, event_log=None,
+                 parent=None):
         super().__init__(parent)
-        self._linien_host = linien_host or "rp-F0C6AD.local"
+        self._event_log = event_log
+        self._linien_host = linien_host or DEFAULT_RP_HOST
         self._show_lock_buttons = show_lock_buttons
         self._show_stop_button = show_stop_button
         self._sweep_min_v, self._sweep_max_v = sweep_range
@@ -50,9 +87,30 @@ class LinienWidget(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # Shown only when the Red Pitaya has stopped being tried for. It
+        # sits where the trace would be, because a missing spectrum is
+        # exactly the symptom the operator is looking at, and the Devices
+        # row alone (a red "Error" in a collapsed card) never said what to
+        # do about it.
+        self.rp_banner = QtWidgets.QLabel()
+        self.rp_banner.setWordWrap(True)
+        self.rp_banner.setStyleSheet(
+            f"color: {STATUS_BAD}; background: #1a1010;"
+            f"border: 1px solid {STATUS_BAD}; padding: 6px 8px;"
+            f"font-size: {UI_FONT_PX}px;"
+        )
+        self.rp_banner.hide()
+        # Inset to the same edge as the Sweep Speed row above it; without
+        # this the banner ran the full width of the column and read as
+        # belonging to the window rather than to the plot.
+        banner_row = QtWidgets.QHBoxLayout()
+        banner_row.setContentsMargins(*PLOT_COLUMN_MARGINS)
+        banner_row.addWidget(self.rp_banner)
+        layout.addLayout(banner_row)
+
         pg.setConfigOptions(useOpenGL=False, enableExperimental=False, imageAxisOrder="row-major")
         self.pg_widget = pg.GraphicsLayoutWidget()
-        self.pg_widget.setBackground("#0a0a0f")
+        self.pg_widget.setBackground("#0b0b0b")
         layout.addWidget(self.pg_widget)
 
         # --- Sweep range slider ---
@@ -66,13 +124,13 @@ class LinienWidget(QtWidgets.QWidget):
         self.xrange_slider.setStyleSheet("""
             QRangeSlider { background: transparent; }
             QSlider::groove:horizontal {
-                height: 4px; background: #1e1e2e; border-radius: 2px;
+                height: 4px; background: #1d1d1d; border-radius: 0px;
             }
             QSlider::sub-page:horizontal {
-                background: #2a4a80; border-radius: 2px;
+                background: #383838; border-radius: 0px;
             }
             QSlider::handle:horizontal {
-                background: #5080cc; width: 12px; border-radius: 6px; margin: -4px 0;
+                background: #5e5e5e; width: 12px; border-radius: 0px; margin: -4px 0;
             }
         """)
         slider_proxy = QtWidgets.QGraphicsProxyWidget()
@@ -84,16 +142,26 @@ class LinienWidget(QtWidgets.QWidget):
         self.pg_widget.nextRow()
         self.plot = self.pg_widget.addPlot(row=1, col=0)
         self.plot.showGrid(x=True, y=True, alpha=0.15)
+        style_plot_axes(self.plot)
+
+        # No left-axis label; the tick values speak for themselves. The SI
+        # prefix stays off so pyqtgraph does not rescale the ticks and put
+        # a "(x0.001)" multiplier where the label would have been.
+        self.plot.getAxis("left").enableAutoSIPrefix(False)
 
         if self._v_to_mhz is not None:
             self.plot.setLabel("bottom", "VCO Frequency (MHz)",
-                               **{"font-size": "10pt", "color": "#a0a0b4"})
+                               **plot_label_style())
         elif self._v_to_freq is not None:
             self.plot.setLabel("bottom", "Detuning (MHz)",
-                               **{"font-size": "10pt", "color": "#a0a0b4"})
+                               **plot_label_style())
         else:
             self.plot.setLabel("bottom", "Sweep Voltage (V)",
-                               **{"font-size": "10pt", "color": "#a0a0b4"})
+                               **plot_label_style())
+
+        # pyqtgraph's own auto-range button: a small "A" that appears over
+        # the plot on hover. Autozoom replaces it.
+        self.plot.hideButtons()
 
         self.plot.setYRange(-0.05, 0.10)
         init_xmin, init_xmax = self._v_range_to_display(
@@ -105,10 +173,29 @@ class LinienWidget(QtWidgets.QWidget):
         self.original_xrange = self.plot.viewRange()[0]
         self.original_yrange = self.plot.viewRange()[1]
 
+        self.ERROR_COLOR = "#5cb8ff"
+        self.MONITOR_COLOR = "#c080e0"
+
+        # Compact legend in the corner: small type, tight spacing and a
+        # short sample line, so it reads as a key rather than a panel.
+        # Must be created *before* the curves -- addLegend only registers
+        # named items added after it.
+        self.legend = self.plot.addLegend(
+            # Both negative anchors the legend to the plot's bottom-right.
+            offset=(-8, -8),
+            labelTextSize=f"{UI_FONT_PX - 2}px",
+            labelTextColor="#9a9a9a",
+            brush=pg.mkBrush(11, 11, 11, 170),
+            pen=pg.mkPen(40, 40, 40, 160),
+            verSpacing=-5,
+            horSpacing=4,
+            sampleType=_ShortLineSample,
+        )
+
         self.error_curve = self.plot.plot(
-            pen=pg.mkPen("#5cb8ff", width=1.5), name="Error")
+            pen=pg.mkPen(self.ERROR_COLOR, width=1.5), name="Error signal")
         self.monitor_curve = self.plot.plot(
-            pen=pg.mkPen("#c080e0", width=1.5), name="Monitor")
+            pen=pg.mkPen(self.MONITOR_COLOR, width=1.5), name="Monitor signal")
 
         self.zero_line = pg.InfiniteLine(
             pos=0, angle=0,
@@ -118,81 +205,84 @@ class LinienWidget(QtWidgets.QWidget):
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
 
-        # --- Overlay labels ---
-        vb = self.plot.getViewBox()
-        overlay_label_style = "color: #c0c0d4; background: transparent; font-size: 12px; border: none;"
+        # --- Autolock line selection (linien's PlotWidget overlays) ---
+        # Created once and shown/hidden. Adding items per selection is what
+        # previously left marker lines on the plot forever.
+        self.selection_running = False
+        self.selection_boundaries = (0, 0)
+        self._touch_start = None
+        self._plot_paused = False
+        self._last_error_signal = None
 
-        self.center_label = QtWidgets.QLabel("Center: 0.000 V")
-        self.center_label.setStyleSheet(overlay_label_style)
-        self.center_label.setFixedWidth(120)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.center_label)
-        proxy.setZValue(1000)
-        proxy.setPos(22, 10)
+        self.overlay = pg.LinearRegionItem(
+            values=(0, 0), movable=False,
+            brush=pg.mkBrush(92, 184, 255, 40),
+        )
+        self.overlay.setVisible(False)
+        self.plot.addItem(self.overlay, ignoreBounds=True)
 
-        self.span_label = QtWidgets.QLabel("Span: 2.000 V")
-        self.span_label.setStyleSheet(overlay_label_style)
-        self.span_label.setFixedWidth(140)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.span_label)
-        proxy.setZValue(1000)
-        proxy.setPos(150, 10)
+        self.boundary_overlays = [
+            pg.LinearRegionItem(
+                values=(0, 0), movable=False, brush=(0, 0, 0, 200)
+            )
+            for _ in range(2)
+        ]
+        for i, overlay in enumerate(self.boundary_overlays):
+            overlay.setVisible(False)
+            # Hide the inner edge line so the mask reads as a shaded band.
+            overlay.lines[i].setPen((0, 0, 0, 0))
+            self.plot.addItem(overlay, ignoreBounds=True)
 
-        overlay_btn_style = """
-            QPushButton {
-                background-color: rgba(20,20,30,200); color: #d0d0e0;
-                border: 1px solid #2a2a3a; border-radius: 5px;
-                font-size: 12px; padding: 3px 8px;
-            }
-            QPushButton:hover { background-color: rgba(40,40,60,220); color: white; }
-        """
+        self.plot.scene().sigMouseMoved.connect(self._selection_mouse_moved)
+        self.pg_widget.viewport().installEventFilter(self)
 
-        self.reset_view_btn = QtWidgets.QPushButton("Reset Zoom")
-        self.reset_view_btn.setFixedSize(100, 26)
-        self.reset_view_btn.setStyleSheet(overlay_btn_style)
-        self.reset_view_btn.clicked.connect(self._reset_view)
-        proxy = QtWidgets.QGraphicsProxyWidget(vb)
-        proxy.setWidget(self.reset_view_btn)
-        proxy.setZValue(1000)
-        proxy.setPos(20, 45)
+        # Nothing sits over the traces: the lock controls and
+        # the autozoom checkbox are handed to the host window.
+        # Unparented: the host window places this with its other view
+        # controls (see autozoom_check).
+        self.autozoom_check = QtWidgets.QCheckBox("Autozoom")
+        self.autozoom_check.setChecked(True)
+        self.autozoom_check.setCursor(QtCore.Qt.PointingHandCursor)
+        self.autozoom_check.setStyleSheet(
+            "QCheckBox { color: #e6e6e6; font-size: 13px; font-weight: 700;"
+            "border: none; padding: 4px 6px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+        self.autozoom_check.toggled.connect(self._set_autozoom)
+        self._set_autozoom(True)
 
+        self.lock_controls = QtWidgets.QWidget()
+        lock_row = QtWidgets.QHBoxLayout(self.lock_controls)
+        lock_row.setContentsMargins(0, 0, 0, 0)
+        lock_row.setSpacing(6)
         if self._show_lock_buttons:
-            self.lock_button = QtWidgets.QPushButton("Lock Laser")
-            self.lock_button.setFixedSize(100, 26)
-            self.lock_button.setStyleSheet(overlay_btn_style)
+            # linien's wording: you pick a line, the lock follows.
+            self.lock_button = QtWidgets.QPushButton("Select target line")
+            self.lock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.lock_button.clicked.connect(self._run_lock)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.lock_button)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 85)
+            lock_row.addWidget(self.lock_button)
+
+            # Shown only while a selection is in progress, as linien swaps
+            # auto_mode_not_activated for auto_mode_activated.
+            self.abort_button = QtWidgets.QPushButton("Abort")
+            self.abort_button.setCursor(QtCore.Qt.PointingHandCursor)
+            self.abort_button.clicked.connect(self.abort_selection)
+            self.abort_button.setVisible(False)
+            lock_row.addWidget(self.abort_button)
 
             self.unlock_button = QtWidgets.QPushButton("Unlock")
-            self.unlock_button.setFixedSize(100, 26)
-            self.unlock_button.setStyleSheet(overlay_btn_style)
+            self.unlock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.unlock_button.clicked.connect(self._run_unlock)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.unlock_button)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 120)
+            lock_row.addWidget(self.unlock_button)
 
+            self.selection_state_changed.connect(self._on_selection_state)
             self._set_locked_ui(False)
 
         if self._show_stop_button:
             self.stop_sweep_btn = QtWidgets.QPushButton("Stop Sweep")
-            self.stop_sweep_btn.setFixedSize(100, 26)
-            self.stop_sweep_btn.setStyleSheet(overlay_btn_style)
+            self.stop_sweep_btn.setCursor(QtCore.Qt.PointingHandCursor)
             self.stop_sweep_btn.clicked.connect(self._stop_sweep)
-            proxy = QtWidgets.QGraphicsProxyWidget(vb)
-            proxy.setWidget(self.stop_sweep_btn)
-            proxy.setZValue(1000)
-            proxy.setPos(20, 85)
-
-        # Populate the overlay labels with calibrated units immediately,
-        # so they don't sit at "0 V / 2 V" while waiting for the Linien
-        # `initial` signal (or forever if no RP is connected).
-        _init_center_v = (self._sweep_min_v + self._sweep_max_v) / 2
-        _init_amplitude_v = (self._sweep_max_v - self._sweep_min_v) / 2
-        self._update_overlay_labels(_init_center_v, _init_amplitude_v)
+            lock_row.addWidget(self.stop_sweep_btn)
 
     # --- Voltage ↔ display coordinate helpers ---
 
@@ -203,19 +293,6 @@ class LinienWidget(QtWidgets.QWidget):
         if self._v_to_freq:
             return v * self._v_to_freq * 1000.0
         return v
-
-    def _display_to_v(self, x):
-        """Convert a display x coordinate back to voltage (approx for v_to_mhz)."""
-        if self._v_to_mhz is not None:
-            # Numerical inverse: linear search between sweep bounds
-            import numpy as _np
-            vs = _np.linspace(self._sweep_min_v, self._sweep_max_v, 1000)
-            fs = _np.array([float(self._v_to_mhz(v)) for v in vs])
-            idx = int(_np.argmin(_np.abs(fs - x)))
-            return float(vs[idx])
-        if self._v_to_freq:
-            return x / (self._v_to_freq * 1000.0)
-        return x
 
     def _v_range_to_display(self, v_min, v_max):
         """Convert a voltage range to display range (sorted)."""
@@ -229,23 +306,54 @@ class LinienWidget(QtWidgets.QWidget):
         """Import LinienWorker (heavy) and start the acquisition thread."""
         try:
             from linien_worker import LinienWorker
-        except ImportError:
-            print("! linien_worker not found — plot will be static")
+        except ImportError as e:
+            self.fault.emit(f"linien_worker not importable, plot is static: {e}")
             return
 
-        self.linien_thread = LinienWorker(host=self._linien_host)
+        # Only now: importing linien_worker is what pulls in linien_client,
+        # and linien_client installs its own console handler on import.
+        capture_library_logging()
+
+        # Connecting takes seconds (RPyC handshake, possibly an SSH server
+        # start, and up to three attempts). Say so, or the row reads "--"
+        # and looks broken. Through the same handler as the worker's own
+        # statuses, so starting again clears a banner from last time.
+        self._on_connection_status(f"connecting:{self._linien_host}")
+        self.linien_thread = LinienWorker(
+            host=self._linien_host, event_log=self._event_log
+        )
         self.linien_thread.new_data.connect(self._update_plot)
         self.linien_thread.initial.connect(self._initialize_slider)
         self.linien_thread.lock_state.connect(self._on_lock_state)
-        self.linien_thread.connection_status.connect(self.connection_status_changed.emit)
+        self.linien_thread.connection_status.connect(self._on_connection_status)
+        self.linien_thread.fault.connect(self.fault.emit)
+        self.linien_thread.server_stalled.connect(self.server_stalled.emit)
+        self.linien_thread.modulation_state.connect(self.modulation_state.emit)
         self.linien_thread.start()
+
+    def _on_connection_status(self, status):
+        """Re-emit the worker's status, and say so on the plot when it gave up."""
+        if status.startswith("error"):
+            # The worker owns the count; stop() clears the thread, so a
+            # status that lands after teardown still needs a number.
+            attempts = getattr(self.linien_thread, "CONNECT_ATTEMPTS", 3)
+            self.rp_banner.setText(
+                f"Red Pitaya {self._linien_host} did not answer after "
+                f"{attempts} attempts. Check the host under Devices, then "
+                f"press Auto-connect. It can take a couple of goes a minute "
+                f"or two apart — a Red Pitaya that was just powered on is "
+                f"slow to answer, and its hostname takes a while to resolve."
+            )
+            self.rp_banner.show()
+        else:
+            self.rp_banner.hide()
+        self.connection_status_changed.emit(status)
 
     # --- Slots ---
 
     def _initialize_slider(self, data):
         center = data.get("center", 0.0)
         amplitude = data.get("amplitude", 1.0)
-        self._update_overlay_labels(center, amplitude)
         x_min, x_max = center - amplitude, center + amplitude
         d_min, d_max = self._v_range_to_display(x_min, x_max)
         self.plot.setXRange(d_min, d_max, padding=0)
@@ -255,11 +363,22 @@ class LinienWidget(QtWidgets.QWidget):
         self.xrange_slider.blockSignals(False)
 
     def _update_plot(self, data):
-        import numpy as np
         voltages = data["voltages"]
         err = data["error_signal"]
         mon = data["monitor_signal"]
         if voltages.size == 0:
+            return
+        # Keep the newest spectrum for the autolock even while paused.
+        self._last_error_signal = err
+        if self._plot_paused and self._touch_start is None:
+            # Paused with no drag in progress: the release that should
+            # have resumed it never arrived (the cursor left the widget,
+            # say). A frozen spectrum with no way back is worse than a
+            # trace that moves slightly under the cursor.
+            self._resume_plot()
+        if self._plot_paused:
+            # Mid-drag: hold the trace still so the line does not move
+            # under the cursor while it is being picked.
             return
         if self._v_to_mhz is not None:
             x = self._v_to_mhz(voltages)
@@ -277,7 +396,6 @@ class LinienWidget(QtWidgets.QWidget):
         x_min, x_max = slider_min / 1000, slider_max / 1000
         center = (x_min + x_max) / 2
         amplitude = (x_max - x_min) / 2
-        self._update_overlay_labels(center, amplitude)
         if self.linien_thread is not None:
             self.linien_thread.request_sweep_change(center, amplitude)
         # Plot axis always follows the slider — both when shrinking and
@@ -285,23 +403,6 @@ class LinienWidget(QtWidgets.QWidget):
         # mouse-driven zoom/pan to the sweep bounds.
         d_min, d_max = self._v_range_to_display(x_min, x_max)
         self.plot.setXRange(d_min, d_max, padding=0)
-
-    def _update_overlay_labels(self, center_v, amplitude_v):
-        """Update the overlay labels with voltage and/or frequency info."""
-        if self._v_to_mhz is not None:
-            center_mhz = float(self._v_to_mhz(center_v))
-            lo_mhz = float(self._v_to_mhz(center_v - amplitude_v))
-            hi_mhz = float(self._v_to_mhz(center_v + amplitude_v))
-            span_mhz = abs(hi_mhz - lo_mhz)
-            self.center_label.setText(f"Center: {center_mhz:.1f} MHz")
-            self.span_label.setText(f"Span: {span_mhz:.1f} MHz")
-        elif self._v_to_freq is not None:
-            self.center_label.setText(f"Center: {center_v:+.3f} V")
-            span_mhz = 2 * amplitude_v * abs(self._v_to_freq) * 1000.0
-            self.span_label.setText(f"Span: {span_mhz:.0f} MHz")
-        else:
-            self.center_label.setText(f"Center: {center_v:+.3f} V")
-            self.span_label.setText(f"Span: {2 * amplitude_v:.3f} V")
 
     def _limit_xrange(self):
         vb = self.plot.getViewBox()
@@ -311,70 +412,207 @@ class LinienWidget(QtWidgets.QWidget):
         if current_xrange[0] < d_min or current_xrange[1] > d_max:
             vb.setXRange(d_min, d_max, padding=0)
 
-    def _reset_view(self):
-        slider_min, slider_max = self.xrange_slider.value()
-        d_min, d_max = self._v_range_to_display(slider_min / 1000, slider_max / 1000)
-        self.plot.setXRange(d_min, d_max, padding=0)
-        self.plot.setYRange(*self.original_yrange)
+    def _set_autozoom(self, on):
+        """Track the signal on Y, or hold whatever range is showing.
+
+        Switching it back on also resets X to the full sweep range, so a
+        tick-off/tick-on undoes a zoom -- this is the Reset Zoom button
+        the checkbox replaced. X is not auto-ranged continuously, since
+        that would fight _limit_xrange.
+        """
+        self.plot.enableAutoRange(axis="y", enable=bool(on))
+        if on:
+            slider_min, slider_max = self.xrange_slider.value()
+            d_min, d_max = self._v_range_to_display(
+                slider_min / 1000, slider_max / 1000
+            )
+            self.plot.setXRange(d_min, d_max, padding=0)
+        else:
+            self.plot.setYRange(*self.plot.viewRange()[1], padding=0)
 
     def _run_lock(self):
+        """Begin line selection. The lock starts when the drag completes."""
         if self.linien_thread is None:
             return
-        selected_display = self._pick_x_positions()
-        if len(selected_display) >= 2:
-            # Convert display coordinates back to voltage for the lock logic
-            selected_v = [self._display_to_v(x) for x in selected_display]
-            selected_v.sort()
-            self.linien_thread.lock_laser(selected_v)
+        self.start_selection()
 
     def _run_unlock(self):
+        self.abort_selection()
         if self.linien_thread is not None:
             self.linien_thread.unlock_laser()
 
-    def _pick_x_positions(self):
-        """Interactive: user clicks two x positions on the plot to define lock region."""
-        vb = self.plot.getViewBox()
-        orange_line = pg.InfiniteLine(
-            pos=0, angle=90,
-            pen=pg.mkPen(color=(255, 165, 0, 180), style=QtCore.Qt.DashLine, width=1.5),
+    # --- Line selection, ported from linien's PlotWidget ---
+
+    def start_selection(self):
+        """Enable area selection over the trace (linien: selectable 0.99).
+
+        The trace keeps running until a drag actually starts. linien
+        pauses for the whole of selection mode because it caches spectra
+        to hand to the autolock; ours re-reads the spectrum in the worker
+        and only needs the length, so holding the plot for longer than
+        the drag buys nothing -- and a click that was too short to count
+        as a selection used to leave it frozen with no way back.
+        """
+        if self.selection_running:
+            return
+        self._enable_area_selection(selectable_width=0.99)
+        self.selection_state_changed.emit(True)
+
+    def abort_selection(self):
+        if not self.selection_running:
+            return
+        self._disable_area_selection()
+        self._resume_plot()
+        self.selection_state_changed.emit(False)
+
+    def _enable_area_selection(self, selectable_width=0.99):
+        self.selection_running = True
+        xmin, xmax = self.plot.viewRange()[0]
+        span = xmax - xmin
+        # A little wider than exact: linien notes glitches otherwise.
+        extra = span / 100.0
+        boundary = (span * (1 - selectable_width)) / 2.0
+        self.selection_boundaries = (xmin + boundary, xmax - boundary)
+
+        self.boundary_overlays[0].setRegion(
+            (xmin - extra, xmin + boundary)
         )
-        self.plot.addItem(orange_line)
-        selected = []
+        self.boundary_overlays[1].setRegion(
+            (xmax - boundary, xmax + extra)
+        )
+        for overlay in self.boundary_overlays:
+            overlay.setVisible(True)
+        # Panning would fight the drag-select.
+        self.view_box.setMouseEnabled(x=False, y=False)
 
-        def mouse_move(pos):
-            if vb.sceneBoundingRect().contains(pos):
-                orange_line.setPos(vb.mapSceneToView(pos).x())
+    def _disable_area_selection(self):
+        self.selection_running = False
+        self._touch_start = None
+        self.overlay.setVisible(False)
+        for overlay in self.boundary_overlays:
+            overlay.setVisible(False)
+        self.view_box.setMouseEnabled(x=True, y=True)
 
-        def mouse_click(evt):
-            if evt.button() == QtCore.Qt.LeftButton:
-                pos = evt.scenePos()
-                if vb.sceneBoundingRect().contains(pos):
-                    x_val = vb.mapSceneToView(pos).x()
-                    selected.append(x_val)
-                    marker = pg.InfiniteLine(
-                        pos=x_val, angle=90,
-                        pen=pg.mkPen(color=(255, 165, 0, 140), width=1),
-                    )
-                    self.plot.addItem(marker)
-                    if len(selected) >= 2:
-                        loop.quit()
+    def _pause_plot(self):
+        """Hold the trace still so the line does not move while selecting."""
+        self._plot_paused = True
 
-        vb.scene().sigMouseMoved.connect(mouse_move)
-        vb.scene().sigMouseClicked.connect(mouse_click)
-        loop = QtCore.QEventLoop()
-        loop.exec_()
-        self.plot.removeItem(orange_line)
-        selected.sort()
-        return selected
+    def _resume_plot(self):
+        self._plot_paused = False
+
+    def _within_boundaries(self, x):
+        lo, hi = self.selection_boundaries
+        return min(max(x, lo), hi)
+
+    def _selection_mouse_moved(self, pos):
+        if not self.selection_running or self._touch_start is None:
+            return
+        if not self.view_box.sceneBoundingRect().contains(pos):
+            return
+        x = self._within_boundaries(self.view_box.mapSceneToView(pos).x())
+        x0 = self._touch_start
+        self.overlay.setRegion((min(x0, x), max(x0, x)))
+
+    def eventFilter(self, obj, event):
+        """Drag-select on the plot viewport.
+
+        The plot's mouse events reach the graphics view, not this widget,
+        so press/release are filtered there rather than overridden here.
+        """
+        if not self.selection_running:
+            return False
+        kind = event.type()
+        if kind == QtCore.QEvent.MouseButtonPress:
+            self._on_selection_press(event)
+            return True
+        if kind == QtCore.QEvent.MouseButtonRelease:
+            self._on_selection_release(event)
+            return True
+        return False
+
+    def _event_x(self, event):
+        scene_pos = self.pg_widget.mapToScene(event.pos())
+        return self._within_boundaries(
+            self.view_box.mapSceneToView(scene_pos).x()
+        )
+
+    def _on_selection_press(self, event):
+        x = self._event_x(event)
+        # Held only for the drag, so the line does not move under the
+        # cursor while it is being picked.
+        self._pause_plot()
+        self._touch_start = x
+        self.overlay.setRegion((x, x))
+        self.overlay.setVisible(True)
+
+    def _on_selection_release(self, event):
+        self._resume_plot()  # every exit path below leaves the trace live
+        if self._touch_start is None:
+            return
+        x = self._event_x(event)
+        x0 = self._touch_start
+        lo, hi = self.selection_boundaries
+        span = hi - lo
+        self.overlay.setVisible(False)
+        self._touch_start = None
+
+        # A drag under 1% of the span is a click, not a selection: this is
+        # what stops a stray click starting a lock. Selection stays armed
+        # so the next drag counts, as it does in linien.
+        if span <= 0 or abs(x - x0) / span < 0.01:
+            return
+
+        self._disable_area_selection()
+        self.selection_state_changed.emit(False)
+        self._start_autolock(*sorted((x0, x)))
+
+    def _start_autolock(self, x_from, x_to):
+        """Map the selected display range to spectrum indices and lock.
+
+        Only the indices travel to the worker: it re-reads the spectrum
+        itself in raw counts, which is what the autolock needs.
+        """
+        spectrum = self._last_error_signal
+        if self.linien_thread is None or spectrum is None:
+            return
+        n = int(np.asarray(spectrum).size)
+        if n < 4:
+            return
+        xmin, xmax = self._v_range_to_display(
+            self._sweep_min_v, self._sweep_max_v
+        )
+        span = xmax - xmin
+        if span == 0:
+            return
+        i0 = int(round((x_from - xmin) / span * (n - 1)))
+        i1 = int(round((x_to - xmin) / span * (n - 1)))
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+        if i1 - i0 < 2:
+            return
+        # The worker re-reads the spectrum in raw counts; it only
+        # needs the selected indices and the length they refer to.
+        self.linien_thread.lock_laser(i0, i1, n)
 
     def _on_lock_state(self, locked: bool):
         self._set_locked_ui(locked)
         self.lock_state_changed.emit(locked)
 
+    def _on_selection_state(self, selecting: bool):
+        """Swap Select for Abort while a drag-selection is running."""
+        if not self._show_lock_buttons:
+            return
+        self.lock_button.setVisible(not selecting)
+        self.abort_button.setVisible(selecting)
+
     def _set_locked_ui(self, locked: bool):
         if not self._show_lock_buttons:
             return
-        self.lock_button.setVisible(not locked)
+        if locked:
+            # A lock engaging ends any selection still in progress.
+            self.abort_selection()
+        self.lock_button.setVisible(not locked and not self.selection_running)
+        self.abort_button.setVisible(self.selection_running)
         self.unlock_button.setVisible(locked)
 
     def _stop_sweep(self):

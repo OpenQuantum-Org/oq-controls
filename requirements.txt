@@ -4,4 +4,8 @@ superqt>=0.6
 numpy
 scipy>=1.10
 pyserial>=3.5
-linien-client>=2.0
+# Pinned, not floated: the Red Pitaya runs a hand-patched linien-server 2.1.0
+# and the client checks the server's version on connect. A newer client raises
+# InvalidServerVersionException, and the paths that respond to that reinstall
+# the server -- which uninstalls the patch. See README, "Red Pitaya".
+linien-client==2.1.0
