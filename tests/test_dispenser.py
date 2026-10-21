@@ -39,12 +39,16 @@ def output_writes(client):
 assert DispenserWorker.FIRE_SECONDS == 30.0
 assert DispenserWorker.DISPENSE_CURRENT_A == 7.5
 
-events = {"fire_states": [], "cooldowns": [], "summaries": []}
+events = {"fire_states": [], "summaries": []}
+
+# The 15 min re-fire lockout was removed on 2026-10-16 at the operator's
+# request, so there is no cooldown phase and no cooldown_started signal.
+assert not hasattr(DispenserWorker, "COOLDOWN_SECONDS")
+assert not hasattr(DispenserWorker, "cooldown_started")
 
 w = DispenserWorker(port=None)
 w._client = FakeClient()
 w.fire_state.connect(lambda s: events["fire_states"].append(dict(s)))
-w.cooldown_started.connect(lambda t: events["cooldowns"].append(t))
 w.fire_summary.connect(lambda s: events["summaries"].append(dict(s)))
 
 # 1) fire() programs the fixed setpoints (5.00 V, 7.5 A) then enables output
@@ -61,14 +65,13 @@ w._client.writes.clear()
 w._service({"output_enabled": True, **GOOD})
 assert w._client.writes == []  # correct setpoints -> no writes
 
-# 3) after FIRE_SECONDS the service loop forces the output off -> cooldown,
-#    and a non-aborted fire summary is emitted
+# 3) after FIRE_SECONDS the service loop forces the output off, and a
+#    non-aborted fire summary is emitted. The phase returns straight to
+#    idle -- the fire is still time-limited, only the lockout is gone.
 w._fire_end = time.monotonic() - 0.1
 w._service({"output_enabled": True, **GOOD})
-assert w._phase == "cooldown", w._phase
+assert w._phase == "idle", w._phase
 assert output_writes(w._client) == [0]
-assert len(events["cooldowns"]) == 1
-assert abs(events["cooldowns"][0] - (time.time() + 900)) < 5
 assert len(events["summaries"]) == 1
 summary = events["summaries"][0]
 assert summary["aborted"] is False
@@ -76,37 +79,23 @@ assert summary["planned_s"] == 30.0
 assert summary["current_a"] == 7.5
 assert summary["elapsed_s"] >= 0.0
 
-# 4) fire() during cooldown is refused (no writes at all)
+# 4) re-firing immediately is allowed: nothing rate-limits the dispenser
+#    any more, which is the whole point of removing the cooldown.
 w._client.writes.clear()
 w.fire()
 w._process_pending()
-assert w._phase == "cooldown"
-assert w._client.writes == []
+assert w._phase == "firing", w._phase
+assert w._client.writes == [(V, 500), (I, 750), (OUT, 1)], w._client.writes
 
-# 5) front-panel enable during cooldown is forced back off
-w._service({"output_enabled": True, **GOOD})
-assert output_writes(w._client) == [0]
-
-# 6) cooldown expiry returns to idle, then fire works again
-w._cooldown_end = time.monotonic() - 0.1
-w._service({"output_enabled": False, **GOOD})
-assert w._phase == "idle", w._phase
-w._client.writes.clear()
-w.fire()
-w._process_pending()
-assert w._phase == "firing"
-assert w._client.writes == [(V, 500), (I, 750), (OUT, 1)]
-
-# 7) manual abort mid-fire -> off + cooldown + aborted summary
+# 5) manual abort mid-fire -> off + aborted summary, straight back to idle
 w.abort_fire()
 w._process_pending()
-assert w._phase == "cooldown"
+assert w._phase == "idle", w._phase
 assert output_writes(w._client)[-1] == 0
-assert len(events["cooldowns"]) == 2
 assert len(events["summaries"]) == 2
 assert events["summaries"][1]["aborted"] is True
 
-# 8) external/front-panel enable while idle: setpoints enforced + time-limited
+# 6) external/front-panel enable while idle: setpoints enforced + time-limited
 w2 = DispenserWorker(port=None)
 w2._client = FakeClient()
 w2._service({"output_enabled": True, "v_set": 30.0, "i_set": 20.0})
@@ -114,30 +103,36 @@ assert w2._phase == "firing"
 assert w2._client.writes == [(V, 500), (I, 750)], w2._client.writes
 w2._fire_end = time.monotonic() - 0.1
 w2._service({"output_enabled": True, **GOOD})
-assert w2._phase == "cooldown"
+assert w2._phase == "idle"
 assert output_writes(w2._client) == [0]
 
-# 9) persisted cooldown blocks fire on a fresh worker
-w3 = DispenserWorker(port=None, cooldown_until=time.time() + 600)
+# 7) a fresh worker starts idle and fires at once -- there is no persisted
+#    lockout to inherit, and the constructor no longer takes one.
+w3 = DispenserWorker(port=None)
 w3._client = FakeClient()
-assert w3._phase == "cooldown"
+assert w3._phase == "idle"
 w3.fire()
 w3._process_pending()
-assert w3._client.writes == []
+assert w3._client.writes == [(V, 500), (I, 750), (OUT, 1)]
+try:
+    DispenserWorker(port=None, cooldown_until=time.time() + 600)
+except TypeError:
+    pass
+else:
+    raise AssertionError("cooldown_until is still accepted")
 
-# 10) expired persisted cooldown starts idle
-w4 = DispenserWorker(port=None, cooldown_until=time.time() - 600)
-assert w4._phase == "idle"
+# 8) set_output is still routed through fire/abort, so the time limit holds
+w4 = DispenserWorker(port=None)
+w4._client = FakeClient()
+w4.set_output(True)
+w4._process_pending()
+assert w4._phase == "firing"
+assert w4._client.writes == [(V, 500), (I, 750), (OUT, 1)]
+w4.set_output(False)
+w4._process_pending()
+assert output_writes(w4._client)[-1] == 0
 
-# 11) set_output(True) is routed through the cooldown guard
-w3.set_output(True)
-w3._process_pending()
-assert w3._client.writes == []
-w3.set_output(False)
-w3._process_pending()
-assert output_writes(w3._client) == [0]
-
-# 12) the public setpoint API is inert on the dispenser
+# 9) the public setpoint API is inert on the dispenser
 w4._client = FakeClient()
 w4.set_voltage(30.0)
 w4.set_current(20.0)
@@ -149,7 +144,7 @@ assert w4._client.writes == []
 firing = [s for s in events["fire_states"] if s["phase"] == "firing"]
 assert firing and 0 < firing[0]["remaining_s"] <= 30.0
 
-# 13) override parameters via constructor: 10 A / 45 s fire
+# 10) override parameters via constructor: 10 A / 45 s fire
 w5 = DispenserWorker(port=None, fire_seconds=45.0, dispense_current_a=10.0)
 w5._client = FakeClient()
 w5.fire()
@@ -158,13 +153,13 @@ assert w5._client.writes == [(V, 500), (I, 1000), (OUT, 1)], w5._client.writes
 remaining = w5._fire_end - time.monotonic()
 assert 44.0 < remaining <= 45.0, remaining
 
-# 14) runtime override is clamped (current to 20 A max, duration to >= 1 s)
+# 11) runtime override is clamped (current to 20 A max, duration to >= 1 s)
 w5.set_fire_parameters(25.0, 0.2)
 w5._process_pending()
 assert w5.dispense_current_a == 20.0
 assert w5.fire_seconds == 1.0
 
-# 15) mid-fire enforcement tracks the overridden current
+# 12) mid-fire enforcement tracks the overridden current
 w5._client.writes.clear()
 w5._service({"output_enabled": True, "v_set": 5.0, "i_set": 10.0})
 assert w5._client.writes == [(I, 2000)], w5._client.writes  # 20.00 A

@@ -30,7 +30,10 @@ device-facing change as working without the bench.
 Reads are free. **Ask before every actuation, every time** — prior approval
 never carries forward:
 
-- Dispenser fire (7.5 A, 30 s, 15-min lockout, consumes Rb)
+- Dispenser fire (7.5 A, 30 s, consumes Rb). The 15-min lockout was
+  **removed on 2026-10-16** at the operator's request: nothing now rate-limits
+  re-firing, so the per-fire time limit is the only guard left and the asking
+  matters more than it did.
 - Laser enable or current change
 - Setpoint change on a locked system
 - DPS output enable
@@ -41,9 +44,54 @@ running laser and a locked system. What it can never do is switch an output on o
 off: a config carries setpoints only, and `_reject_state_keys` drops any key that
 describes an output (`_CONFIG_STATE_KEYS`) on the way both out and in.
 
+**The lock is the repump sideband, not the carrier.** The VCO's ~2.915 GHz
+sideband is locked to Rb-85 F=2→F'=3 and the 3 MHz dither drives the VCO, so
+the error signal sees only the sideband. Tuning the repump while locked is how
+the carrier's cooling detuning is swept (docs: `openquantum-documentation`
+ch. 3, "Reference Implementation"). Reason from this before touching lock
+point, repump or offset code.
+
+**MOT on 2026-10-19/20, none the week before — cause not yet isolated.**
+Locking at 2912 MHz and tuning the repump to ~2920 gave a MOT; no code change
+caused it (Track repump was off). Two candidates, untested apart:
+- *Sweep speed.* While locked the repump moved at 1–2.5 MHz/s on 2026-10-16
+  (DAC jumps ~2 MHz, some 12–53 MHz) and 0.14–0.3 MHz/s on 10-19/20 (jumps
+  ≤0.3 MHz). Fast sweeps cross the few-MHz MOT window quicker than a MOT
+  loads, and big jumps can slip the lock onto another zero crossing unseen.
+- *Lock feature.* The lock must sit on a feature that slides as the repump
+  is tuned (the sideband). Some 10-16 locks (≈ −0.06 V) were on one that
+  barely slid; but most of that day's locks were at +0.26 to +0.58 V, near
+  this week's +0.2 V, so this does not separate the weeks cleanly.
+Sweep slowly (~0.2 MHz/s, 0.1 MHz steps) and lock on a sliding feature.
+
+**Track repump was removed on 2026-10-20 at the operator's request.** It
+rewrote Mod Phase and `combined_offset` on a locked system as the repump moved
+(three designs, 2026-10-16 to -19). It never helped get a MOT, and the lock
+broke more easily while it ran. Do not rebuild it without being asked.
+*Lock here* (lock at the sweep centre, no line search, with a Slope toggle;
+built 2026-10-16) was removed on 2026-10-21 as unnecessary, same rule.
+So was the *Signal Offset* slider (hand-set `combined_offset`, re-applied
+after every unlock); the server's own value, zeroed by `start_sweep` and set
+by the autolock when Determine signal offset is ticked, now stands alone.
+
+*Record Repump Scan* (née "Calibrate vs Repump": stepped the unlocked
+repump 2800–2970 MHz and saved error I/Q + monitor) was removed on
+2026-10-21 too. Its traces stay in `logs/repump-cal-*.npz` and
+`logs/repump-scan-*.npz`; old logs say `repump_calibration`/`repump_scan`.
+Lock selections are still logged as `lock_selection`.
+
 Laser operating point is **80 mA** (`mot_control.py:1850`). Do not widen slider
-ranges or nudge it as a side effect of other work. On connect the sliders adopt
-the Koheron's actual setpoints — keep that direction.
+ranges or nudge it as a side effect of other work.
+
+On connect the direction depends on whether the diode is lit, **decided
+2026-10-16** (this reverses `d441b65` for one case):
+
+- **Output off** → the app writes its *saved* current and temperature to the
+  Koheron (`_restore_laser_setpoints`). A power cycle leaves the CTL200 at
+  0 mA / 9999 Ω and adopting that threw the operating point away every time.
+- **Output on, or `lason` unreadable** → the sliders adopt the Koheron's
+  actual setpoints, as before. Unreadable counts as on: writing current into a
+  running diode is the error that matters, so silence is not permission.
 
 **Thermistor setpoint is unresolved.** Code default is 6215 Ω (`:1866`), which
 `thermistor_ohms_to_c` maps to 36.2 °C. Target is ~27 °C ≈ 9171 Ω; a 10 k NTC

@@ -89,7 +89,7 @@ pg.setConfigOptions(
     useOpenGL=False, enableExperimental=False, foreground="#c8c8da"
 )
 
-# Both bundled families must register (byte-based loading — the
+# Both bundled families must register (byte-based loading â€” the
 # path-based Qt API silently fails on this Qt build).
 assert "Space Grotesk" in QtGui.QFontDatabase.families()
 assert "IBM Plex Sans" in QtGui.QFontDatabase.families()
@@ -246,7 +246,7 @@ try:
     assert logo.height() >= mot_control.LOGO_HEIGHT_PX
     assert logo.width() > logo.height()  # horizontal lockup
 
-    # One family throughout: Space Grotesk for headings and body alike —
+    # One family throughout: Space Grotesk for headings and body alike â€”
     # verified via the resolved font, not the stylesheet text.
     assert resolved_family(window.usb_card.toggle_btn) == "Space Grotesk"
     section = mot_control.make_section_title("PROBE")
@@ -282,12 +282,17 @@ try:
             needed = fm.horizontalAdvance(text) + 20  # padding + border
             assert needed <= edit.width(), (text, needed, edit.width())
 
-    # Laser slider ranges: current 50-100 mA, temperature 16-38 C in
-    # 0.1 C steps.
-    assert window.current_slider.minimum() == 50
-    assert window.current_slider.maximum() == 100
-    assert window.therm_slider.minimum() == 160
-    assert window.therm_slider.maximum() == 380
+    # Laser slider ranges: current 50-100 mA in 0.1 mA steps, temperature
+    # 16-38 C in 0.01 C steps. Both read in physical units, so the slider
+    # counts are the physical range times the scale.
+    assert window.current_slider.minimum() == 5000
+    assert window.current_slider.maximum() == 10000
+    assert (window.current_edit.decimals, window.current_edit.scale) == (2, 100.0)
+    # Current and Temperature step the same amount per arrow press.
+    assert window.current_slider.singleStep() == window.therm_slider.singleStep()
+    assert window.therm_slider.minimum() == 1600
+    assert window.therm_slider.maximum() == 3800
+    assert (window.therm_edit.decimals, window.therm_edit.scale) == (2, 100.0)
 
     # Supply setpoints read to 0.1 V / 0.1 A, and the slider steps match
     # that so a single arrow-key press moves the displayed number.
@@ -302,15 +307,20 @@ try:
 
     # Typed entry: the value boxes now drive the sliders (with clamping,
     # suffix tolerance, and garbage rejection).
-    window.current_slider.setValue(90)
+    window.current_slider.setValue(9000)
     window.current_edit.setText("95")
     window.current_edit.editingFinished.emit()
-    assert window.current_slider.value() == 95
-    assert window.current_edit.text() == "95 mA"
+    assert window.current_slider.value() == 9500
+    assert window.current_edit.text() == "95.00 mA"
+    # Both new decimal places have to survive a round trip through the box.
+    window.current_edit.setText("87.42 mA")
+    window.current_edit.editingFinished.emit()
+    assert window.current_slider.value() == 8742
+    assert window.current_edit.text() == "87.42 mA"
     window.current_edit.setText("999 mA")
     window.current_edit.editingFinished.emit()
-    assert window.current_slider.value() == 100  # clamped to slider max
-    assert window.current_edit.text() == "100 mA"
+    assert window.current_slider.value() == 10000  # clamped to slider max
+    assert window.current_edit.text() == "100.00 mA"
     window.mod_freq_edit.setText("17.5 MHz")
     window.mod_freq_edit.editingFinished.emit()
     assert window.mod_freq_slider.value() == 17500
@@ -321,8 +331,21 @@ try:
     assert window.vtune_slider.value() == 28500  # unchanged
     assert window.vtune_edit.text() == "2850.0 MHz"  # display restored
 
+    # A held key must not outrun the repump DAC: auto-repeats inside the
+    # limiter's interval are dropped, a fresh press always steps.
+    def vtune_key(repeat):
+        QtWidgets.QApplication.sendEvent(window.vtune_edit, QtGui.QKeyEvent(
+            QtCore.QEvent.KeyPress, QtCore.Qt.Key_Up,
+            QtCore.Qt.NoModifier, "", repeat))
+    vtune_key(False)
+    for _ in range(10):
+        vtune_key(True)
+    assert window.vtune_slider.value() == 28501, window.vtune_slider.value()
+    vtune_key(False)
+    assert window.vtune_slider.value() == 28502, window.vtune_slider.value()
+
     # Wheel guard: a wheel event over an unfocused slider must not change
-    # the value (it used to — accidental hardware actuation).
+    # the value (it used to â€” accidental hardware actuation).
     before = window.current_slider.value()
     assert not window.current_slider.hasFocus()
     wheel = QtGui.QWheelEvent(
@@ -339,7 +362,7 @@ try:
     assert window.current_slider.value() == before
 
     # ...but scrolling the column itself still works (guard must exempt
-    # scrollbars — including them once caused infinite recursion).
+    # scrollbars â€” including them once caused infinite recursion).
     scroll_area = window.findChild(QtWidgets.QScrollArea)
     vbar = scroll_area.verticalScrollBar()
     # Cards open collapsed, so expand enough of them to overflow the
@@ -376,9 +399,9 @@ try:
 
     # The laser setpoint is a temperature; the ohms the Koheron wants are
     # derived from it and are what gets persisted.
-    window.therm_slider.setValue(300)  # move off the default first
-    window.therm_slider.setValue(250)  # 25.0 C
-    assert window.therm_edit.text() == "25.0 \N{DEGREE SIGN}C"
+    window.therm_slider.setValue(3000)  # move off the default first
+    window.therm_slider.setValue(2500)  # 25.00 C
+    assert window.therm_edit.text() == "25.00 \N{DEGREE SIGN}C"
     saved_ohms = int(window._settings.value("laser/thermistor_ohm"))
     assert abs(mot_control.thermistor_ohms_to_c(saved_ohms) - 25.0) < 0.05
     # The two conversions must agree across the slider's range.
@@ -392,11 +415,12 @@ try:
     assert window.chip_text("disp") == "DISPENSER FIRING"
     assert window.dispenser_progress.isVisibleTo(window)
     assert window.dispenser_progress.value() == 500  # 15 s of 30 s left
-    window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
-    assert not window.dispenser_fire_btn.isEnabled()
-    assert "14:32" in window.dispenser_fire_btn.text()
-    assert window.chip_text("disp") == "DISPENSER 14:32"
-    assert window.dispenser_progress.value() == 969  # 872 s of 900 s left
+    # No cooldown since 2026-10-16: a fire ends straight back at idle,
+    # re-armed, with nothing blocking the next one.
+    window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
+    assert window.dispenser_fire_btn.isEnabled()
+    assert "Fire Dispenser" in window.dispenser_fire_btn.text()
+    assert not window.dispenser_progress.isVisibleTo(window)
     window._on_dispenser_fire_state({"phase": "idle", "remaining_s": 0.0})
     assert window.dispenser_fire_btn.isEnabled()
     assert "Fire Dispenser (30 s)" == window.dispenser_fire_btn.text()
@@ -412,8 +436,12 @@ try:
             QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier),
         )
 
+    # The clamp check above left the current slider pinned at its maximum,
+    # where Up cannot move it.
+    window.current_slider.setValue(8000)
     for slider, edit in (
-        (window.therm_slider, window.therm_edit),              # 0.1 C
+        (window.current_slider, window.current_edit),          # 0.01 mA
+        (window.therm_slider, window.therm_edit),              # 0.01 C
         (window.mot_coil_current_slider, window.mot_coil_current_edit),  # 0.1 A
         (window.mod_strength_slider, window.mod_strength_edit),  # 0.001 Vpp
     ):
@@ -631,6 +659,161 @@ try:
         "monitor_signal": np.zeros(8),
     })
     assert not lw._plot_paused, "orphaned pause never cleared"
+
+    # --- Lock snapshot ---
+    # While locked the arrays are a time trace, so the last sweeping frame
+    # is held behind them; the flat live traces crossing it are the lock
+    # point. No marker (see _update_lockpoint). Items are created once and
+    # shown/hidden, so the item count must not move.
+    lp_baseline = len(lw.plot.items)
+    sweep_v = np.linspace(-1, 1, 64)
+    sweep_err = np.linspace(-0.02, 0.02, 64)
+    sweep_mon = np.full(64, 0.07)
+    lw._update_plot({
+        "voltages": sweep_v, "error_signal": sweep_err,
+        "monitor_signal": sweep_mon, "locked": False,
+        "control_mean": None, "combined_offset_v": 0.0,
+    })
+    assert lw._last_sweep is not None
+    assert not lw.frozen_error_curve.isVisible()
+
+    # The autolock rewrites combined_offset on engaging (autolock.py:235),
+    # after the frozen sweep was taken; the snapshot has to follow it or
+    # it shows a zero crossing the PID no longer sees.
+    lw._update_plot({
+        "voltages": sweep_v, "error_signal": np.full(64, 0.001),
+        "monitor_signal": np.full(64, 0.055), "locked": True,
+        "control_mean": -0.25, "combined_offset_v": 0.1,
+    })
+    assert lw.frozen_error_curve.isVisible()
+    assert lw.frozen_monitor_curve.isVisible()
+    assert np.allclose(lw.frozen_error_curve.yData, sweep_err + 0.1)
+    assert np.allclose(lw.frozen_monitor_curve.yData, sweep_mon)
+    assert len(lw.plot.items) == lp_baseline
+    lock_records = [r for r in _records() if r.get("event") == "lock_point"]
+    assert len(lock_records) == 1, lock_records
+    assert abs(lock_records[0]["lock_v"] - (-0.25)) < 1e-6
+    assert abs(lock_records[0]["offset_shift_v"] - 0.1) < 1e-6
+
+    # Unlocking clears it, and a second lock logs a second record.
+    lw._update_plot({
+        "voltages": sweep_v, "error_signal": sweep_err,
+        "monitor_signal": sweep_mon, "locked": False,
+        "control_mean": None, "combined_offset_v": 0.1,
+    })
+    assert not lw.frozen_error_curve.isVisible()
+    lw._update_plot({
+        "voltages": sweep_v, "error_signal": np.full(64, 0.001),
+        "monitor_signal": np.full(64, 0.055), "locked": True,
+        "control_mean": 0.4, "combined_offset_v": 0.1,
+    })
+    assert len([r for r in _records() if r.get("event") == "lock_point"]) == 2
+
+    # Leave the plot as the orphaned-pause check above left it, so this
+    # block does not quietly redraw the reference screenshot.
+    lw._update_plot({
+        "voltages": np.linspace(-1, 1, 8),
+        "error_signal": np.zeros(8),
+        "monitor_signal": np.zeros(8),
+    })
+    assert not lw.frozen_error_curve.isVisible()
+
+    # --- Laser setpoints survive a power cycle ---
+    # A power-cycled CTL200 comes back at 0 mA / 9999 ohm. Adopting that
+    # threw the operating point away every time, so when the diode is dark
+    # the saved setpoints go to the device instead (reversing d441b65 for
+    # this one case, 2026-10-16). Never while the output is on.
+    pushed = []
+    window.laser_worker = types.SimpleNamespace(
+        set_current=lambda ma: pushed.append(("current", ma)),
+        set_thermistor=lambda ohms: pushed.append(("therm", ohms)),
+    )
+    window.laser_unlock_box.setChecked(True)
+    window.current_slider.setValue(8700)   # 87.00 mA
+    window.therm_slider.setValue(2719)     # 27.19 C
+    saved_therm = int(window._settings.value("laser/thermistor_ohm"))
+    pushed.clear()  # the slider moves above pushed too; only the restore counts
+
+    window._on_laser_init({"current": 0.0, "thermistor": 9999, "output_on": False})
+    assert pushed == [("current", 87.0), ("therm", saved_therm)], pushed
+    # The device's 0 mA must not land in the UI: that is the value being
+    # overridden, not adopted.
+    assert window.current_slider.value() == 8700, window.current_slider.value()
+    assert window.therm_slider.value() == 2719, window.therm_slider.value()
+    assert any(r.get("event") == "laser_setpoints_restored" for r in _records())
+
+    # Laser already running: adopt, never write. Pushing current into a
+    # live diode unasked is exactly what this must not do.
+    pushed.clear()
+    window._on_laser_init({"current": 62.5, "thermistor": 9999, "output_on": True})
+    assert pushed == [], pushed
+    assert window.current_slider.value() == 6250, window.current_slider.value()
+
+    # An unreadable output state counts as on, so silence is never taken
+    # for permission to write.
+    window.current_slider.setValue(8700)
+    pushed.clear()  # that slider move pushed too
+    window._on_laser_init({"current": 73.0, "thermistor": 9999})
+    assert pushed == [], pushed
+    assert window.current_slider.value() == 7300, window.current_slider.value()
+
+    window.laser_worker = None
+    window.current_slider.setValue(8700)
+    window.laser_unlock_box.setChecked(False)
+
+    # --- Sweep centre: slide the window without rescaling it ---
+    # The range slider sets centre and span together; this box moves only
+    # the centre, to 3 decimals, as linien's sweepCenterSpinBox does.
+    spin = lw.sweep_center_spin
+    assert spin.decimals() == 3, spin.decimals()
+    assert (spin.minimum(), spin.maximum()) == (-1.0, 1.0)
+    # One click is one displayed decimal place, not linien's 0.1 V.
+    assert spin.singleStep() == 0.001, spin.singleStep()
+    moved = []
+    lw.linien_thread = types.SimpleNamespace(
+        request_sweep_change=lambda c, a: moved.append((round(c, 4), round(a, 4)))
+    )
+    lw.xrange_slider.setValue((-400, 200))   # centre -0.1, amplitude 0.3
+    assert abs(spin.value() - (-0.1)) < 1e-9, spin.value()
+    moved.clear()
+    spin.setValue(0.25)
+    # Span preserved, centre moved: that is the whole point of the box.
+    assert moved == [(0.25, 0.3)], moved
+    assert lw.xrange_slider.value() == (-50, 550), lw.xrange_slider.value()
+    # A centre that would push an edge past the sweep bounds is clamped, so
+    # the plot cannot be asked to follow somewhere the sweep never goes.
+    moved.clear()
+    spin.setValue(0.95)
+    assert moved == [(0.7, 0.3)], moved
+    assert abs(spin.value() - 0.7) < 1e-9, spin.value()
+    # Dragging the slider updates the box without echoing back out.
+    moved.clear()
+    lw.xrange_slider.setValue((-1000, 0))
+    assert abs(spin.value() - (-0.5)) < 1e-9, spin.value()
+    assert moved == [(-0.5, 0.5)], moved
+    lw.linien_thread = None
+    lw.xrange_slider.setValue((-1000, 1000))
+
+    # --- Sweep speed: the slowest entry is a hold, not a speed ---
+    # 0 Hz is linien's sweep_pause parameter, so it must not be sent down
+    # the speed path -- sweep_speed only takes 0-15, and 0 there is the
+    # *fastest* sweep.
+    sweep_calls = []
+    window.linien_widget.linien_thread = types.SimpleNamespace(
+        set_sweep_speed=lambda v: sweep_calls.append(("speed", v)),
+        set_sweep_pause=lambda v: sweep_calls.append(("pause", v)),
+    )
+    hold_index = window.sweep_speed_combo.count() - 1
+    assert window.sweep_speed_combo.itemData(hold_index) is None
+    assert "0 Hz" in window.sweep_speed_combo.itemText(hold_index)
+    window.sweep_speed_combo.setCurrentIndex(hold_index)
+    assert sweep_calls == [("pause", True)], sweep_calls
+    # Leaving the hold has to un-pause as well as set the rate, or the
+    # trace stays frozen at the new speed.
+    sweep_calls.clear()
+    window.sweep_speed_combo.setCurrentIndex(8)
+    assert sweep_calls == [("pause", False), ("speed", 8)], sweep_calls
+    window.linien_widget.linien_thread = None
 
     # Connecting takes seconds; the row must say so rather than sitting
     # at "--", and a connect that never succeeds must read as an error
@@ -1216,10 +1399,12 @@ try:
     window._filters_touched = False
 
     # --- Config snapshot + JSON export round-trip ---
-    window.current_slider.setValue(85)
+    window.current_slider.setValue(8570)   # 85.70 mA
     window.mot_coil_current_slider.setValue(2200)
     config = window._collect_config()
-    assert config["laser"]["current_ma"] == 85
+    # The config keeps physical units, so the extra decimal has to survive
+    # the snapshot rather than being rounded back to whole mA.
+    assert config["laser"]["current_ma"] == 85.7
     assert config["coils"]["current_a"] == 2.2
     assert config["dispenser"]["fire_current_a"] == 7.5
     assert config["psd"]["max_decimation"] == int(
@@ -1237,12 +1422,12 @@ try:
     window._write_config_json(config_path)
     with open(config_path, encoding="utf-8") as f:
         loaded = json.load(f)
-    assert loaded["laser"]["current_ma"] == 85
+    assert loaded["laser"]["current_ma"] == 85.7
     assert loaded["coils"]["current_a"] == 2.2
     assert loaded["connection"]["mot_coil_address"] == 1
 
     # --- Config load: change everything, then restore from the file ---
-    window.current_slider.setValue(60)
+    window.current_slider.setValue(6000)
     window.mot_coil_current_slider.setValue(500)
     window.vtune_slider.setValue(28100)
     window._settings.setValue("psd/max_decimation", 14)
@@ -1256,7 +1441,7 @@ try:
         window._apply_config(loaded, path=config_path)
     finally:
         QtWidgets.QMessageBox.question = orig_question
-    assert window.current_slider.value() == 85
+    assert window.current_slider.value() == 8570
     assert window.mot_coil_current_slider.value() == 2200
     assert int(window._settings.value("psd/max_decimation")) == (
         loaded["psd"]["max_decimation"]
@@ -1266,7 +1451,7 @@ try:
     assert window._dispenser_fire_seconds == 30.0
     # partial configs apply without touching anything else
     window._apply_config({"laser": {"current_ma": 92}})
-    assert window.current_slider.value() == 92
+    assert window.current_slider.value() == 9200
     assert window.mot_coil_current_slider.value() == 2200
 
     # --- A config is setpoints. It can never switch an output. ---
@@ -1328,7 +1513,7 @@ try:
         ]
         assert switched == [], switched
         # ...and the setpoints in that same file still landed.
-        assert window.current_slider.value() == 85
+        assert window.current_slider.value() == 8500
         assert window.mot_coil_current_slider.value() == 1000
 
         # It must not switch a running experiment off either.
@@ -1426,7 +1611,7 @@ try:
     app.processEvents()
 
     # With worst-case texts everywhere (card expanded, protection tripped,
-    # override active, cooldown countdown), the control column must fit
+    # override active, firing countdown), the control column must fit
     # its scroll viewport with no horizontal scrolling.
     window._on_dispenser_readback(
         {"v_out": 50.0, "i_out": 20.0, "power": 1000.0, "output_enabled": True,
@@ -1437,7 +1622,7 @@ try:
          "cv_cc": 0, "protection": 3}
     )
     window._set_dispenser_fire(10.0, 45.0)
-    window._on_dispenser_fire_state({"phase": "cooldown", "remaining_s": 872.0})
+    window._on_dispenser_fire_state({"phase": "firing", "remaining_s": 44.0})
     window.log_card.set_expanded(True)
     # Manual setup expanded too: the port dropdowns carry the longest
     # strings in the column, so they must be laid out for this to mean
@@ -1595,8 +1780,8 @@ try:
     assert w1._settings.value("ui/splitter_sizes") is not None
     w1.usb_card.set_expanded(False)
     w1.mod_freq_slider.setValue(23456)
-    w1.current_slider.setValue(95)
-    w1.therm_slider.setValue(205)
+    w1.current_slider.setValue(9550)   # 95.50 mA
+    w1.therm_slider.setValue(2050)  # 20.50 C
     w1.mot_coil_voltage_slider.setValue(12000)
     w1.mot_coil_current_slider.setValue(2500)
     w1.vtune_slider.setValue(29000)
@@ -1626,8 +1811,10 @@ try:
 
     w2 = mot_control.OpenQuantumControlsWindow()
     assert w2.mod_freq_slider.value() == 23456
-    assert w2.current_slider.value() == 95
-    assert w2.therm_slider.value() == 205
+    assert w2.current_slider.value() == 9550
+    # Temperature persists as ohms, so the restored slider count can land
+    # one 0.01 C step away from where it was set.
+    assert abs(w2.therm_slider.value() - 2050) <= 1, w2.therm_slider.value()
     assert w2.mot_coil_voltage_slider.value() == 12000
     assert w2.mot_coil_current_slider.value() == 2500
     assert w2.vtune_slider.value() == 29000

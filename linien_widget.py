@@ -64,6 +64,10 @@ class LinienWidget(QtWidgets.QWidget):
     lock_state_changed = QtCore.pyqtSignal(bool)
     connection_status_changed = QtCore.pyqtSignal(str)
     selection_state_changed = QtCore.pyqtSignal(bool)
+    # Every acquisition frame as the worker sent it, before any pause.
+    frame = QtCore.pyqtSignal(object)
+    # How a lock was asked for: ("range", i0, i1, n).
+    lock_requested = QtCore.pyqtSignal(object)
     fault = QtCore.pyqtSignal(str)
     # The server's heartbeat stopped/resumed -- see LinienWorker.
     server_stalled = QtCore.pyqtSignal(bool)
@@ -138,6 +142,60 @@ class LinienWidget(QtWidgets.QWidget):
         self.pg_widget.addItem(slider_proxy, row=0, col=0)
         self.xrange_slider.valueChanged.connect(self._update_range)
 
+        # --- Sweep centre ---
+        # The range slider sets centre and span together, at its own 1 mV
+        # granularity and only by dragging. This is linien's
+        # sweepCenterSpinBox (main_window.ui:124), with 3 decimals -- but
+        # stepping 0.001 V rather than linien's 0.1, so one arrow click is
+        # one displayed decimal place, as every other value box in this app
+        # behaves. Unparented -- the host window places it with the other
+        # sweep controls, as it does autozoom_check.
+        self.sweep_center_spin = QtWidgets.QDoubleSpinBox()
+        self.sweep_center_spin.setDecimals(3)
+        self.sweep_center_spin.setRange(self._sweep_min_v, self._sweep_max_v)
+        self.sweep_center_spin.setSingleStep(0.001)
+        self.sweep_center_spin.setSuffix(" V")
+        self.sweep_center_spin.setValue(
+            (self._sweep_min_v + self._sweep_max_v) / 2
+        )
+        # linien sets this too: without it every keystroke while typing a
+        # value would be pushed to the server as its own sweep change.
+        self.sweep_center_spin.setKeyboardTracking(False)
+        # Same chrome as the Sweep Speed combo it sits beside; the host
+        # window matches their heights too, since a spin box reserves more
+        # room than a combo for its two stacked buttons.
+        #
+        # The buttons are visible on purpose, even though it costs an exact
+        # match with the Sweep Speed combo beside it: they were made flush
+        # with the field to match, and then there was nothing to click.
+        # Width stays 18 px, the combo's drop-down column, so the two boxes
+        # are still the same size and sit on the same baseline.
+        self.sweep_center_spin.setFixedWidth(110)
+        self.sweep_center_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                background: #171717;
+                color: #e6e6e6;
+                border: 1px solid #404040;
+                border-radius: 0px;
+                padding: 4px 6px;
+                font-size: 13px;
+            }
+            QDoubleSpinBox:focus {
+                color: white;
+                border-color: #5e5e5e;
+            }
+            /* Buttons deliberately unstyled: the app stylesheet already
+               themes QAbstractSpinBox::up-button, and restyling them here
+               cost the arrow glyphs (Qt does not draw the CSS zero-size
+               border triangle). Leaving them alone also keeps this box
+               looking like every other spin box in the app. */
+        """)
+        self.sweep_center_spin.setToolTip(
+            "Centre of the sweep, in output volts. The span stays as it is, "
+            "so this slides the window along without rescaling it."
+        )
+        self.sweep_center_spin.valueChanged.connect(self._on_center_spin)
+
         # --- Plot ---
         self.pg_widget.nextRow()
         self.plot = self.pg_widget.addPlot(row=1, col=0)
@@ -192,6 +250,17 @@ class LinienWidget(QtWidgets.QWidget):
             sampleType=_ShortLineSample,
         )
 
+        # The last sweep before the lock engaged, held so the in-lock
+        # readout has something to be "somewhere on". Added before the live
+        # curves so they draw behind them, and unnamed so they stay out of
+        # the legend -- they are the same two signals, not two more.
+        self.frozen_error_curve = self.plot.plot(
+            pen=pg.mkPen(92, 184, 255, 90, width=1))
+        self.frozen_monitor_curve = self.plot.plot(
+            pen=pg.mkPen(192, 128, 224, 90, width=1))
+        self.frozen_error_curve.setVisible(False)
+        self.frozen_monitor_curve.setVisible(False)
+
         self.error_curve = self.plot.plot(
             pen=pg.mkPen(self.ERROR_COLOR, width=1.5), name="Error signal")
         self.monitor_curve = self.plot.plot(
@@ -202,6 +271,7 @@ class LinienWidget(QtWidgets.QWidget):
             pen=pg.mkPen(color=(255, 80, 80, 60), style=QtCore.Qt.DotLine, width=1),
         )
         self.plot.addItem(self.zero_line)
+
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
 
@@ -213,6 +283,19 @@ class LinienWidget(QtWidgets.QWidget):
         self._touch_start = None
         self._plot_paused = False
         self._last_error_signal = None
+        # Display-coordinate copy of the most recent *sweeping* frame, and
+        # the lock state of the frame before this one, so the transition
+        # into lock can be spotted and the sweep frozen at that moment.
+        self._last_sweep = None
+        self._last_sweep_offset = None
+        # Offset change applied to the frozen error trace as drawn.
+        self._frozen_shift = 0.0
+        self._was_locked = False
+        # Whether the frozen curves are currently drawn and showing the
+        # sweep this lock was caught on. Separate from _was_locked, which
+        # also goes true on a locked frame that carried no control signal
+        # and so could never draw them.
+        self._frozen_shown = False
 
         self.overlay = pg.LinearRegionItem(
             values=(0, 0), movable=False,
@@ -361,6 +444,7 @@ class LinienWidget(QtWidgets.QWidget):
         self.xrange_slider.blockSignals(True)
         self.xrange_slider.setValue((int(x_min * 1000), int(x_max * 1000)))
         self.xrange_slider.blockSignals(False)
+        self._sync_center_spin(center)
 
     def _update_plot(self, data):
         voltages = data["voltages"]
@@ -368,6 +452,7 @@ class LinienWidget(QtWidgets.QWidget):
         mon = data["monitor_signal"]
         if voltages.size == 0:
             return
+        self.frame.emit(data)
         # Keep the newest spectrum for the autolock even while paused.
         self._last_error_signal = err
         if self._plot_paused and self._touch_start is None:
@@ -390,12 +475,112 @@ class LinienWidget(QtWidgets.QWidget):
             self.error_curve.setData(x, err)
         if mon.size == voltages.size:
             self.monitor_curve.setData(x, mon)
+        self._update_lockpoint(data, x, err, mon)
+
+    # --- Lock point ---
+
+    def _update_lockpoint(self, data, x, err, mon):
+        """Hold the last pre-lock sweep on screen while locked.
+
+        No marker: placing one needs the sweep's x axis to be the voltage
+        that produced each feature, and on the bench it was ~0.2 V out
+        (lag or trigger, unresolved). The in-lock traces are time traces,
+        so they draw flat; where each crosses its frozen curve is the lock
+        point, read off measured data alone.
+        """
+        locked = bool(data.get("locked"))
+        x = np.asarray(x, dtype=float)
+        if not locked:
+            if err.size == x.size and mon.size == x.size and x.size > 1:
+                # Copied, not referenced: the payload crosses a thread
+                # boundary and the worker keeps its own handles on it.
+                self._last_sweep = (x.copy(), err.copy(), mon.copy())
+                self._last_sweep_offset = data.get("combined_offset_v")
+            self._clear_lockpoint()
+            self._was_locked = False
+            return
+
+        just_locked = not self._was_locked
+        if self._last_sweep is not None:
+            fx, fe, fm = self._last_sweep
+            # The autolock rewrites combined_offset when it engages
+            # (autolock.py:235), after the last sweep was captured, so the
+            # frozen trace would show the zero crossing of a signal the PID
+            # no longer sees. Re-base it on the offset in force now.
+            then = self._last_sweep_offset
+            now = data.get("combined_offset_v")
+            shift = (now - then) if (now is not None and then is not None) else 0.0
+            if shift != self._frozen_shift:
+                self._frozen_shown = False
+                self._frozen_shift = shift
+            if not self._frozen_shown:
+                # Once per lock (or offset change). setData on a 2048-point
+                # curve rebuilds its path; at the poll rate that would
+                # redraw something identical five times a second.
+                self.frozen_error_curve.setData(fx, fe + shift)
+                self.frozen_monitor_curve.setData(fx, fm)
+                self.frozen_error_curve.setVisible(True)
+                self.frozen_monitor_curve.setVisible(True)
+                self._frozen_shown = True
+
+        if just_locked:
+            # One record per lock engaging. lock_v is the absolute DAC
+            # output (control_signal includes the held sweep and out_offset,
+            # linien_module.py:147/:410), kept for comparing against where
+            # the frozen curves put the feature.
+            control_mean = data.get("control_mean")
+            if self._event_log is not None:
+                self._event_log.log(
+                    "lock_point",
+                    lock_v=round(control_mean, 6) if control_mean is not None else None,
+                    error_mean_v=round(float(np.mean(err)), 6) if err.size else None,
+                    monitor_mean_v=round(float(np.mean(mon)), 6) if mon.size else None,
+                    sweep_frozen=self._last_sweep is not None,
+                    offset_shift_v=round(self._frozen_shift, 6),
+                )
+            self._was_locked = True
+
+    def _clear_lockpoint(self):
+        self.frozen_error_curve.setVisible(False)
+        self.frozen_monitor_curve.setVisible(False)
+        self._frozen_shown = False
+
+    def _on_center_spin(self, center):
+        """Slide the sweep window to a new centre, keeping its span."""
+        slider_min, slider_max = self.xrange_slider.value()
+        amplitude = (slider_max - slider_min) / 2000.0
+        # Keep the whole span inside the slider's bounds rather than
+        # letting one edge run off: a centre the sweep cannot reach would
+        # show as a plot that stops following the box.
+        center = max(self._sweep_min_v + amplitude,
+                     min(self._sweep_max_v - amplitude, center))
+        self._set_sweep_window(center, amplitude)
+
+    def _set_sweep_window(self, center, amplitude):
+        """Push one sweep centre/span to the server and to both controls."""
+        x_min, x_max = center - amplitude, center + amplitude
+        self.xrange_slider.blockSignals(True)
+        self.xrange_slider.setValue((int(round(x_min * 1000)),
+                                     int(round(x_max * 1000))))
+        self.xrange_slider.blockSignals(False)
+        self._sync_center_spin(center)
+        if self.linien_thread is not None:
+            self.linien_thread.request_sweep_change(center, amplitude)
+        d_min, d_max = self._v_range_to_display(x_min, x_max)
+        self.plot.setXRange(d_min, d_max, padding=0)
+
+    def _sync_center_spin(self, center):
+        """Show a centre that came from somewhere else, without echoing it."""
+        self.sweep_center_spin.blockSignals(True)
+        self.sweep_center_spin.setValue(center)
+        self.sweep_center_spin.blockSignals(False)
 
     def _update_range(self, values):
         slider_min, slider_max = values
         x_min, x_max = slider_min / 1000, slider_max / 1000
         center = (x_min + x_max) / 2
         amplitude = (x_max - x_min) / 2
+        self._sync_center_spin(center)
         if self.linien_thread is not None:
             self.linien_thread.request_sweep_change(center, amplitude)
         # Plot axis always follows the slider — both when shrinking and
@@ -592,6 +777,7 @@ class LinienWidget(QtWidgets.QWidget):
             return
         # The worker re-reads the spectrum in raw counts; it only
         # needs the selected indices and the length they refer to.
+        self.lock_requested.emit(("range", i0, i1, n))
         self.linien_thread.lock_laser(i0, i1, n)
 
     def _on_lock_state(self, locked: bool):

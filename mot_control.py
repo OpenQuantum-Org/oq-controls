@@ -7,7 +7,7 @@ voltage (V_tune) is set by the DAC Click (MCP4921) on the Red Pitaya Click
 Shield through the patched linien-server's ``dac_click_voltage`` parameter,
 and the repump RF gate is a Linien GPIO bit (DIO1_N, active-low). The MOT
 coils run from a DPS5005 supply; the dispenser runs from a DPS5020 with a
-timed 10 s fire and a 15 min lockout cooldown.
+timed 10 s fire.
 """
 
 import html
@@ -194,6 +194,11 @@ CONTRAST_REMAP = {
 }
 
 
+# Qt stylesheet url() wants forward slashes even on Windows.
+_SPIN_UP_ARROW = resource_path("assets", "spin-up.svg").replace(chr(92), "/")
+_SPIN_DOWN_ARROW = resource_path("assets", "spin-down.svg").replace(chr(92), "/")
+
+
 def build_app_stylesheet():
     return APP_STYLESHEET + (
         "\n* {"
@@ -218,6 +223,14 @@ def build_app_stylesheet():
         " width: 16px; }\n"
         "QAbstractSpinBox::up-button:hover,"
         " QAbstractSpinBox::down-button:hover { background: #454545; }\n"
+        # Styling the buttons above turns off their native painting,
+        # which left every spin box in the app with two blank grey
+        # blocks and nothing to aim at. Qt will not draw the CSS
+        # zero-size border triangle, so the glyphs come from files.
+        f"QAbstractSpinBox::up-arrow {{ image: url({_SPIN_UP_ARROW});"
+        " width: 7px; height: 4px; }\n"
+        f"QAbstractSpinBox::down-arrow {{ image: url({_SPIN_DOWN_ARROW});"
+        " width: 7px; height: 4px; }\n"
         "QComboBox { border: 1px solid #404040; }\n"
     )
 
@@ -297,6 +310,39 @@ class ArrowStepper(QtCore.QObject):
 _ARROW_STEPPER = ArrowStepper()
 
 
+class HeldKeyLimiter(QtCore.QObject):
+    """Cap how fast a held Up/Down key steps a control.
+
+    Key auto-repeat runs ~30 Hz, so holding Up on the repump swept 3 MHz/s
+    while the DAC write takes ~300 ms and coalesces: the VCO jumped in
+    ~1 MHz lumps the lock could slip on. On 2026-10-16 the repump moved at
+    1-2.5 MHz/s and there was no MOT; the MOT week moved at 0.14-0.3 MHz/s.
+    Single presses are never dropped -- only repeats inside the interval.
+    """
+
+    def __init__(self, interval_s, parent=None):
+        super().__init__(parent)
+        self._interval_s = interval_s
+        self._last = 0.0
+
+    def attach(self, *widgets):
+        # Installed after ArrowStepper, so this filter runs first.
+        for w in widgets:
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() != QtCore.QEvent.KeyPress
+            or event.key() not in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down)
+        ):
+            return False
+        now = time.monotonic()
+        if event.isAutoRepeat() and now - self._last < self._interval_s:
+            return True
+        self._last = now
+        return False
+
+
 class WheelGuard(QtCore.QObject):
     """Stop the mouse wheel from changing unfocused controls.
 
@@ -340,6 +386,12 @@ V_TO_GHZ = -_C / _LAMBDA_0**2 * _MOD_GAIN * _CURRENT_COEFF / 1e9
 VCO_FREQ_MIN_MHZ = 2800.0
 VCO_FREQ_MAX_MHZ = 2970.0
 VCO_VTUNE_SPAN_V = 5.0
+
+# The slider covers only where the MOT lives (lock at ~2912, MOT near
+# 2920); the operator narrowed it on 2026-10-21. Not the VCO map above,
+# which must stay the hardware's full 0-5 V span.
+REPUMP_SLIDER_MIN_MHZ = 2850.0
+REPUMP_SLIDER_MAX_MHZ = 2950.0
 
 
 def vco_mhz_to_vtune(mhz: float) -> float:
@@ -1008,9 +1060,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._vtune_max = float(self._settings.value("dac/vtune_max", vtune_max))
         if self._vtune_min > self._vtune_max:
             self._vtune_min, self._vtune_max = self._vtune_max, self._vtune_min
-        self._dispenser_cooldown_until = float(
-            self._settings.value("dispenser/cooldown_until", 0.0) or 0.0
-        )
         self._dispenser_fire_current = self._float_setting(
             "dispenser/fire_current_a", DispenserWorker.DISPENSE_CURRENT_A
         )
@@ -1560,6 +1609,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         sweep_row.setContentsMargins(*PLOT_COLUMN_MARGINS)
         sweep_row.setSpacing(8)
         sweep_row.addStretch()
+        # Held so the Linien widget's sweep-centre box can be inserted here
+        # once that widget exists, further down.
+        self._sweep_row = sweep_row
         sweep_row.addWidget(self._small_label("Sweep Speed:"))
         self.sweep_speed_combo = QtWidgets.QComboBox()
         _style_combo(self.sweep_speed_combo)
@@ -1569,10 +1621,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             (4, "237.5 Hz"), (5, "118.75 Hz"), (6, "59.4 Hz"), (7, "29.7 Hz"),
             (8, "14.8 Hz"), (9, "7.4 Hz"), (10, "3.7 Hz"), (11, "1.86 Hz"),
             (12, "0.93 Hz"), (13, "0.46 Hz"), (14, "0.23 Hz"), (15, "0.116 Hz"),
+            # The limit of slowing down, so it sits at the slow end of the
+            # list. None rather than a speed: this is linien's sweep_pause
+            # parameter, not a sixteenth entry in its speed table.
+            (None, "0 Hz (hold)"),
         ]:
             self.sweep_speed_combo.addItem(label, value)
         self.sweep_speed_combo.setCurrentIndex(
-            self._int_setting("linien/sweep_speed_index", 8, 0, 15)
+            self._int_setting("linien/sweep_speed_index", 8, 0, 16)
         )
         self.sweep_speed_combo.currentIndexChanged.connect(self._on_sweep_speed)
         sweep_row.addWidget(self.sweep_speed_combo)
@@ -1608,6 +1664,29 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "Keep the vertical range tracking the signal. Uncheck to hold\n"
             "the current zoom.",
             self.linien_widget.autozoom_check,
+        )
+        # Also the widget's, placed beside the speed it belongs with.
+        # Index 1 is after the row's leading stretch and before the
+        # "Sweep Speed:" label.
+        # Each label hugs its own control, with a wider gap between the two
+        # pairs -- at a uniform 8 px the row read as four loose items.
+        # A spin box asks for 3 px more height than a combo (two stacked
+        # buttons instead of one drop-down), which read as two mismatched
+        # boxes on the same row. Taken from the combo rather than hardcoded
+        # so it survives a font change.
+        self.linien_widget.sweep_center_spin.setFixedHeight(
+            self.sweep_speed_combo.sizeHint().height()
+        )
+        self._sweep_row.insertSpacing(1, 18)
+        self._sweep_row.insertWidget(1, self.linien_widget.sweep_center_spin)
+        self._sweep_row.insertWidget(1, self._small_label("Sweep Centre:"))
+        self._tip(
+            "Centre of the sweep in output volts, to 3 decimals.\n"
+            "Arrow keys step 0.001 V. The span is unchanged,\n"
+            "so the window slides rather than rescaling.\n"
+            "At the full -1 to +1 V span there is no room to slide,\n"
+            "so the centre stays at 0: narrow the range slider first.",
+            self.linien_widget.sweep_center_spin,
         )
 
 
@@ -2081,6 +2160,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.auto_offset_check,
         )
 
+        # Which feature the operator locks on decides whether tuning the
+        # repump moves the carrier at all; keep it on record.
+        self.linien_widget.lock_requested.connect(
+            lambda sel: self._event_log.log("lock_selection", selection=list(sel))
+        )
+
         layout.addWidget(self.linien_widget.lock_controls)
         self._tip(
             "Select target line, then click and drag over the line you\n"
@@ -2268,15 +2353,20 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.laser_unlock_box,
         )
 
+        # Slider counts 0.01 mA, the same arrow-key step as Temperature;
+        # laser/current_ma stays in mA so configs and settings written by
+        # either build still read correctly.
         self.current_slider, self.current_edit = add_slider_row(
             layout,
             "Current:",
-            50,
-            100,
-            self._int_setting("laser/current_ma", 80, 50, 100),
+            5000,
+            10000,
+            int(round(self._float_setting("laser/current_ma", 80.0) * 100)),
             single=1,
-            page=5,
+            page=100,
             suffix=" mA",
+            decimals=2,
+            scale=100.0,
         )
         self.current_slider.valueChanged.connect(self._on_current)
         self._tip(
@@ -2286,23 +2376,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         # Temperature, not resistance: the thermistor value is an
         # implementation detail of how the Koheron holds the setpoint.
-        # Stored and sent in ohms; the slider is in 0.1 C steps over the
-        # 16-38 C the cell is ever operated across.
+        # Stored and sent in ohms; the slider is in 0.01 C steps over the
+        # 16-38 C the cell is ever operated across. 0.01 C is ~4 ohms on
+        # the 10 k NTC near 27 C, so integer ohms still resolves a step.
         self.therm_slider, self.therm_edit = add_slider_row(
             layout,
             "Temperature:",
-            160,
-            380,
+            1600,
+            3800,
             int(round(
                 thermistor_ohms_to_c(
                     self._int_setting("laser/thermistor_ohm", 10000, 5000, 15000)
-                ) * 10
+                ) * 100
             )),
             single=1,
-            page=10,
+            page=100,
             suffix=" °C",
-            decimals=1,
-            scale=10.0,
+            decimals=2,
+            scale=100.0,
         )
         self.therm_slider.valueChanged.connect(self._on_thermistor)
         self._tip(
@@ -2447,8 +2538,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._on_dispenser_time
         )
         self._tip(
-            "How long a fire runs before the supply is forced off.\n"
-            "A 15 min cooldown follows every fire.",
+            "How long a fire runs before the supply is forced off.",
             self.dispenser_time_slider,
             self.dispenser_time_edit,
         )
@@ -2463,13 +2553,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         fire_row.addWidget(self.dispenser_fire_btn, stretch=1)
         self._tip(
             "Run the dispenser at the fixed operating point, then auto-off.\n"
-            "Click again mid-fire to abort (cooldown still applies).",
+            "Click again mid-fire to abort.",
             self.dispenser_fire_btn,
         )
         layout.addLayout(fire_row)
 
-        # Time-remaining bar: drains during a fire (orange) and during the
-        # cooldown (blue); hidden when idle.
+        # Time-remaining bar: drains during a fire (orange); hidden
+        # otherwise.
         self.dispenser_progress = QtWidgets.QProgressBar()
         self.dispenser_progress.setRange(0, 1000)
         self.dispenser_progress.setTextVisible(False)
@@ -2477,7 +2567,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.dispenser_progress.setVisible(False)
         layout.addWidget(self.dispenser_progress)
         self._tip(
-            "Time remaining in the current fire or cooldown.",
+            "Time remaining in the current fire.",
             self.dispenser_progress,
         )
 
@@ -2555,7 +2645,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         # Frequency, not V_tune: the tune voltage is how the DAC reaches a
         # frequency, not a number anyone sets on purpose. Stored in mV;
-        # the slider is in 0.1 MHz steps across the VCO's range.
+        # the slider is in 0.1 MHz steps.
         vtune_initial_mv = self._int_setting(
             "dac/vtune_mv",
             0,
@@ -2565,8 +2655,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.vtune_slider, self.vtune_edit = add_slider_row(
             layout,
             "Frequency:",
-            int(round(VCO_FREQ_MIN_MHZ * 10)),
-            int(round(VCO_FREQ_MAX_MHZ * 10)),
+            int(round(REPUMP_SLIDER_MIN_MHZ * 10)),
+            int(round(REPUMP_SLIDER_MAX_MHZ * 10)),
             int(round(vtune_to_vco_mhz(vtune_initial_mv / 1000.0) * 10)),
             single=1,
             page=10,
@@ -2575,11 +2665,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             scale=10.0,
         )
         self.vtune_slider.valueChanged.connect(self._on_vtune)
+        # 0.5 s is the error signal's settle time after a repump change
+        # (operator, bench), so a held key gives 0.1 MHz per 0.5 s =
+        # 0.2 MHz/s, the rate the first MOT was found at.
+        self._vtune_key_limiter = HeldKeyLimiter(0.5, self)
+        self._vtune_key_limiter.attach(self.vtune_slider, self.vtune_edit)
         self._tip(
             "Repump VCO output frequency. Set with the DAC Click's tune\n"
             f"voltage, whose 0-5 V spans {VCO_FREQ_MIN_MHZ:.0f}-"
             f"{VCO_FREQ_MAX_MHZ:.0f} MHz linearly. The slider adopts the\n"
-            "hardware value on connect.",
+            f"hardware value on connect. The slider covers only "
+            f"{REPUMP_SLIDER_MIN_MHZ:.0f}-{REPUMP_SLIDER_MAX_MHZ:.0f} MHz.",
             self.vtune_slider,
             self.vtune_edit,
         )
@@ -2872,13 +2968,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._start_serial_workers()
 
     def _stop_serial_workers(self):
-        if self._dispenser_phase == "firing":
-            # Stopping the worker mid-fire skips its cooldown transition
-            # (the output is still forced off on stop), so persist the
-            # lockout here.
-            self._on_dispenser_cooldown_started(
-                time.time() + DispenserWorker.COOLDOWN_SECONDS
-            )
         for attr in ("laser_worker", "mot_coil_worker", "dispenser_worker"):
             worker = getattr(self, attr, None)
             if worker is not None:
@@ -2951,7 +3040,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             port=self.dispenser_port_edit.text().strip(),
             address=self._dispenser_address,
             model="DPS5020",
-            cooldown_until=self._dispenser_cooldown_until,
             fire_seconds=self._dispenser_fire_seconds,
             dispense_current_a=self._dispenser_fire_current,
             dispense_voltage_v=self._dispenser_fire_voltage,
@@ -2969,9 +3057,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.dispenser_worker.readback.connect(self._on_dispenser_readback)
         self.dispenser_worker.fire_state.connect(self._on_dispenser_fire_state)
         self.dispenser_worker.fire_summary.connect(self._on_dispenser_fire_summary)
-        self.dispenser_worker.cooldown_started.connect(
-            self._on_dispenser_cooldown_started
-        )
         self.dispenser_worker.fault.connect(
             lambda msg: self._show_fault(
                 self.dispenser_usb_status, "dispenser", msg, "dispenser"
@@ -3108,9 +3193,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "setpoint", name="sweep_speed_index", value=combo_index
         )
         worker = self._get_lock_worker()
+        if worker is None:
+            return
         speed = self.sweep_speed_combo.currentData()
-        if worker is not None and speed is not None:
-            worker.set_sweep_speed(speed)
+        if speed is None:
+            worker.set_sweep_pause(True)
+            return
+        # Unpause before setting the rate, so leaving the hold always
+        # produces a moving trace rather than a paused one at a new speed.
+        worker.set_sweep_pause(False)
+        worker.set_sweep_speed(speed)
 
     def _on_lock_state(self, locked):
         if locked:
@@ -3126,23 +3218,56 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _on_laser_init(self, values):
         # The Koheron answered, so the laser button and these sliders are
-        # its state rather than a restored preference.
+        # its state rather than a restored preference -- unless the diode
+        # is dark, in which case the saved setpoints go the other way.
         self._readback_seen.add("laser")
+        if not bool(values.get("output_on", True)):
+            if self._restore_laser_setpoints():
+                return
         self.current_slider.blockSignals(True)
-        self.current_slider.setValue(int(values["current"]))
+        self.current_slider.setValue(int(round(float(values["current"]) * 100)))
         self.current_slider.blockSignals(False)
-        self.current_edit.setText(f"{int(values['current'])} mA")
+        self.current_edit.setText(f"{float(values['current']):.2f} mA")
 
         therm_c = thermistor_ohms_to_c(int(values["thermistor"]))
         self.therm_slider.blockSignals(True)
-        self.therm_slider.setValue(int(round(therm_c * 10)))
+        self.therm_slider.setValue(int(round(therm_c * 100)))
         self.therm_slider.blockSignals(False)
-        self.therm_edit.setText(f"{therm_c:.1f} \N{DEGREE SIGN}C")
+        self.therm_edit.setText(f"{therm_c:.2f} \N{DEGREE SIGN}C")
         self._event_log.log(
             "laser_init",
-            current_ma=int(values["current"]),
+            current_ma=round(float(values["current"]), 2),
             thermistor_ohm=int(values["thermistor"]),
+            output_on=bool(values.get("output_on", True)),
+            adopted=True,
         )
+
+    def _restore_laser_setpoints(self):
+        """Write the saved current/temperature to a Koheron that is dark.
+
+        Reversing 2026-10-16 the direction set by d441b65: a power cycle
+        leaves the CTL200 at 0 mA / 9999 ohm, and adopting that threw away
+        the operating point every time. Only while the output is off --
+        this is still a laser current write, and doing it to a running
+        diode unasked is the thing that decision was protecting.
+
+        Returns True when the push happened, so the caller knows not to
+        overwrite the UI with the device's values afterwards.
+        """
+        worker = getattr(self, "laser_worker", None)
+        if worker is None:
+            return False
+        milliamps = self.current_slider.value() / 100.0
+        ohms = int(round(thermistor_c_to_ohms(self.therm_slider.value() / 100.0)))
+        worker.set_current(milliamps)
+        worker.set_thermistor(ohms)
+        self._event_log.log(
+            "laser_setpoints_restored",
+            current_ma=milliamps,
+            thermistor_ohm=ohms,
+            temp_c=round(self.therm_slider.value() / 100.0, 2),
+        )
+        return True
 
     def _toggle_laser(self, checked):
         self.laser_btn.setText("Laser On" if checked else "Laser Off")
@@ -3172,22 +3297,25 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 btn.setChecked(False)
 
     def _on_current(self, value):
-        self.current_edit.setText(f"{value} mA")
-        self._settings.setValue("laser/current_ma", value)
+        # Slider counts 0.01 mA; the Koheron's ilaser takes mA.
+        milliamps = value / 100.0
+        self.current_edit.setText(f"{milliamps:.2f} mA")
+        self._settings.setValue("laser/current_ma", milliamps)
         self._debounced_log(
             "laser_current",
             "setpoint",
-            lambda: {"name": "laser_current_ma", "value": self.current_slider.value()},
+            lambda: {"name": "laser_current_ma",
+                     "value": self.current_slider.value() / 100.0},
         )
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
-            worker.set_current(value)
+            worker.set_current(milliamps)
 
     def _on_thermistor(self, value):
-        # Slider is deci-degrees; the Koheron still speaks ohms.
-        celsius = value / 10.0
+        # Slider is centi-degrees; the Koheron still speaks ohms.
+        celsius = value / 100.0
         ohms = int(round(thermistor_c_to_ohms(celsius)))
-        self.therm_edit.setText(f"{celsius:.1f} \N{DEGREE SIGN}C")
+        self.therm_edit.setText(f"{celsius:.2f} \N{DEGREE SIGN}C")
         self._settings.setValue("laser/thermistor_ohm", ohms)
         self._debounced_log(
             "laser_thermistor",
@@ -3380,7 +3508,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                     current_a=self._dispenser_fire_current,
                     planned_s=self._dispenser_fire_seconds,
                 )
-            elif phase == "idle" and self._dispenser_phase == "cooldown":
+            elif phase == "idle" and self._dispenser_phase == "firing":
                 self._event_log.log("dispenser_ready")
         self._dispenser_phase = phase
         self._update_dispenser_progress(phase, remaining)
@@ -3388,11 +3516,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
             self._set_chip("disp", "DISPENSER FIRING", "#b9924f")
-        elif phase == "cooldown":
-            minutes, seconds = divmod(int(round(remaining)), 60)
-            self.dispenser_fire_btn.setEnabled(False)
-            self.dispenser_fire_btn.setText(f"Cooldown {minutes:d}:{seconds:02d}")
-            self._set_chip("disp", f"DISPENSER {minutes:d}:{seconds:02d}", "#c4c4c4")
         else:
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(
@@ -3404,9 +3527,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if phase == "firing":
             total = max(1.0, self._dispenser_fire_seconds)
             color = "#b9924f"
-        elif phase == "cooldown":
-            total = DispenserWorker.COOLDOWN_SECONDS
-            color = "#c4c4c4"
         else:
             self.dispenser_progress.setVisible(False)
             return
@@ -3420,14 +3540,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.dispenser_progress.setVisible(True)
 
-    def _on_dispenser_cooldown_started(self, until_epoch):
-        self._dispenser_cooldown_until = float(until_epoch)
-        self._settings.setValue(
-            "dispenser/cooldown_until", self._dispenser_cooldown_until
-        )
-        self._event_log.log(
-            "dispenser_cooldown", until_epoch=self._dispenser_cooldown_until
-        )
 
     def _on_dispenser_fire_summary(self, summary):
         self._event_log.log("dispenser_fire_end", **summary)
@@ -3748,7 +3860,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Sliders read in physical units now; the config keeps hardware
         # units so files written by either build stay interchangeable.
         vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)
-        therm_ohm = int(round(thermistor_c_to_ohms(self.therm_slider.value() / 10.0)))
+        therm_ohm = int(round(thermistor_c_to_ohms(self.therm_slider.value() / 100.0)))
         return {
             "saved_at": datetime.now().astimezone().isoformat(
                 timespec="seconds"
@@ -3773,9 +3885,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "filters": self._filters_from_ui(),
             },
             "laser": {
-                "current_ma": self.current_slider.value(),
+                "current_ma": self.current_slider.value() / 100.0,
                 "thermistor_ohm": therm_ohm,
-                "temp_est_c": round(self.therm_slider.value() / 10.0, 2),
+                "temp_est_c": round(self.therm_slider.value() / 100.0, 2),
             },
             "repump": {
                 "vtune_v": vtune_v,
@@ -3792,7 +3904,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "total_fire_s": self._float_setting(
                     "dispenser/total_fire_s", 0.0
                 ),
-                "cooldown_until_epoch": self._dispenser_cooldown_until,
             },
             "psd": {
                 "algorithm": self._int_setting("psd/algorithm", 1, 0, 1),
@@ -3892,7 +4003,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         Missing keys are left unchanged, so partial configs are fine.
         Ports/hosts only update the fields — press Connect / Reconnect to
         use them. Dispenser settings are confirmation-gated. The fire
-        history and cooldown are device truth and are never loaded.
+        history is device truth and is never loaded.
         """
         # A hand-edited or older file could carry one; nothing below reads
         # it, but the record should say it was there and ignored.
@@ -3921,7 +4032,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 slider.setValue(int(linien[key]))
         if "sweep_speed_index" in linien:
             self.sweep_speed_combo.setCurrentIndex(
-                max(0, min(15, int(linien["sweep_speed_index"])))
+                max(0, min(16, int(linien["sweep_speed_index"])))
             )
         pid = linien.get("pid")
         if pid:
@@ -3941,12 +4052,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
         laser = config.get("laser", {})
         if "current_ma" in laser:
-            self.current_slider.setValue(int(laser["current_ma"]))
+            self.current_slider.setValue(int(round(float(laser["current_ma"]) * 100)))
         if "thermistor_ohm" in laser:
-            # Config stores ohms; the slider is in deci-degrees.
+            # Config stores ohms; the slider is in centi-degrees.
             self.therm_slider.setValue(
                 int(round(
-                    thermistor_ohms_to_c(float(laser["thermistor_ohm"])) * 10
+                    thermistor_ohms_to_c(float(laser["thermistor_ohm"])) * 100
                 ))
             )
 
@@ -4188,7 +4299,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if self.laser_btn.isChecked():
             outputs.append(LiveOutput(
                 "laser", "Laser",
-                f"{self.current_slider.value()} mA",
+                f"{self.current_slider.value() / 100.0:.2f} mA",
                 backed_by=source("laser"),
             ))
         if self.chip_text("lock") == "LOCKED":
@@ -4278,14 +4389,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # counted in the record rather than dying with the process.
         self._event_log.flush_repeats()
         self._event_log.log("app_stop")
-        if self._dispenser_phase == "firing":
-            # Closing mid-fire skips the worker's cooldown transition; the
-            # output is still forced off on stop, but persist the lockout
-            # here so a restart cannot immediately re-fire.
-            self._settings.setValue(
-                "dispenser/cooldown_until",
-                time.time() + DispenserWorker.COOLDOWN_SECONDS,
-            )
         self._drive_outputs_safe(keys)
 
         self.camera_widget.stop()

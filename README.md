@@ -21,7 +21,7 @@ decided against live in `ROADMAP.md`.
 - **Repump RF gate** on a Red Pitaya GPIO bit — fixed at `DIO1_N` (bank `n`,
   bit 1), **active-low** (RF amp enable on Click Shield socket 2)
 - **MOT coil DPS5005**: voltage, current, output
-- **Dispenser DPS5020**: a timed constant-current fire with a hard cooldown
+- **Dispenser DPS5020**: a timed constant-current fire
   (see [Dispenser](#dispenser))
 - Optional USB camera pane below the spectroscopy plot
 
@@ -183,8 +183,8 @@ distinguishes the DPS5005 (coils) from the DPS5020 (dispenser). The saved port
 for each device is re-verified first, so swapped cables correct themselves; a
 device that fails verification is searched for across the remaining ports.
 
-Nothing polls the Koheron once it is connected — it reads two setpoints and then
-only accepts writes — so a separate watcher enumerates the serial ports every
+Nothing polls the Koheron once it is connected — it reads two setpoints and its
+output state, and then only accepts writes — so a separate watcher enumerates the serial ports every
 few seconds and marks any device whose port has disappeared. It reports only;
 reopening a port is Auto-connect's job.
 
@@ -192,11 +192,14 @@ reopening a port is Auto-connect's job.
 
 The dispenser fires the DPS5020 in constant current (it is close to a short) at
 the current and duration set on the Dispenser card's sliders, defaulting to
-**7.5 A for 30 s**. The worker programs current and voltage before every enable,
-turns the output off when the time is up, and starts a **15 min cooldown** that
-blocks re-firing; clicking again during a fire aborts it, and the cooldown still
-applies. The cooldown end time is persisted, so restarting the app does not
-clear it.
+**7.5 A for 30 s**. The worker programs current and voltage before every enable
+and turns the output off when the time is up; clicking again during a fire
+aborts it. Clicking Fire again returns straight to firing.
+
+**There is no re-fire lockout.** The 15 min cooldown was removed on 2026-10-16
+at the operator's request. Nothing in the app now limits how often the
+dispenser runs, so pacing fires - and the Rb they consume - is entirely the
+operator's job. The time limit on a single fire is all that is left.
 
 Setpoints are re-enforced during a fire, and an output enabled from the DPS
 front panel while the app is connected gets the same time limit. **The auto-off
@@ -250,7 +253,7 @@ recording hardware state.
 immediately, including to a running laser or an engaged lock. Partial files are
 fine (missing keys are left alone), dispenser fire settings are
 confirmation-gated, port and host changes take effect on the next connect, and
-fire history and cooldown are never loaded.
+fire history is never loaded.
 
 ## UI behaviour
 
@@ -269,6 +272,13 @@ fire history and cooldown are never loaded.
   setting only sets the UI — nothing is pushed until you move a control, and on
   connect the laser sliders adopt the Koheron's actual setpoints (as V_tune does
   from the DAC).
+- **Laser setpoints survive a power cycle** (2026-10-16). The one place the
+  restore runs the other way: if the Koheron's output is **off** when the app
+  connects, the saved current and temperature are written *to* it rather than
+  read from it. A power cycle leaves the CTL200 at 0 mA / 9999 Ω, and adopting
+  that discarded the operating point every time. If the diode is lit — or
+  `lason` cannot be read — the app adopts as usual and never writes, because
+  pushing current into a running laser unasked is the failure that matters.
 - **Tooltips** on every control.
 
 ## Event log
@@ -372,7 +382,7 @@ Five hardware-free suites, run directly. CI runs all five on every push to
 ```powershell
 .venv\Scripts\python.exe tests\test_logging.py     # event log: correlation, faults, retention
 .venv\Scripts\python.exe tests\test_workers.py     # linien unit conversions, link health, stalls
-.venv\Scripts\python.exe tests\test_dispenser.py   # fire/cooldown state machine
+.venv\Scripts\python.exe tests\test_dispenser.py   # fire state machine, VCO + thermistor
 .venv\Scripts\python.exe tests\test_probe.py       # USB port identification logic
 .venv\Scripts\python.exe tests\smoke_ui.py         # offscreen UI build + behaviour checks
 ```

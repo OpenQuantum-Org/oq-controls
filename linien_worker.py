@@ -217,6 +217,15 @@ class LinienWorker(QtCore.QThread):
 
                 mon_src_key = "monitor_signal" if "monitor_signal" in self.to_plot else None
 
+                # "error_signal" (rather than "error_signal_1") is the
+                # server's in-band statement that it is locked: the scope
+                # channels are reassigned on lock, so the key names change
+                # with them (linien_server/acquisition.py:161-177). Taken
+                # from the frame itself rather than from parameters.lock,
+                # which arrives on a different signal and can disagree with
+                # the arrays by a poll.
+                locked_frame = err_src_key == "error_signal"
+
                 err_raw = (
                     np.asarray(self.to_plot.get(err_src_key, []), dtype=float)
                     if err_src_key
@@ -228,20 +237,47 @@ class LinienWorker(QtCore.QThread):
                     else np.array([], dtype=float)
                 )
 
+                # The sweep scope taps fast_a_out_i, upstream of the
+                # combined_offset adder (registers.py:203 vs
+                # linien_module.py:280), so the trace would sit still while
+                # the PID sees it shifted. Add it here to show what the lock
+                # acts on. Same 14-bit counts (scopegen.py:85). The locked
+                # trace is logic_combined_error_signal, already offset.
+                # Cached parameter, so autolock's own offset shows up too.
+                offset_counts = int(self.client.parameters.combined_offset.value)
+                if err_raw.size and not locked_frame:
+                    err_raw = err_raw + float(offset_counts)
+
                 # Scale to float
                 self.err = err_raw / 8192.0 if err_raw.size else np.array([], dtype=float)
                 self.mon = mon_raw / 8192.0 if mon_raw.size else np.array([], dtype=float)
+                # Where the lock is sitting, in the sweep's own x units.
+                # control_signal is the whole fast DAC output after the
+                # limiter (linien_module.py:147, fed from fast_outs at
+                # :410): PID + mod + the sweep held where the lock engaged
+                # (:99) + out_offset. So it is already an absolute output
+                # voltage; nothing needs adding. Only present while locked;
+                # /8192 like the other traces, as linien-gui does
+                # (plot_widget.py:482).
+                ctrl_raw = self.to_plot.get("control_signal")
+                if locked_frame and ctrl_raw is not None:
+                    ctrl = np.asarray(ctrl_raw, dtype=float)
+                    ctrl_mean = float(np.mean(ctrl)) / 8192.0 if ctrl.size else None
+                else:
+                    ctrl_mean = None
 
                 n_err = self.err.size
                 n_mon = self.mon.size
                 N = max(n_err, n_mon)
 
+                # Cached locally (use_parameter_cache=True), so reading it
+                # outside the branches below costs no round trip.
+                cen = float(self.client.parameters.sweep_center.value)
                 if N > 1:
-                    cen = float(self.client.parameters.sweep_center.value)
                     amp = float(self.client.parameters.sweep_amplitude.value)
                     self.voltages = np.linspace(cen - amp, cen + amp, N)
                 elif N == 1:
-                    self.voltages = np.array([float(self.client.parameters.sweep_center.value)])
+                    self.voltages = np.array([cen])
                 else:
                     self.voltages = np.array([], dtype=float)
 
@@ -250,6 +286,10 @@ class LinienWorker(QtCore.QThread):
                         "voltages": self.voltages,
                         "error_signal": self.err,
                         "monitor_signal": self.mon,
+                        "locked": locked_frame,
+                        "center": cen,
+                        "control_mean": ctrl_mean,
+                        "combined_offset_v": offset_counts / 8192.0,
                     }
                 )
             except Exception as e:
@@ -377,6 +417,22 @@ class LinienWorker(QtCore.QThread):
             self.client.connection.root.write_registers()
         except Exception as e:
             self._log(f"mod phase update failed: {e}")
+
+    def set_sweep_pause(self, paused: bool):
+        """Hold the sweep at ``sweep_center``, or let it run again.
+
+        linien's own Start/Pause button, which is the only thing that
+        writes this parameter (linien_gui/ui/sweep_control.py:86). Unlike
+        stop_sweep() it leaves sweep_amplitude alone, so resuming returns
+        to the same span rather than needing it set again.
+        """
+        if not self._require_connection("sweep pause update"):
+            return
+        try:
+            self.client.parameters.sweep_pause.value = bool(paused)
+            self.client.connection.root.write_registers()
+        except Exception as e:
+            self._log(f"sweep pause update failed: {e}")
 
     def set_sweep_speed(self, speed: int):
         """Set the sweep speed (0–15, see Linien sweep speed table)."""

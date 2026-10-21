@@ -488,15 +488,19 @@ class RidenDPSWorker(QtCore.QThread):
 
 
 class DispenserWorker(RidenDPSWorker):
-    """DPS5020 dispenser supply with a fixed operating point, a timed fire,
-    and a lockout cooldown.
+    """DPS5020 dispenser supply with a fixed operating point and a timed
+    fire.
 
     fire() programs the fixed setpoints, then enables the output for
-    FIRE_SECONDS, after which the worker forces the output off and refuses
-    to re-enable it until COOLDOWN_SECONDS have elapsed. Turning the output
-    off is always allowed. If the output is enabled behind our back (front
-    panel), the fixed setpoints and the same fire time limit are applied
-    while the app is connected.
+    FIRE_SECONDS, after which the worker forces the output off. Turning the
+    output off is always allowed. If the output is enabled behind our back
+    (front panel), the fixed setpoints and the same fire time limit are
+    applied while the app is connected.
+
+    There is no re-fire lockout: the 15 min cooldown was removed on
+    2026-10-16 at the operator's request. Nothing now rate-limits how often
+    the dispenser can be run, so the time limit on a single fire is the
+    only thing the app enforces.
 
     The dispense operating point is not adjustable through the normal
     supply API (set_voltage/set_current are inert), so a stray call cannot
@@ -510,17 +514,13 @@ class DispenserWorker(RidenDPSWorker):
     app is running and the serial link is alive.
     """
 
-    # {"phase": "idle"|"firing"|"cooldown", "remaining_s": float}
+    # {"phase": "idle"|"firing", "remaining_s": float}
     fire_state = QtCore.pyqtSignal(object)
-    # Wall-clock epoch when the cooldown will end; the GUI persists this
-    # so the lockout survives an app restart.
-    cooldown_started = QtCore.pyqtSignal(float)
     # Emitted once per completed/aborted fire:
     # {"elapsed_s", "planned_s", "current_a", "aborted"}
     fire_summary = QtCore.pyqtSignal(object)
 
     FIRE_SECONDS = 30.0
-    COOLDOWN_SECONDS = 15 * 60.0
     DISPENSE_CURRENT_A = 7.5
     DISPENSE_VOLTAGE_V = 5.0
     MIN_FIRE_SECONDS = 1.0
@@ -528,7 +528,6 @@ class DispenserWorker(RidenDPSWorker):
     def __init__(
         self,
         *args,
-        cooldown_until=0.0,
         fire_seconds=None,
         dispense_current_a=None,
         dispense_voltage_v=None,
@@ -543,11 +542,9 @@ class DispenserWorker(RidenDPSWorker):
         self.dispense_voltage_v = self._clamp_voltage(
             dispense_voltage_v or self.DISPENSE_VOLTAGE_V
         )
-        remaining = max(0.0, float(cooldown_until or 0.0) - time.time())
-        self._phase = "cooldown" if remaining > 0 else "idle"
+        self._phase = "idle"
         self._fire_end = 0.0
         self._fire_started = 0.0
-        self._cooldown_end = time.monotonic() + remaining
 
     def _clamp_current(self, amps):
         return max(0.01, min(float(amps), self.max_current))
@@ -567,7 +564,7 @@ class DispenserWorker(RidenDPSWorker):
         self._queue(("abort", None))
 
     def set_output(self, enabled: bool):
-        # Route through fire/abort so the cooldown is enforced no matter
+        # Route through fire/abort so the time limit is enforced no matter
         # which code path asks for the output.
         if enabled:
             self.fire()
@@ -609,8 +606,8 @@ class DispenserWorker(RidenDPSWorker):
             if voltage_v is not None:
                 self.dispense_voltage_v = self._clamp_voltage(voltage_v)
         elif kind == "output":
-            # Should not happen (set_output is rerouted), but keep the
-            # cooldown authoritative for any direct queued output command.
+            # Should not happen (set_output is rerouted), but keep the fire
+            # time limit authoritative for any direct queued output command.
             if value:
                 self._start_fire()
             else:
@@ -620,11 +617,6 @@ class DispenserWorker(RidenDPSWorker):
 
     def _start_fire(self):
         now = time.monotonic()
-        if self._phase == "cooldown":
-            if now < self._cooldown_end:
-                self._emit_fire_state()
-                return
-            self._phase = "idle"
         if self._phase == "firing":
             return
         # Program the operating point before every enable so a front-panel
@@ -640,8 +632,7 @@ class DispenserWorker(RidenDPSWorker):
     def _end_fire(self, aborted=False):
         super()._apply("output", False)
         if self._phase == "firing":
-            self._phase = "cooldown"
-            self._cooldown_end = time.monotonic() + self.COOLDOWN_SECONDS
+            self._phase = "idle"
             self.fire_summary.emit(
                 {
                     "elapsed_s": max(0.0, time.monotonic() - self._fire_started),
@@ -650,7 +641,6 @@ class DispenserWorker(RidenDPSWorker):
                     "aborted": bool(aborted),
                 }
             )
-            self.cooldown_started.emit(time.time() + self.COOLDOWN_SECONDS)
         self._emit_fire_state()
 
     def _service(self, state):
@@ -661,13 +651,6 @@ class DispenserWorker(RidenDPSWorker):
             else:
                 # Undo any mid-fire front-panel change of the setpoints.
                 self._enforce_setpoints(state)
-        elif self._phase == "cooldown":
-            if state.get("output_enabled"):
-                # Never allow the output during cooldown, even if it was
-                # switched on at the front panel.
-                super()._apply("output", False)
-            if now >= self._cooldown_end:
-                self._phase = "idle"
         elif self._phase == "idle" and state.get("output_enabled"):
             # Output enabled outside our fire() path: enforce the
             # operating point and apply the same time limit.
@@ -687,8 +670,6 @@ class DispenserWorker(RidenDPSWorker):
         now = time.monotonic()
         if self._phase == "firing":
             remaining = max(0.0, self._fire_end - now)
-        elif self._phase == "cooldown":
-            remaining = max(0.0, self._cooldown_end - now)
         else:
             remaining = 0.0
         self.fire_state.emit({"phase": self._phase, "remaining_s": remaining})
@@ -1302,7 +1283,8 @@ class LaserSetpointWorker(QtCore.QThread):
     for the GUI thread to update current, thermistor, and on/off state.
 
     Signals:
-        initial_values(dict): {"current": int, "thermistor": int} on connect.
+        initial_values(dict): {"current": float, "thermistor": int,
+            "output_on": bool} on connect.
         connection_status(str): "connected:<port>", "no_port", or "error:<msg>".
     """
     initial_values = QtCore.pyqtSignal(dict)
@@ -1331,9 +1313,28 @@ class LaserSetpointWorker(QtCore.QThread):
             )
             current = float(self._query("ilaser"))
             thermistor = float(self._query("rtact"))
+            # Whether the diode is actually driven decides whether the
+            # window may restore saved setpoints over the device's own.
+            # An answer we cannot parse counts as ON: writing current into
+            # a running diode is the error that matters, so silence must
+            # not read as permission.
+            try:
+                output_on = bool(int(float(self._query("lason"))))
+            except (TypeError, ValueError):
+                output_on = True
+                self.event_log.fault(
+                    "laser",
+                    message=(
+                        "could not read laser output state (lason); "
+                        "saved setpoints will not be restored"
+                    ),
+                )
+            # Current stays a float: the setpoint is adjustable to 0.01 mA
+            # and int() here quietly threw the two decimals away.
             self.initial_values.emit({
-                "current": int(current),
+                "current": current,
                 "thermistor": int(thermistor),
+                "output_on": output_on,
             })
             self.connection_status.emit(f"connected:{self._port}")
         except Exception as e:
