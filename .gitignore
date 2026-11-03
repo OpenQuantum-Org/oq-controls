@@ -21,3 +21,6 @@ dist/
 # Licensed fonts stay local (bundled OFL fonts are committed)
 fonts/PP*
 fonts/Aptos*
+
+# Local bench data: PSD exports, saved configs
+dev/
