@@ -18,7 +18,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
-sys.path.insert(0, ROOT)
+SRC = os.path.join(ROOT, "src")
+sys.path.insert(0, SRC)
 TMP = tempfile.mkdtemp(prefix="mot-smoke-")
 LOG_DIR = os.path.join(TMP, "logs")
 INI = os.path.join(TMP, "smoke-settings.ini")
@@ -134,7 +135,7 @@ from mot_workers import LaserSetpointWorker  # noqa: E402,F401
 
 for module in (linien_widget, linien_worker, styles, mot_control):
     module_dir = os.path.dirname(os.path.abspath(module.__file__))
-    assert module_dir == ROOT, (module.__name__, module.__file__)
+    assert module_dir == SRC, (module.__name__, module.__file__)
 assert not hasattr(mot_control, "EIT_CONTROLS")
 
 # --- Frozen-build paths: resource_path honors PyInstaller's _MEIPASS...
@@ -1413,9 +1414,12 @@ try:
     assert config["repump"]["vco_mhz"] == round(
         window.vtune_slider.value() / 10.0, 1
     )
-    # No PID: it lives only on the server, so saving it meant reading the
-    # hardware. A config records what the operator set, nothing else.
+    # PID is the gains last set from the app, never a read of the server:
+    # absent until set, then carried.
     assert "pid" not in config["linien"], config["linien"]
+    window._remember_pid(200, 100, 0)
+    config = window._collect_config()
+    assert config["linien"]["pid"] == {"p": 200, "i": 100, "d": 0}
     assert config["saved_at"]
     assert config["linien"]["filters"]["filter_1_frequency"] == 12000
     config_path = os.path.join(TMP, "config-export.json")

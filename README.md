@@ -126,7 +126,7 @@ Three things that bite:
 ## 3. First run
 
 ```powershell
-.venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
+.venv\Scripts\python.exe src\mot_control.py --rp-host rp-f0f2b5.local
 ```
 
 Serial ports are optional — the startup probe finds and verifies them. Every
@@ -312,13 +312,13 @@ the message, coloured by severity. linien's DEBUG detail stays in the file.
 
 | file | what lives there |
 | --- | --- |
-| `mot_control.py` | The window and every card, plus the app entry point. ~3,900 lines, most of it `OpenQuantumControlsWindow`; navigate it by card (`_add_*_card`). |
-| `mot_workers.py` | One QThread per device: both DPS supplies, the Koheron setpoints, the DAC Click (V_tune), the repump GPIO gate, the PSD client, the USB probe and the serial-port watcher. |
-| `linien_worker.py` | The linien acquisition/lock client — connect with retries, the spectrum poll, autolock, the server heartbeat. |
-| `linien_widget.py` | The spectroscopy plot: trace drawing, sweep range, line selection, lock buttons, the Red Pitaya banner. |
-| `psd_window.py` | The lock-noise (PSD) panel, ported from linien's noise-analysis window. |
-| `mot_logging.py` | `EventLog`: the JSONL record, correlated transactions, fault-repeat collapsing, and the bridge that captures third-party logging. |
-| `styles.py` | Colours, fonts, and the shared widget builders (sliders, readouts, cards). |
+| `src/mot_control.py` | The window and every card, plus the app entry point. ~3,900 lines, most of it `OpenQuantumControlsWindow`; navigate it by card (`_add_*_card`). |
+| `src/mot_workers.py` | One QThread per device: both DPS supplies, the Koheron setpoints, the DAC Click (V_tune), the repump GPIO gate, the PSD client, the USB probe and the serial-port watcher. |
+| `src/linien_worker.py` | The linien acquisition/lock client — connect with retries, the spectrum poll, autolock, the server heartbeat. |
+| `src/linien_widget.py` | The spectroscopy plot: trace drawing, sweep range, line selection, lock buttons, the Red Pitaya banner. |
+| `src/psd_window.py` | The lock-noise (PSD) panel, ported from linien's noise-analysis window. |
+| `src/mot_logging.py` | `EventLog`: the JSONL record, correlated transactions, fault-repeat collapsing, and the bridge that captures third-party logging. |
+| `src/styles.py` | Colours, fonts, and the shared widget builders (sliders, readouts, cards). |
 | `tests/` | Five hardware-free suites; `smoke_ui.py` is the big one and writes the screenshot. |
 | `CLAUDE.md` | The rules: invariants, state ownership, what was tried and reverted. Read before changing behaviour. |
 | `ROADMAP.md` | What is left, and what was decided against. |

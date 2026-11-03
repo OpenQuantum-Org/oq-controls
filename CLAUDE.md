@@ -10,7 +10,7 @@ the work sequence and open questions.
 ## Commands
 
 ```powershell
-.venv\Scripts\python.exe mot_control.py --rp-host rp-f0f2b5.local
+.venv\Scripts\python.exe src\mot_control.py --rp-host rp-f0f2b5.local
 .venv\Scripts\python.exe tests\test_logging.py
 .venv\Scripts\python.exe tests\test_workers.py
 .venv\Scripts\python.exe tests\test_dispenser.py
@@ -40,7 +40,9 @@ never carries forward:
 
 **Load Config is an exemption, decided 2026-08-17.** It pushes every setpoint in
 the file to its connected device immediately, with no prompt, including to a
-running laser and a locked system. What it can never do is switch an output on or
+running laser and a locked system. Since 2026-11-03 that includes the PID gains,
+saved as the gains last set from the app (`_remember_pid`), never read off the
+server. What it can never do is switch an output on or
 off: a config carries setpoints only, and `_reject_state_keys` drops any key that
 describes an output (`_CONFIG_STATE_KEYS`) on the way both out and in.
 
@@ -183,7 +185,9 @@ means latency.
   reference.
 - Round-trip cost to `rp-f0f2b5.local` is **unmeasured**. Measure it before
   arguing from it.
-- **Measured and fine, do not optimize:** camera (native Qt capture path), PSD
+- **Measured and fine, do not optimize:** camera (native Qt capture path,
+  `QGraphicsVideoItem` since 2026-11-03 so the MOT box can overlay it; the
+  `mot_meter` brightness tap converts one frame per 200 ms, unmeasured), PSD
   plot rebuild (cold, seconds apart), worker poll loops (nowhere near serial
   saturation).
 

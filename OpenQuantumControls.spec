@@ -10,8 +10,8 @@ import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 a = Analysis(
-    ["mot_control.py"],
-    pathex=["."],
+    ["src/mot_control.py"],
+    pathex=["src"],
     binaries=[],
     datas=[("fonts", "fonts"), ("assets", "assets")],
     hiddenimports=[

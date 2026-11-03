@@ -26,6 +26,8 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+# Code lives in src/; fonts, assets and logs/ stay at the repo root.
+ROOT = os.path.dirname(HERE)
 
 from linien_widget import LinienWidget
 from styles import (
@@ -44,6 +46,9 @@ from styles import (
 
 from mot_logging import EventLog, capture_library_logging
 from psd_window import PsdWindow
+from mot_meter import (
+    METER_INTERVAL_S, MotMeter, RoiItem, VideoView, qimage_to_gray, roi_brightness,
+)
 from mot_workers import (
     DacClickWorker,
     DispenserWorker,
@@ -105,15 +110,15 @@ def resource_path(*parts):
     Works both from a source checkout and from a frozen (PyInstaller)
     build, where bundled files are unpacked under ``sys._MEIPASS``.
     """
-    base = getattr(sys, "_MEIPASS", HERE)
+    base = getattr(sys, "_MEIPASS", ROOT)
     return os.path.join(base, *parts)
 
 
 def app_data_dir():
     """Writable per-user data directory.
 
-    From a source checkout this is the repo directory (so logs/ lands
-    next to the code, as before). A frozen build must not write next to
+    From a source checkout this is the repo root (so logs/ stays where
+    it always was). A frozen build must not write next to
     the executable (often read-only once installed), so it uses the OS
     per-user application-data location instead.
     """
@@ -123,7 +128,7 @@ def app_data_dir():
         )
         if base:
             return base
-    return HERE
+    return ROOT
 
 
 def logs_dir():
@@ -690,15 +695,27 @@ class CameraViewWidget(QtWidgets.QWidget):
         )
         self.stack.addWidget(self.message_label)
 
+        # A graphics-scene video item rather than QVideoWidget: still Qt's
+        # native capture path, but the MOT box can be drawn over it.
+        self._roi_norm = (0.42, 0.42, 0.58, 0.58)
+        self._last_meter = 0.0
         try:
-            from PyQt6.QtMultimediaWidgets import QVideoWidget
+            from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
 
-            self.video_widget = QVideoWidget()
-            self.video_widget.setStyleSheet("background: #080809;")
-            self.stack.addWidget(self.video_widget)
+            self.video_view = VideoView()
+            self.video_item = QGraphicsVideoItem()
+            self.video_view.scene().addItem(self.video_item)
+            self.roi_item = RoiItem(self._roi_moved)
+            self.video_view.scene().addItem(self.roi_item)
+            self.video_view.resized.connect(self._layout_video)
+            self.video_item.nativeSizeChanged.connect(
+                lambda _size: self._layout_video()
+            )
+            self.video_item.videoSink().videoFrameChanged.connect(self._on_frame)
+            self.stack.addWidget(self.video_view)
             self._multimedia_available = True
         except Exception as e:
-            self.video_widget = None
+            self.video_view = None
             self._multimedia_available = False
             self.message_label.setText(f"Camera view unavailable: {e}")
 
@@ -738,6 +755,9 @@ class CameraViewWidget(QtWidgets.QWidget):
         self.refresh_btn.clicked.connect(self._refresh_clicked)
         controls.addWidget(self.refresh_btn)
         layout.addLayout(controls)
+
+        self.meter = MotMeter()
+        layout.addWidget(self.meter)
 
         self.refresh(auto_start=False)
 
@@ -826,6 +846,59 @@ class CameraViewWidget(QtWidgets.QWidget):
                 pass
         self._camera = None
         self._capture_session = None
+        self.meter.clear()
+
+    def _video_rect(self):
+        """Where the picture actually sits inside the (letterboxed) item."""
+        size = self.video_item.size()
+        native = self.video_item.nativeSize()
+        if native.isEmpty():
+            return QtCore.QRectF(0, 0, size.width(), size.height())
+        scale = min(size.width() / native.width(), size.height() / native.height())
+        w, h = native.width() * scale, native.height() * scale
+        return QtCore.QRectF((size.width() - w) / 2, (size.height() - h) / 2, w, h)
+
+    def _layout_video(self):
+        """Fit the picture to the view and put the box back where it was."""
+        viewport = self.video_view.viewport().size()
+        self.video_item.setSize(QtCore.QSizeF(viewport))
+        self.video_view.setSceneRect(0, 0, viewport.width(), viewport.height())
+        video = self._video_rect()
+        x0, y0, x1, y1 = self._roi_norm
+        self.roi_item.set_bounds(video)
+        self.roi_item.setPos(0, 0)
+        self.roi_item.setRect(QtCore.QRectF(
+            video.left() + x0 * video.width(), video.top() + y0 * video.height(),
+            (x1 - x0) * video.width(), (y1 - y0) * video.height(),
+        ))
+
+    def _roi_moved(self):
+        video = self._video_rect()
+        if video.isEmpty():
+            return
+        r = self.roi_item.mapRectToScene(self.roi_item.rect())
+        self._roi_norm = (
+            (r.left() - video.left()) / video.width(),
+            (r.top() - video.top()) / video.height(),
+            (r.right() - video.left()) / video.width(),
+            (r.bottom() - video.top()) / video.height(),
+        )
+
+    def _on_frame(self, frame):
+        now = time.monotonic()
+        if now - self._last_meter < METER_INTERVAL_S:
+            return
+        self._last_meter = now
+        try:
+            image = frame.toImage()
+            if image.isNull():
+                return
+            value = roi_brightness(qimage_to_gray(image), self._roi_norm)
+        except Exception as e:
+            self.video_item.videoSink().videoFrameChanged.disconnect(self._on_frame)
+            self.meter.show_error(str(e))
+            return
+        self.meter.add(value)
 
     def _on_camera_selected(self, index):
         if index >= 0 and self.isVisible():
@@ -845,9 +918,10 @@ class CameraViewWidget(QtWidgets.QWidget):
                 pass
             self._capture_session = QMediaCaptureSession()
             self._capture_session.setCamera(self._camera)
-            self._capture_session.setVideoOutput(self.video_widget)
+            self._capture_session.setVideoOutput(self.video_item)
             self._camera.start()
-            self.stack.setCurrentWidget(self.video_widget)
+            self.stack.setCurrentWidget(self.video_view)
+            self._layout_video()
             QtCore.QTimer.singleShot(250, self._check_camera_error)
         except Exception as e:
             self.message_label.setText(f"Could not start camera: {e}")
@@ -1163,6 +1237,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget.modulation_state.connect(
             self._on_modulation_readback
         )
+        self.linien_widget.sweep_state.connect(self._on_sweep_readback)
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1654,6 +1729,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # the sweep slider and the lock region are actually set in.
         self.linien_widget = LinienWidget(
             linien_host=self._rp_host, event_log=self._event_log
+        )
+        # Lock at centre refuses a moving sweep, and its refusal only
+        # reached the log pane, so clicks looked like they did nothing.
+        self.linien_widget.centre_lock_button.setEnabled(
+            self.sweep_speed_combo.currentData() is None
         )
         # Built by the Linien widget (it owns the range logic) but shown in
         # the header beside the camera toggle, with the other view controls.
@@ -2680,6 +2760,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.vtune_edit,
         )
 
+        # Same step and interval as the held-key limiter: 0.1 MHz per 0.5 s
+        # is the error signal's settle time and the rate the MOT was found
+        # at; faster sweeps crossed the MOT window before it could load.
+        self._repump_sweep_timer = QtCore.QTimer(self)
+        self._repump_sweep_timer.setInterval(500)
+        self._repump_sweep_timer.timeout.connect(self._repump_sweep_step)
+        self.repump_sweep_btn = QtWidgets.QPushButton("Sweep ±10 MHz")
+        self.repump_sweep_btn.setCheckable(True)
+        self.repump_sweep_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.repump_sweep_btn.toggled.connect(self._toggle_repump_sweep)
+        layout.addWidget(self.repump_sweep_btn)
+        self._tip(
+            "Sweep the repump back and forth ±10 MHz around where it is\n"
+            "now, at 0.2 MHz/s (0.1 MHz every 0.5 s, 200 s per cycle).\n"
+            "Stopping leaves it where it is. Moving the slider stops it.",
+            self.repump_sweep_btn,
+        )
+
         self.repump_gpio_btn = QtWidgets.QPushButton("Repump Off")
         self.repump_gpio_btn.setCheckable(True)
         self.repump_gpio_btn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -3192,6 +3290,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._event_log.log(
             "setpoint", name="sweep_speed_index", value=combo_index
         )
+        self.linien_widget.centre_lock_button.setEnabled(
+            self.sweep_speed_combo.currentData() is None
+        )
         worker = self._get_lock_worker()
         if worker is None:
             return
@@ -3203,6 +3304,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # produces a moving trace rather than a paused one at a new speed.
         worker.set_sweep_pause(False)
         worker.set_sweep_speed(speed)
+
+    def _on_sweep_readback(self, state):
+        """Show the sweep the Red Pitaya is actually running, after connect.
+
+        Signals blocked: the box is reporting the device here, not
+        commanding it (restoring state never pushes to hardware).
+        """
+        paused, speed = state
+        index = 16 if paused else max(0, min(15, int(speed)))
+        was = self.sweep_speed_combo.currentIndex()
+        if index != was:
+            self.sweep_speed_combo.blockSignals(True)
+            self.sweep_speed_combo.setCurrentIndex(index)
+            self.sweep_speed_combo.blockSignals(False)
+            self._settings.setValue("linien/sweep_speed_index", index)
+            self._event_log.log("sweep_adopted", device_index=index, was_ui_index=was)
+        self.linien_widget.centre_lock_button.setEnabled(paused)
 
     def _on_lock_state(self, locked):
         if locked:
@@ -3571,6 +3689,37 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if worker is not None:
             worker.set_voltage(volts)
 
+    def _toggle_repump_sweep(self, checked):
+        slider = self.vtune_slider
+        if checked:
+            centre = slider.value()
+            # Slider units are 0.1 MHz, so 100 is 10 MHz.
+            self._repump_sweep_lo = max(slider.minimum(), centre - 100)
+            self._repump_sweep_hi = min(slider.maximum(), centre + 100)
+            self._repump_sweep_dir = 1
+            self._repump_sweep_expected = centre
+            self._repump_sweep_timer.start()
+            self.repump_sweep_btn.setText("Stop Sweep")
+            self._event_log.user("repump_sweep", on=True, centre_mhz=centre / 10.0)
+        else:
+            self._repump_sweep_timer.stop()
+            self.repump_sweep_btn.setText("Sweep ±10 MHz")
+            self._event_log.user(
+                "repump_sweep", on=False, stopped_mhz=slider.value() / 10.0)
+
+    def _repump_sweep_step(self):
+        slider = self.vtune_slider
+        if slider.value() != self._repump_sweep_expected:
+            # Someone else moved it (operator, Load Config): theirs wins.
+            self.repump_sweep_btn.setChecked(False)
+            return
+        nxt = slider.value() + self._repump_sweep_dir
+        if not self._repump_sweep_lo <= nxt <= self._repump_sweep_hi:
+            self._repump_sweep_dir = -self._repump_sweep_dir
+            nxt = slider.value() + self._repump_sweep_dir
+        self._repump_sweep_expected = nxt
+        slider.setValue(nxt)
+
     def _on_vtune_readback(self, volts):
         if (
             self._last_logged_vtune is None
@@ -3843,7 +3992,28 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
             return
         worker.set_pid(p_value, i_value, d_value)
+        self._remember_pid(p_value, i_value, d_value)
         self._event_log.log("pid_set", p=p_value, i=i_value, d=d_value)
+
+    def _remember_pid(self, p_value, i_value, d_value):
+        """Keep the gains the operator last set, for Save Config.
+
+        The gains live on the server, and a config records what the
+        operator set rather than reading a device, so this is the copy
+        the config is written from.
+        """
+        self._settings.setValue("linien/pid_p", int(p_value))
+        self._settings.setValue("linien/pid_i", int(i_value))
+        self._settings.setValue("linien/pid_d", int(d_value))
+
+    def _remembered_pid(self):
+        if self._settings.value("linien/pid_p") is None:
+            return None
+        return {
+            "p": self._int_setting("linien/pid_p", 50, 0, 8191),
+            "i": self._int_setting("linien/pid_i", 5, 0, 8191),
+            "d": self._int_setting("linien/pid_d", 0, 0, 8191),
+        }
 
     def _collect_config(self):
         """Snapshot of every control setpoint, for the JSON export.
@@ -3861,7 +4031,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # units so files written by either build stay interchangeable.
         vtune_v = vco_mhz_to_vtune(self.vtune_slider.value() / 10.0)
         therm_ohm = int(round(thermistor_c_to_ohms(self.therm_slider.value() / 100.0)))
-        return {
+        config = {
             "saved_at": datetime.now().astimezone().isoformat(
                 timespec="seconds"
             ),
@@ -3878,10 +4048,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 "mod_phase_deg": self.mod_phase_slider.value(),
                 "mod_strength_mv": self.mod_strength_slider.value(),
                 "sweep_speed_index": self.sweep_speed_combo.currentIndex(),
-                # No "pid": it lives only on the server (the dialog reads it
-                # live and writes it straight back), so saving it meant
-                # reading the hardware. Older files that carry one are still
-                # applied on load.
                 "filters": self._filters_from_ui(),
             },
             "laser": {
@@ -3912,6 +4078,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 ),
             },
         }
+        # The gains last set from this app (Set PID... or a loaded config),
+        # not a read of the server. Absent until they have been set once.
+        pid = self._remembered_pid()
+        if pid is not None:
+            config["linien"]["pid"] = pid
+        return config
 
     # Key names that describe an output rather than a setpoint. A config
     # may not carry one: loading a file must never switch the laser, the
@@ -4042,6 +4214,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 i_value = int(pid.get("i", 5))
                 d_value = int(pid.get("d", 0))
                 worker.set_pid(p_value, i_value, d_value)
+                self._remember_pid(p_value, i_value, d_value)
                 self._event_log.log(
                     "pid_set", p=p_value, i=i_value, d=d_value, source="config"
                 )
@@ -4384,6 +4557,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         else:
             keys = set()
 
+        # Before the workers go, or a tick lands on a stopped DAC worker.
+        self._repump_sweep_timer.stop()
         self._save_ui_state()
         # Before app_stop, so a still-open run of suppressed faults is
         # counted in the record rather than dying with the process.

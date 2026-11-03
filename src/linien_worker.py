@@ -33,6 +33,11 @@ class LinienWorker(QtCore.QThread):
     # The dither amplitude the server is actually running, in mV, read once
     # at connect. Nothing else told the UI whether the dither was on.
     modulation_state = QtCore.pyqtSignal(object)
+    # Why a lock the operator asked for did not happen, for display by the
+    # lock buttons. Also sent as a fault, so the log keeps it.
+    lock_feedback = QtCore.pyqtSignal(str)
+    # (paused, speed index) as the server holds them, read once at connect.
+    sweep_state = QtCore.pyqtSignal(object)
 
     # linien-server increments ``ping`` once a second from a thread of its
     # own (linien_server/server.py:181). If it stops advancing the server's
@@ -190,6 +195,17 @@ class LinienWorker(QtCore.QThread):
         # connection that is already open, and the answer is needed
         # before the startup report decides what to claim.
         self._emit_modulation_state()
+
+        # Same reason for the sweep: the speed box restores its last
+        # setting, which after a restart can say "hold" while the server
+        # sweeps -- and Lock at centre then refuses with no visible cause.
+        try:
+            p = self.client.parameters
+            self.sweep_state.emit(
+                (bool(p.sweep_pause.value), int(p.sweep_speed.value))
+            )
+        except Exception as e:
+            self._log(f"sweep state read failed: {e}")
 
         self.event_log.log("linien_connected", host=self.host)
         self.connection_status.emit(f"connected:{self.host}")
@@ -558,9 +574,7 @@ class LinienWorker(QtCore.QThread):
         the unscaled signal and divides only when drawing.
         """
         if not self.connected:
-            # fault, not _log: this one is a button press, so it needs to
-            # answer the operator rather than only reach the file.
-            self.fault.emit("cannot lock: not connected to the Red Pitaya")
+            self._lock_problem("Not connected to the Red Pitaya.")
             return
         params = self.client.parameters
         try:
@@ -575,20 +589,20 @@ class LinienWorker(QtCore.QThread):
         try:
             to_plot = pickle.loads(params.to_plot.value)
         except Exception as e:
-            self.fault.emit(f"could not read spectrum: {e}")
+            self._lock_problem(f"Could not read the spectrum: {e}")
             return
         key = next(
             (k for k in ("error_signal_1", "error_signal") if k in to_plot),
             None,
         )
         if key is None:
-            self.fault.emit("no spectrum available to lock on")
+            self._lock_problem("No spectrum available to lock on.")
             return
 
         raw = np.asarray(to_plot[key], dtype=np.int16)
         n = raw.size
         if n < 4:
-            self.fault.emit("spectrum too small to lock on")
+            self._lock_problem("The spectrum is too small to lock on.")
             return
 
         # The selection was made against a trace of n_points samples; map
@@ -601,7 +615,7 @@ class LinienWorker(QtCore.QThread):
         i0 = max(0, min(n - 1, i0))
         i1 = max(0, min(n - 1, i1))
         if i1 - i0 < 2:
-            self.fault.emit("selected range too narrow to lock on")
+            self._lock_problem("The selected range is too narrow; drag across the whole slope.")
             return
 
         try:
@@ -622,14 +636,192 @@ class LinienWorker(QtCore.QThread):
                 i0, i1, pickle.dumps(raw)
             )
         except Exception as e:
-            self.fault.emit(f"start_autolock failed: {e}")
+            self._lock_problem(f"The autolock could not start: {e}")
             return
 
         if self._wait_for_lock(True, timeout_s=30):
             self._emit_lock_state_best_effort(force_value=True)
         else:
-            self.fault.emit("lock did not engage within 30 s")
+            self._lock_problem("The lock did not engage within 30 s.")
             self._emit_lock_state_best_effort()
+
+    # Half-width of the slope probe around the paused centre. Small against
+    # the few-mV-wide MOT window seen on the bench, large enough that the
+    # error moves clear of the frame-to-frame scatter.
+    CENTRE_PROBE_V = 0.005
+    # A held sweep still delivers traces at the held speed's rate: 8.6 s
+    # each at index 15, which timed every probe out. Index 8 (14.8 Hz) is
+    # ~70 ms per trace; the output stays at the centre either way, since
+    # pause zeroes the ramp whatever its speed.
+    PROBE_SWEEP_SPEED = 8
+    # Good centre locks sat 2-4 mV from the centre; the one runaway seen
+    # landed 190 mV away. 10 mV keeps clear of both.
+    RUNAWAY_V = 0.010
+
+    def _lock_problem(self, message):
+        """A lock action that did not happen: log it and say it by the button.
+
+        The log pane alone was not enough -- a refused click looked like
+        a click that did nothing.
+        """
+        self.fault.emit(message)
+        self.lock_feedback.emit(message)
+
+    def _fresh_error_mean(self, prev, timeout_s=5.0):
+        """Mean raw error (counts) of a frame taken after the last write.
+
+        The first changed frame may straddle the register write, so the one
+        after it is used. Returns (mean, frame) or (None, prev) on timeout.
+        """
+        changes = 0
+        deadline = monotonic() + timeout_s
+        while monotonic() < deadline:
+            t = pickle.loads(self.client.parameters.to_plot.value)
+            err = t.get("error_signal_1")
+            if err is not None:
+                err = np.asarray(err, dtype=float)
+                if prev is None or err.size != prev.size or np.any(err != prev):
+                    changes += 1
+                    prev = err
+                    if changes == 2:
+                        return float(np.mean(err)), err
+            sleep(0.1)
+        return None, prev
+
+    def lock_at_centre(self):
+        """Lock where the paused sweep sits, rather than on a zero crossing.
+
+        Reads the error at the paused centre, sets combined_offset so the
+        PID sees zero there, takes the slope sign from a +/- probe of the
+        centre itself (the plotted x axis is ~0.2 V out, so it cannot be
+        trusted for this), then starts linien's manual lock
+        (locking_panel.py:158). The lock engages at once because a paused
+        sweep outputs 0, which is the SIMPLE autolock's target.
+        """
+        if not self.connected:
+            self._lock_problem("Not connected to the Red Pitaya.")
+            return
+        params = self.client.parameters
+        root = self.client.connection.root
+        if not bool(params.sweep_pause.value):
+            self._lock_problem("Set Sweep Speed to 0 Hz (hold) first.")
+            return
+        centre = float(params.sweep_center.value)
+        speed = int(params.sweep_speed.value)
+        d = self.CENTRE_PROBE_V
+        reads = {}
+        frame = None
+        try:
+            params.sweep_speed.value = min(speed, self.PROBE_SWEEP_SPEED)
+            for name, v in (("c1", centre), ("hi", centre + d),
+                            ("lo", centre - d), ("c2", centre)):
+                params.sweep_center.value = v
+                root.write_registers()
+                reads[name], frame = self._fresh_error_mean(frame)
+                if reads[name] is None:
+                    self._lock_problem(
+                        "No fresh error signal from the Red Pitaya within 5 s."
+                    )
+                    return
+        except Exception as e:
+            self._lock_problem(f"Could not measure the error signal: {e}")
+            return
+        finally:
+            try:
+                params.sweep_center.value = centre
+                params.sweep_speed.value = speed
+                root.write_registers()
+            except Exception as e:
+                self._lock_problem(
+                    f"Could not restore the sweep centre and speed: {e}"
+                )
+
+        step = reads["hi"] - reads["lo"]
+        scatter = abs(reads["c1"] - reads["c2"])
+        e0 = reads["c2"]
+        self.event_log.log(
+            "centre_lock_probe",
+            centre_v=round(centre, 4),
+            error_v=round(e0 / 8192.0, 5),
+            slope_v_per_v=round(step / (2 * d) / 8192.0, 3),
+            scatter_v=round(scatter / 8192.0, 5),
+        )
+        # 14-bit signed adder (registers.py:125).
+        if abs(e0) > 8191:
+            self._lock_problem(
+                "The error signal at the centre is beyond the offset range."
+            )
+            return
+        if abs(step) < 3 * scatter + 1:
+            self._lock_problem(
+                "The error signal is too flat here to hold a lock "
+                f"({step / 8192:+.4f} V over ±{d * 1000:.0f} mV). "
+                "Move Sweep Centre 1–2 mV and try again."
+            )
+            return
+
+        try:
+            params.combined_offset.value = -int(round(e0))
+            params.target_slope_rising.value = bool(step > 0)
+            params.fetch_additional_signals.value = False
+            params.autolock_mode.value = AutolockMode.SIMPLE
+            params.autolock_target_position.value = 0
+            root.write_registers()
+            root.start_lock()
+        except Exception as e:
+            self._lock_problem(f"Lock at centre failed: {e}")
+            self._emit_lock_state_best_effort()
+            return
+
+        if not self._wait_for_lock(True, timeout_s=10):
+            self._lock_problem("The lock did not engage within 10 s.")
+            self._emit_lock_state_best_effort()
+            return
+
+        drift = self._control_drift(centre)
+        if drift is not None and drift > self.RUNAWAY_V:
+            # Seen on the bench: a probe on a small dip riding a flat error
+            # offset engaged, then slid ~190 mV along the flat stretch while
+            # the header said LOCKED. The sweep stays held, so unlocking
+            # parks the laser back at the centre.
+            try:
+                root.start_sweep()
+            except Exception as e:
+                self._log(f"unlock after runaway failed: {e}")
+            self.event_log.fault(
+                "centre_lock_runaway", centre_v=round(centre, 4),
+                drift_v=round(drift, 4),
+            )
+            self._lock_problem(
+                f"The lock ran {drift * 1000:.0f} mV away from the centre, "
+                "so it was released. Adjust Mod Phase until the error signal "
+                "has a clear slope here, then try again."
+            )
+            self._emit_lock_state_best_effort(force_value=False)
+            return
+        self._emit_lock_state_best_effort(force_value=True)
+
+    def _control_drift(self, centre, settle_s=1.5):
+        """Largest |control - centre| (V) over the first moments of a lock.
+
+        A good centre lock holds the output within a few mV of the centre
+        (2-4 mV across the bench locks of 2026-11-02); a runaway settles
+        tens to hundreds of mV away within about a second. None if no
+        locked frame arrived.
+        """
+        worst = None
+        deadline = monotonic() + settle_s
+        while monotonic() < deadline:
+            try:
+                t = pickle.loads(self.client.parameters.to_plot.value)
+            except Exception:
+                return worst
+            ctrl = t.get("control_signal")
+            if "error_signal" in t and ctrl is not None and len(ctrl):
+                gap = abs(float(np.mean(ctrl)) / 8192.0 - centre)
+                worst = gap if worst is None else max(worst, gap)
+            sleep(0.1)
+        return worst
 
     def set_determine_offset(self, enabled: bool):
         """linien's "Determine signal offset" checkbox.
