@@ -62,6 +62,9 @@ class FakeClient:
 def worker():
     w = LinienWorker(host="fake.local")
     w.client = FakeClient()
+    # Lock actions run on their own thread in the app; run them inline so
+    # a test can look at what they sent as soon as the call returns.
+    w._run_action = lambda label, work: work()
     return w
 
 
@@ -276,8 +279,8 @@ def test_to_plot_is_fetched_once_per_poll():
 
     It is a pickled 2048-point array over RPyC. Acquisition unpickles it
     and the lock check used to fetch the whole thing again, doubling the
-    wire traffic of every poll. Everything else the loop reads is a
-    cached parameter and costs no round trip.
+    wire traffic of every poll. The lock check now reads only the
+    server's cached lock flag, so it never touches to_plot.
     """
     reads = []
 
@@ -303,10 +306,11 @@ def test_to_plot_is_fetched_once_per_poll():
     w._emit_lock_state_best_effort()
     assert len(reads) == before, "the lock check re-fetched to_plot"
 
-    # With nothing stashed it still works, by reading for itself.
+    # With nothing stashed it still does not fetch: the server's cached
+    # lock flag decides, not the trace.
     w.to_plot = {}
     w._emit_lock_state_best_effort()
-    assert len(reads) > before
+    assert len(reads) == before
 
 
 def test_default_host_is_this_experiments_red_pitaya():
@@ -354,8 +358,9 @@ def test_a_failing_lock_state_read_reaches_the_log():
         def value(self):
             raise RuntimeError("rpyc is down")
 
-    w.client.parameters._params["to_plot"] = Exploding()
-    w.to_plot = {}  # force the uncached path
+    # The server's lock flag is what decides (not the trace, which goes
+    # stale after an unlock), so that is the read that must not go quiet.
+    w.client.parameters._params["lock"] = Exploding()
     w._emit_lock_state_best_effort()
     assert records, "the lock-state read failed silently"
     assert records[0][0] == "fault"
@@ -372,13 +377,13 @@ def test_a_failing_lock_state_read_reaches_the_log():
         def value(self):
             raise RuntimeError("connection reset")
 
-    w.client.parameters._params["to_plot"] = OtherFailure()
+    w.client.parameters._params["lock"] = OtherFailure()
     w._emit_lock_state_best_effort()
     assert len(records) == 2, records
 
 
 def test_faults_go_to_the_log_not_stdout():
-    """CLAUDE.md invariant 4: no fault path ends at a print."""
+    """No fault path ends at a print: a windowed build has no stdout."""
     import io as _io
     from contextlib import redirect_stdout
 
@@ -497,6 +502,27 @@ def test_writes_are_refused_when_the_connect_never_succeeded():
     assert not w.client.connection.root.calls, w.client.connection.root.calls
     assert records and records[0][0] == "fault", records
     assert "not connected" in records[0][1], records
+
+
+def test_a_stop_during_connect_ends_the_worker():
+    """A connect takes up to ~20 s. run() used to set running = True once
+    it finished, undoing a stop() that arrived meanwhile, and stop()'s
+    wait() then hung the window for good (Auto-connect or close during a
+    slow connect). The same flag pattern is in every mot_workers thread.
+    """
+    import threading
+
+    w = LinienWorker(host="fake.local")
+
+    def connect_then_get_stopped():
+        w.client = FakeClient()
+        w.running = False  # what stop() does before it waits
+
+    w._connect_once = connect_then_get_stopped
+    t = threading.Thread(target=w.run, daemon=True)
+    t.start()
+    t.join(timeout=3)
+    assert not t.is_alive(), "run() kept looping after a mid-connect stop"
 
 
 def main():

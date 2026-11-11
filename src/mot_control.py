@@ -7,7 +7,7 @@ voltage (V_tune) is set by the DAC Click (MCP4921) on the Red Pitaya Click
 Shield through the patched linien-server's ``dac_click_voltage`` parameter,
 and the repump RF gate is a Linien GPIO bit (DIO1_N, active-low). The MOT
 coils run from a DPS5005 supply; the dispenser runs from a DPS5020 with a
-timed 10 s fire.
+timed fire (30 s default, 120 s at most).
 """
 
 import html
@@ -135,7 +135,8 @@ def logs_dir():
     return os.path.join(app_data_dir(), "logs")
 
 
-# App typography: IBM Plex Sans for body text, Space Grotesk for titles.
+# App typography: Space Grotesk throughout, Regular and Bold (Qt draws
+# weight 600 with Bold).
 FONTS_DIR = resource_path("fonts")
 BODY_FONT_FAMILY = "Space Grotesk"
 TITLE_FONT_FAMILY = "Space Grotesk"
@@ -147,16 +148,15 @@ LOGO_HEIGHT_PX = 62
 def load_app_fonts():
     """Register the font files bundled in fonts/.
 
-    Both families ship with the repo under the SIL OFL (IBM Plex Sans for
-    body text, Space Grotesk for titles); additional font files dropped
-    into fonts/ are also registered but stay local (licensed files are
-    gitignored). Fonts are registered from bytes because the path-based
+    Space Grotesk ships with the repo under the SIL OFL; additional font
+    files dropped into fonts/ are also registered but stay local
+    (licensed files are gitignored). Fonts are registered from bytes because the path-based
     QFontDatabase.addApplicationFont silently fails on this Qt build
     (6.11/macOS). Missing families fall back to Helvetica Neue.
 
     Returns the list of problems found. This runs before the window and
     therefore before the event log exists, so it reports upward rather
-    than printing (CLAUDE.md invariant 4); the window logs what it gets.
+    than printing (a windowed build has no stdout); the window logs it.
     """
     problems = []
     if os.path.isdir(FONTS_DIR):
@@ -261,6 +261,15 @@ def add_slider_row(*args, **kwargs):
     def commit():
         import re
 
+        # A read-only box still emits editingFinished when it loses focus,
+        # and the "normalize the text" emit below then re-sent the value:
+        # clicking into the locked laser boxes wrote current and
+        # temperature to the Koheron (bench, 2026-11-10: 9077 ohm over the
+        # device's 9076). Its text cannot have been edited, so there is
+        # nothing to commit.
+        if edit.isReadOnly() or not slider.isEnabled():
+            return
+
         match = re.search(r"[-+]?\d*\.?\d+", edit.text())
         if match is None:
             slider.valueChanged.emit(slider.value())  # restore display
@@ -295,6 +304,11 @@ class ArrowStepper(QtCore.QObject):
             return False
         slider = getattr(obj, "slider", None)
         if slider is None:
+            return False
+        # A locked control is a read-only box over a disabled slider, and
+        # setValue still fires on a disabled slider: without this, PageUp
+        # in the locked Current box wrote 1 mA to a running diode.
+        if obj.isReadOnly() or not slider.isEnabled():
             return False
         steps = {
             QtCore.Qt.Key_Up: slider.singleStep(),
@@ -338,7 +352,10 @@ class HeldKeyLimiter(QtCore.QObject):
     def eventFilter(self, obj, event):
         if (
             event.type() != QtCore.QEvent.KeyPress
-            or event.key() not in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down)
+            or event.key() not in (
+                QtCore.Qt.Key_Up, QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown,
+            )
         ):
             return False
         now = time.monotonic()
@@ -385,31 +402,38 @@ _MOD_GAIN = 2.5e-3
 _CURRENT_COEFF = 2.0e-9
 V_TO_GHZ = -_C / _LAMBDA_0**2 * _MOD_GAIN * _CURRENT_COEFF / 1e9
 
-# Repump VCO tuning range: the DAC's 0-5 V V_tune span covers
-# 2800-2970 MHz (measured on this VCO — the old qMOT-os datasheet table
-# did not match the actual hardware). Linear, clamped at the ends.
-VCO_FREQ_MIN_MHZ = 2800.0
-VCO_FREQ_MAX_MHZ = 2970.0
-VCO_VTUNE_SPAN_V = 5.0
+# Repump VCO (Mini-Circuits ROS-3000-619+) tuning curve: the datasheet's
+# typical +25 C table, V_tune (V) -> output (MHz), interpolated linearly
+# between rows and clamped to 0-5 V (the DAC Click's full scale). Replaced
+# a linear 0-5 V -> 2800-2970 MHz map on 2026-11-03: that was the part's
+# headline range, never measured, and read ~25 MHz low near 3.7 V. Still a
+# typical part, not this one: off by a few MHz, more if the VCO runs warm.
+_VCO_VTUNE_V = [
+    0.00, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50,
+    2.75, 3.00, 3.25, 3.50, 3.75, 4.00, 4.25, 4.50, 4.75, 5.00,
+]
+_VCO_FREQ_MHZ = [
+    2720.4, 2754.3, 2769.6, 2784.0, 2798.2, 2813.1, 2827.8, 2842.1, 2856.8,
+    2871.8, 2887.5, 2903.5, 2920.5, 2937.6, 2954.3, 2970.7, 2987.0, 3003.0,
+    3018.4, 3032.6,
+]
+VCO_FREQ_MIN_MHZ = _VCO_FREQ_MHZ[0]
+VCO_FREQ_MAX_MHZ = _VCO_FREQ_MHZ[-1]
 
-# The slider covers only where the MOT lives (lock at ~2912, MOT near
-# 2920); the operator narrowed it on 2026-10-21. Not the VCO map above,
-# which must stay the hardware's full 0-5 V span.
-REPUMP_SLIDER_MIN_MHZ = 2850.0
-REPUMP_SLIDER_MAX_MHZ = 2950.0
+# The slider spans the DAC's whole 0-5 V, at the operator's request
+# (2026-11-03); it had been narrowed to 1.47-4.41 V on 2026-10-21.
+REPUMP_SLIDER_MIN_MHZ = VCO_FREQ_MIN_MHZ
+REPUMP_SLIDER_MAX_MHZ = VCO_FREQ_MAX_MHZ
 
 
 def vco_mhz_to_vtune(mhz: float) -> float:
-    """Inverse of vtune_to_vco_mhz. The VCO curve is linear in V_tune."""
-    span = VCO_FREQ_MAX_MHZ - VCO_FREQ_MIN_MHZ
-    fraction = (float(mhz) - VCO_FREQ_MIN_MHZ) / span
-    return max(0.0, min(1.0, fraction)) * VCO_VTUNE_SPAN_V
+    """Inverse of vtune_to_vco_mhz (the curve is monotonic)."""
+    return float(np.interp(float(mhz), _VCO_FREQ_MHZ, _VCO_VTUNE_V))
 
 
 def vtune_to_vco_mhz(vtune_v: float) -> float:
     """Convert a repump V_tune voltage to the VCO output frequency in MHz."""
-    fraction = max(0.0, min(1.0, vtune_v / VCO_VTUNE_SPAN_V))
-    return VCO_FREQ_MIN_MHZ + fraction * (VCO_FREQ_MAX_MHZ - VCO_FREQ_MIN_MHZ)
+    return float(np.interp(float(vtune_v), _VCO_VTUNE_V, _VCO_FREQ_MHZ))
 
 
 def thermistor_ohms_to_c(ohms: float) -> float:
@@ -674,6 +698,10 @@ class CollapsibleCard(QtWidgets.QFrame):
 class CameraViewWidget(QtWidgets.QWidget):
     """USB camera panel with graceful no-camera fallback."""
 
+    # Camera and meter failures, for the event log: on screen alone they
+    # left nothing to read back afterwards.
+    fault = QtCore.pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._camera = None
@@ -897,6 +925,7 @@ class CameraViewWidget(QtWidgets.QWidget):
         except Exception as e:
             self.video_item.videoSink().videoFrameChanged.disconnect(self._on_frame)
             self.meter.show_error(str(e))
+            self.fault.emit(f"brightness meter stopped: {e}")
             return
         self.meter.add(value)
 
@@ -955,6 +984,7 @@ class CameraViewWidget(QtWidgets.QWidget):
         if not message:
             message = "Camera could not be started"
         self.message_label.setText(message)
+        self.fault.emit(message)
         self.stack.setCurrentWidget(self.message_label)
 
 
@@ -1137,8 +1167,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_fire_current = self._float_setting(
             "dispenser/fire_current_a", DispenserWorker.DISPENSE_CURRENT_A
         )
-        self._dispenser_fire_seconds = self._float_setting(
-            "dispenser/fire_seconds", DispenserWorker.FIRE_SECONDS
+        # Clamped so the button label and the worker agree on a stored
+        # value outside the slider's range.
+        self._dispenser_fire_seconds = max(
+            DispenserWorker.MIN_FIRE_SECONDS,
+            min(
+                self._float_setting(
+                    "dispenser/fire_seconds", DispenserWorker.FIRE_SECONDS
+                ),
+                DispenserWorker.MAX_FIRE_SECONDS,
+            ),
         )
         self._dispenser_fire_voltage = self._float_setting(
             "dispenser/fire_voltage_v", DispenserWorker.DISPENSE_VOLTAGE_V
@@ -1146,7 +1184,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
         self._psd_window = None
-        self._psd_prev_status = {}
         self._psd_prev_status = {}
         self._filters_syncing = False
         # Set once the operator has adjusted a filter control, so the
@@ -1238,6 +1275,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._on_modulation_readback
         )
         self.linien_widget.sweep_state.connect(self._on_sweep_readback)
+        # Through the slider, so the box, QSettings and the log all follow;
+        # the write it triggers repeats the value the worker already set.
+        self.linien_widget.phase_applied.connect(self.mod_phase_slider.setValue)
+        self.linien_widget.action_running.connect(self._hold_for_lock_action)
 
         # Wheel events must never change an unfocused control (this covers
         # every slider/combo/spinbox, including the Linien sweep slider).
@@ -1355,9 +1396,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _save_ui_state(self):
         self._settings.setValue("ui/geometry", self.saveGeometry())
         self._settings.setValue("ui/splitter_sizes", self.main_splitter.sizes())
-        self._settings.setValue(
-            "ui/camera_visible", self.camera_toggle.isChecked()
-        )
 
     # Fields that are plumbing rather than content: they either name the
     # line already (event), belong only to the file (traceback), or are
@@ -1660,6 +1698,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         outer.addLayout(self._header_row)
 
         # Statuses live in each card's header, not in a strip up here.
+        # The lock chip's text is display only, and other messages share
+        # it (startup report, stall): shutdown read "LOCKED" off it and
+        # left a lock engaged unasked once one of those had overwritten it.
+        # This is set by the server's lock flag and nothing else.
+        self._lock_engaged = False
         self._set_chip("lock", "LOCK --", self._CHIP_NEUTRAL)
         self._set_chip("usb", "DEVICES --", self._CHIP_NEUTRAL)
         self._set_chip("coils", "COILS OFF", self._CHIP_NEUTRAL)
@@ -1684,7 +1727,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         sweep_row.setContentsMargins(*PLOT_COLUMN_MARGINS)
         sweep_row.setSpacing(8)
         sweep_row.addStretch()
-        # Held so the Linien widget's sweep-centre box can be inserted here
+        # Held so the Linien widget's sweep-center box can be inserted here
         # once that widget exists, further down.
         self._sweep_row = sweep_row
         sweep_row.addWidget(self._small_label("Sweep Speed:"))
@@ -1730,11 +1773,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.linien_widget = LinienWidget(
             linien_host=self._rp_host, event_log=self._event_log
         )
-        # Lock at centre refuses a moving sweep, and its refusal only
-        # reached the log pane, so clicks looked like they did nothing.
-        self.linien_widget.centre_lock_button.setEnabled(
-            self.sweep_speed_combo.currentData() is None
-        )
+        # Which lock buttons are usable is decided in one place,
+        # _refresh_lock_buttons, once the cards it reads exist.
         # Built by the Linien widget (it owns the range logic) but shown in
         # the header beside the camera toggle, with the other view controls.
         self._header_row.insertWidget(
@@ -1759,18 +1799,21 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self._sweep_row.insertSpacing(1, 18)
         self._sweep_row.insertWidget(1, self.linien_widget.sweep_center_spin)
-        self._sweep_row.insertWidget(1, self._small_label("Sweep Centre:"))
+        self._sweep_row.insertWidget(1, self._small_label("Sweep Center:"))
         self._tip(
-            "Centre of the sweep in output volts, to 3 decimals.\n"
+            "Center of the sweep in output volts, to 3 decimals.\n"
             "Arrow keys step 0.001 V. The span is unchanged,\n"
             "so the window slides rather than rescaling.\n"
             "At the full -1 to +1 V span there is no room to slide,\n"
-            "so the centre stays at 0: narrow the range slider first.",
+            "so the center stays at 0: narrow the range slider first.",
             self.linien_widget.sweep_center_spin,
         )
 
 
         self.camera_widget = CameraViewWidget()
+        self.camera_widget.fault.connect(
+            lambda msg: self._log_fault("camera", msg)
+        )
         self.camera_widget.setVisible(False)
         self.main_splitter.addWidget(self.linien_widget)
         self.main_splitter.addWidget(self.camera_widget)
@@ -1783,7 +1826,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _toggle_camera_view(self, visible):
         self.camera_widget.setVisible(visible)
-        self._settings.setValue("ui/camera_visible", bool(visible))
         if visible:
             # Equal split: the camera is as much the experiment as the
             # spectrum is, so neither gets the larger half by default.
@@ -1833,6 +1875,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._add_config_log_card(layout)
         for card_attr in set(self._CHIP_CARDS.values()):
             self._refresh_card_status(card_attr)
+        self._refresh_lock_buttons()
         layout.addStretch()
 
         # The sidebar swaps between the normal control cards and the PSD
@@ -2081,7 +2124,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._tip(
             "Apply a saved config: setpoints go to the hardware where\n"
             "connected. It never switches an output on or off — the laser,\n"
-            "coils, repump, dither and dispenser stay as they are.\n"
+            "coils, repump, modulation and dispenser stay as they are.\n"
             "Dispenser settings ask for confirmation; port changes take\n"
             "effect on Connect.",
             self.load_config_btn,
@@ -2127,7 +2170,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.mod_enable_btn.setCheckable(True)
         self.mod_enable_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self._tip(
-            "Turn the current dither on or off. Off drives the amplitude\n"
+            "Turn the laser current modulation on or off. Off drives the amplitude\n"
             "to zero and greys out the modulation controls.",
             self.mod_enable_btn,
         )
@@ -2150,7 +2193,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         self.mod_strength_slider.valueChanged.connect(self._on_mod_strength)
         self._tip(
-            "Modulation amplitude driving the current dither, 0-1 Vp-p.",
+            "Amplitude of the laser current modulation, 0-1 Vp-p.",
             self.mod_strength_slider,
             self.mod_strength_edit,
         )
@@ -2199,7 +2242,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Restored before the signal is connected, so bringing the UI back
         # cannot actuate: connecting first made setChecked() fire
         # _on_mod_enabled, which writes the dither amplitude to the laser.
-        # Restoring persisted state sets the UI only (CLAUDE.md), and the
+        # Restoring persisted state sets the UI only, never hardware, and the
         # default is off -- starting a session by dithering the laser is
         # not something to do without being asked.
         self.mod_enable_btn.setChecked(
@@ -2293,10 +2336,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         parent.addWidget(card)
 
     def _apply_mod_enabled(self, on):
-        """Grey out the modulation controls when the dither is off."""
+        """Grey out the modulation controls when the modulation is off."""
         self.mod_enable_btn.setText(
             "Modulation On" if on else "Modulation Off"
         )
+        self._show_lock_chip()  # the unlocked chip names the modulation
+        self._refresh_lock_buttons()
+        self._schedule_laser_off_rule()
         for slider in (
             self.mod_strength_slider,
             self.mod_freq_slider,
@@ -2378,7 +2424,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # Signals blocked and the setting written by hand: routing this
         # through _on_mod_enabled would push the value we just read
         # straight back at the device, which is an actuation nobody asked
-        # for (CLAUDE.md: restoring state sets the UI only).
+        # for (restoring state sets the UI only, never hardware).
         self.mod_enable_btn.blockSignals(True)
         self.mod_enable_btn.setChecked(on)
         self.mod_enable_btn.blockSignals(False)
@@ -2501,6 +2547,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         card = CollapsibleCard("Coils", collapsed=True)
         self.coils_card = card
         layout = card.content_layout
+        self.coil_readback_label = self._supply_readback_label(layout)
 
         self.mot_coil_voltage_slider, self.mot_coil_voltage_edit = add_slider_row(
             layout,
@@ -2556,6 +2603,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         card = CollapsibleCard("Dispenser", collapsed=True)
         self.dispenser_card = card
         layout = card.content_layout
+        self.dispenser_readback_label = self._supply_readback_label(layout)
 
         self.dispenser_voltage_slider, self.dispenser_voltage_edit = (
             add_slider_row(
@@ -2608,7 +2656,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             layout,
             "Fire Time:",
             int(DispenserWorker.MIN_FIRE_SECONDS),
-            120,
+            int(DispenserWorker.MAX_FIRE_SECONDS),
             int(round(self._dispenser_fire_seconds)),
             single=1,
             page=5,
@@ -2753,9 +2801,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._tip(
             "Repump VCO output frequency. Set with the DAC Click's tune\n"
             f"voltage, whose 0-5 V spans {VCO_FREQ_MIN_MHZ:.0f}-"
-            f"{VCO_FREQ_MAX_MHZ:.0f} MHz linearly. The slider adopts the\n"
-            f"hardware value on connect. The slider covers only "
-            f"{REPUMP_SLIDER_MIN_MHZ:.0f}-{REPUMP_SLIDER_MAX_MHZ:.0f} MHz.",
+            f"{VCO_FREQ_MAX_MHZ:.0f} MHz on the VCO datasheet's typical\n"
+            "+25 C curve (a typical part: expect a few MHz of error).\n"
+            "The slider adopts the "
+            "hardware value on connect.",
             self.vtune_slider,
             self.vtune_edit,
         )
@@ -2801,6 +2850,38 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         row.addWidget(edit, stretch=1)
         layout.addLayout(row)
         return edit
+
+    def _supply_readback_label(self, layout):
+        # What the supply itself reports, from its poll. The sliders are
+        # the app's setpoints, so on loading they said nothing about what
+        # the supply was doing (operator, 2026-11-10).
+        label = QtWidgets.QLabel("Supply: no reading yet")
+        label.setStyleSheet(
+            "color: #ababab; font-size: 12px; font-weight: 600; border: none;"
+        )
+        layout.addWidget(label)
+        self._tip(
+            "Read back from the supply every poll: output state, measured\n"
+            "voltage and current, and the setpoints the supply holds.",
+            label,
+        )
+        return label
+
+    @staticmethod
+    def _supply_readback_text(state):
+        held = (
+            f"set {state.get('v_set', 0.0):.1f} V, "
+            f"{state.get('i_set', 0.0):.2f} A"
+        )
+        trip = DPS_PROTECTION.get(int(state.get("protection", 0) or 0))
+        if trip:
+            return f"Supply: TRIP ({trip}) · {held}"
+        if state.get("output_enabled"):
+            return (
+                f"Supply: ON · {state.get('v_out', 0.0):.2f} V · "
+                f"{state.get('i_out', 0.0):.2f} A ({held})"
+            )
+        return f"Supply: OFF · {held}"
 
     @staticmethod
     def _small_label(text):
@@ -2918,11 +2999,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             outputs=[o.key for o in live],
             detail="; ".join(f"{o.label} {o.detail}" for o in live),
         )
-        self._set_chip(
-            "lock",
-            f"{len(live)} OUTPUT{'S' if len(live) != 1 else ''} WERE ON",
-            "#b9924f",
-        )
+        # Log only. It used to write "N OUTPUTS WERE ON" into the lock
+        # chip, which then hid the lock state (operator, 2026-11-10).
 
     # Three re-checks at 6 s covers three connect attempts 2 s apart; a
     # host that is simply off still gets reported, just later.
@@ -3066,6 +3144,22 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._start_serial_workers()
 
     def _stop_serial_workers(self):
+        # Only reconnects come here (teardown is _stop_hardware_workers), so
+        # the laser and the coils keep running: a stop with the default
+        # disable_on_stop cut both on every Auto-connect, which the app asks
+        # for whenever a port comes back. The new workers read the outputs
+        # back. The dispenser still goes off -- its auto-off timer lives in
+        # the worker being stopped.
+        kept = []
+        for attr in ("laser_worker", "mot_coil_worker"):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                worker.disable_on_stop = False
+                if hasattr(worker, "left_on_reason"):
+                    worker.left_on_reason = "reconnect"
+                kept.append(attr)
+        if kept:
+            self._event_log.log("outputs_kept_across_reconnect", workers=kept)
         for attr in ("laser_worker", "mot_coil_worker", "dispenser_worker"):
             worker = getattr(self, attr, None)
             if worker is not None:
@@ -3290,9 +3384,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._event_log.log(
             "setpoint", name="sweep_speed_index", value=combo_index
         )
-        self.linien_widget.centre_lock_button.setEnabled(
-            self.sweep_speed_combo.currentData() is None
-        )
+        self._refresh_lock_buttons()
         worker = self._get_lock_worker()
         if worker is None:
             return
@@ -3320,15 +3412,118 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.sweep_speed_combo.blockSignals(False)
             self._settings.setValue("linien/sweep_speed_index", index)
             self._event_log.log("sweep_adopted", device_index=index, was_ui_index=was)
-        self.linien_widget.centre_lock_button.setEnabled(paused)
+        self._refresh_lock_buttons()
+
+    def _lock_prerequisites_missing(self):
+        """What has to be switched on before a lock can be started.
+
+        A lock, a phase optimisation, a target-line selection or a lock PSD
+        with the modulation or the repump off measures nothing: on the
+        bench Optimize phase with the modulation off moved Mod Phase on
+        pure noise (operator, 2026-11-10).
+        """
+        missing = []
+        mod = getattr(self, "mod_enable_btn", None)
+        if mod is None or not mod.isChecked():
+            missing.append("Modulation")
+        gate = getattr(self, "repump_gpio_btn", None)
+        if gate is None or not gate.isChecked():
+            missing.append("Repump")
+        return missing
+
+    def _refresh_lock_buttons(self):
+        """The one place that decides which lock-start buttons are usable.
+
+        All three need the Red Pitaya connected and Modulation and Repump
+        on; Lock at center and Optimize phase also need the sweep held;
+        none while a lock action runs. A click that could only be refused
+        is greyed instead, with the reason on the hint line.
+        """
+        lw = getattr(self, "linien_widget", None)
+        if lw is None or not hasattr(lw, "center_lock_button"):
+            return
+        connected = self._rp_last_status.startswith("connected")
+        missing = self._lock_prerequisites_missing()
+        idle = not getattr(self, "_lock_action_running", False)
+        held = self.sweep_speed_combo.currentData() is None
+        ready = connected and idle and not missing
+        lw.lock_button.setEnabled(ready)
+        lw.center_lock_button.setEnabled(ready and held)
+        lw.phase_button.setEnabled(ready and held)
+        if self._psd_window is not None:
+            self._psd_window.set_lock_prerequisites(missing)
+        if not connected:
+            hint = "Connect the Red Pitaya to lock."
+        elif missing:
+            hint = f"Switch on {' and '.join(missing)} to lock."
+        else:
+            hint = ""
+        # Only a hint this method put there is replaced or cleared: a lock
+        # result on that line stays until the next action.
+        shown = lw.lock_message.text()
+        ours = shown == getattr(self, "_lock_hint", "")
+        if hint and (not shown or ours):
+            lw.show_lock_message(hint, problem=False)
+        elif not hint and shown and ours:
+            lw.show_lock_message("")
+        self._lock_hint = hint
+
+    def _hold_for_lock_action(self, busy):
+        """Hold what a running lock action reads and then restores.
+
+        A speed picked mid-Optimize-phase un-held the sweep under the probe,
+        and the action's `finally` then put the old speed back under a combo
+        showing the new one. Mod Phase is the value Optimize phase writes;
+        Load Config pushes sweep, phase and PID all at once. Each control
+        gets back the state it had, not a forced "enabled".
+        """
+        self._lock_action_running = bool(busy)
+        if busy:
+            self._held_for_action = {
+                w: w.isEnabled()
+                for w in (
+                    self.sweep_speed_combo,
+                    self.mod_phase_slider,
+                    self.load_config_btn,
+                )
+            }
+            self._held_for_action[self.mod_phase_edit] = (
+                not self.mod_phase_edit.isReadOnly()
+            )
+            for w in self._held_for_action:
+                if w is self.mod_phase_edit:
+                    # Read-only, not disabled: see _apply_mod_enabled.
+                    w.setReadOnly(True)
+                else:
+                    w.setEnabled(False)
+            return
+        for w, was in getattr(self, "_held_for_action", {}).items():
+            if w is self.mod_phase_edit:
+                w.setReadOnly(not was)
+            else:
+                w.setEnabled(was)
+        self._held_for_action = {}
+        self._refresh_lock_buttons()
 
     def _on_lock_state(self, locked):
-        if locked:
+        self._lock_engaged = bool(locked)
+        self._readback_seen.add("lock")
+        self._show_lock_chip()
+        self._event_log.log("lock", locked=bool(locked))
+
+    def _show_lock_chip(self):
+        """LOCKED, or UNLOCKED with the modulation state, and nothing else.
+
+        The modulation only matters while unlocked: it is what decides
+        whether a lock can be started (operator, 2026-11-10).
+        """
+        if "lock" not in getattr(self, "_readback_seen", ()):
+            return  # stays "LOCK --" until the server has said
+        if self._lock_engaged:
             self._set_chip("lock", "LOCKED", "#6f9e7c")
         else:
-            self._set_chip("lock", "UNLOCKED", "#b56a6a")
-        self._readback_seen.add("lock")
-        self._event_log.log("lock", locked=bool(locked))
+            mod = "ON" if self.mod_enable_btn.isChecked() else "OFF"
+            self._set_chip("lock", f"UNLOCKED · MODULATION {mod}", "#b56a6a")
 
     # ------------------------------------------------------------------
     # Koheron laser controls
@@ -3339,7 +3534,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # its state rather than a restored preference -- unless the diode
         # is dark, in which case the saved setpoints go the other way.
         self._readback_seen.add("laser")
-        if not bool(values.get("output_on", True)):
+        # The button is what shutdown and the startup report read, so it
+        # must show a diode that is already lit: it used to stay "Laser
+        # Off", and closing the app then left the laser on unasked.
+        # Signals blocked -- this reports the device, it writes nothing.
+        output_on = bool(values.get("output_on", True))
+        self.laser_btn.blockSignals(True)
+        self.laser_btn.setChecked(output_on)
+        self.laser_btn.blockSignals(False)
+        self._show_laser_output(output_on)
+        if not output_on:
             if self._restore_laser_setpoints():
                 return
         self.current_slider.blockSignals(True)
@@ -3387,13 +3591,17 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         return True
 
-    def _toggle_laser(self, checked):
-        self.laser_btn.setText("Laser On" if checked else "Laser Off")
+    def _show_laser_output(self, on):
+        self._schedule_laser_off_rule()
+        self.laser_btn.setText("Laser On" if on else "Laser Off")
         self._set_chip(
             "laser",
-            "LASER ON" if checked else "LASER OFF",
-            "#6f9e7c" if checked else self._CHIP_NEUTRAL,
+            "LASER ON" if on else "LASER OFF",
+            "#6f9e7c" if on else self._CHIP_NEUTRAL,
         )
+
+    def _toggle_laser(self, checked):
+        self._show_laser_output(checked)
         self._event_log.log("laser_output", on=bool(checked))
         worker = getattr(self, "laser_worker", None)
         if worker is not None:
@@ -3403,6 +3611,30 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # back on -- switching those on stays a deliberate act.
         if not checked:
             self._follow_laser_off()
+
+    def _apply_laser_off_rule(self):
+        """Laser off means Modulation and Repump off (operator, 2026-11-10).
+
+        Both buttons are greyed while the Koheron reports the diode dark,
+        and either one found on then -- a readback at connect, say -- is
+        switched off, which writes to the Red Pitaya. Nothing is enforced
+        before the Koheron has answered: "not connected" is not "off".
+        Scheduled rather than called from the readback handlers, which
+        update these buttons with signals blocked: switching one off in
+        there would move the button and never send the write.
+        """
+        laser_off = (
+            "laser" in self._readback_seen and not self.laser_btn.isChecked()
+        )
+        for attr in ("mod_enable_btn", "repump_gpio_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(not laser_off)
+        if laser_off:
+            self._follow_laser_off()
+
+    def _schedule_laser_off_rule(self):
+        QtCore.QTimer.singleShot(0, self._apply_laser_off_rule)
 
     def _follow_laser_off(self):
         for attr, reason_key in (
@@ -3489,7 +3721,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _set_dispenser_fire(self, current_a, seconds):
         self._dispenser_fire_current = float(current_a)
-        self._dispenser_fire_seconds = float(seconds)
+        self._dispenser_fire_seconds = max(
+            DispenserWorker.MIN_FIRE_SECONDS,
+            min(float(seconds), DispenserWorker.MAX_FIRE_SECONDS),
+        )
         self._settings.setValue(
             "dispenser/fire_current_a", self._dispenser_fire_current
         )
@@ -3569,12 +3804,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         else:
             self._set_chip("coils", "COILS OFF", "#ababab")
         self._readback_seen.add("coils")
+        self.coil_readback_label.setText(self._supply_readback_text(state))
         self._log_readback("coil", state)
 
     def _on_dispenser_readback(self, state):
         # No readback row on this card -- the fire button and the header
         # chip carry the state. Protections still reach the event log.
         self._readback_seen.add("dispenser")
+        self.dispenser_readback_label.setText(
+            self._supply_readback_text(state)
+        )
         self._log_readback("dispenser", state)
 
     def _sync_output_button(self, button, state, on_text, off_text, key):
@@ -3692,15 +3931,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _toggle_repump_sweep(self, checked):
         slider = self.vtune_slider
         if checked:
-            centre = slider.value()
+            center = slider.value()
             # Slider units are 0.1 MHz, so 100 is 10 MHz.
-            self._repump_sweep_lo = max(slider.minimum(), centre - 100)
-            self._repump_sweep_hi = min(slider.maximum(), centre + 100)
+            self._repump_sweep_lo = max(slider.minimum(), center - 100)
+            self._repump_sweep_hi = min(slider.maximum(), center + 100)
             self._repump_sweep_dir = 1
-            self._repump_sweep_expected = centre
+            self._repump_sweep_expected = center
             self._repump_sweep_timer.start()
             self.repump_sweep_btn.setText("Stop Sweep")
-            self._event_log.user("repump_sweep", on=True, centre_mhz=centre / 10.0)
+            self._event_log.user("repump_sweep", on=True, center_mhz=center / 10.0)
         else:
             self._repump_sweep_timer.stop()
             self.repump_sweep_btn.setText("Sweep ±10 MHz")
@@ -3769,6 +4008,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._readback_seen.discard("repump")
 
     def _on_repump_gpio_state(self, enabled):
+        # Logged on change, with what the laser was known to be doing: a
+        # repump on next to a dark laser was seen after a power cycle
+        # (operator, 2026-11-10) and nothing recorded the gate's state.
+        # The gate is active-low, so a rebooted Red Pitaya may bring it up
+        # open; this is the record that would show it.
+        if getattr(self, "_repump_logged", None) != bool(enabled):
+            self._repump_logged = bool(enabled)
+            self._event_log.readback(
+                "repump_gate", on=bool(enabled),
+                laser_known="laser" in self._readback_seen,
+                laser_on=self.laser_btn.isChecked(),
+            )
         # Same rule as the supplies: a readback must not overwrite a
         # button the user just pressed while the write is in flight.
         self._readback_seen.add("repump")
@@ -3791,6 +4042,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _set_repump_ui(self, on):
         self.repump_gpio_btn.setText("Repump On" if on else "Repump Off")
+        self._refresh_lock_buttons()
+        self._schedule_laser_off_rule()
         self._set_chip(
             "repump",
             "REPUMP ON" if on else "REPUMP OFF",
@@ -3882,21 +4135,20 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """
         self._server_stalled = bool(stalled)
         if stalled:
-            # The chip carries the word "stalled"; the row says Error like
-            # every other way a device stops being usable.
+            # The row says Error, with the reason on hover. The lock chip
+            # keeps showing the lock: "RP STALLED" there read as nonsense
+            # over a trace that was still moving (operator, 2026-11-10).
             self._set_usb_status_label(
                 self.rp_usb_status,
                 "error:server heartbeat stopped — it is wedged, restart it",
                 "rp",
             )
-            self._set_chip("lock", "RP STALLED", "#b9924f")
         else:
             # Restore what the connection actually last reported. Claiming
             # "connected" here would also silently bump DEVICES n/4.
             self._set_usb_status_label(
                 self.rp_usb_status, self._rp_last_status, "rp"
             )
-            self._set_chip("lock", "UNLOCKED", "#b56a6a")
 
     def _restart_linien_server(self):
         """Shut the server down and bring it back, without an SSH session."""
@@ -3930,9 +4182,24 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if worker is not None:
             try:
                 worker.client.connection.root.exposed_shutdown()
-            except Exception:
-                pass
+            except EOFError:
+                pass  # the server exiting mid-call: the expected answer
+            except Exception as e:
+                self._log_fault("linien", f"server shutdown request: {e}")
         self.linien_widget.stop()
+        # The other three clients point at the process being restarted.
+        # Their loops swallow the errors and keep running, so the
+        # "already running" guards in _start_vtune_worker/_start_gate_worker
+        # skipped them after the restart and repump tune, gate and PSD were
+        # dead until a full Connect. The new server brings the first two
+        # back through _on_linien_connection; PSD is recreated below.
+        for attr in ("vtune_worker", "repump_gpio_worker", "psd_worker"):
+            stale = getattr(self, attr, None)
+            if stale is not None:
+                stale.stop()
+                setattr(self, attr, None)
+        if self._psd_window is not None:
+            self._psd_window.set_worker(None)
 
         self.server_restart_worker = LinienServerRestartWorker(
             host=host, event_log=self._event_log
@@ -3952,9 +4219,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._event_log.log("linien_server_restarted", message=message)
         self._server_stalled = False
         self.linien_widget.start()
+        if self._psd_window is not None and self._psd_window.isVisible():
+            self._open_psd_window()  # a fresh PSD client for the new server
 
     def _on_linien_connection(self, status):
         self._rp_last_status = status
+        self._refresh_lock_buttons()
         self._set_usb_status_label(self.rp_usb_status, status, "rp")
         if status.startswith("connected"):
             # The server answered, so the two other clients to it have
@@ -4094,6 +4364,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         "output", "enabled", "locked", "lock", "firing", "fire_now",
     })
     _CONFIG_STATE_SUFFIXES = ("_on", "_enabled", "_output", "_locked")
+    # Match the suffix rule but switch no output: they choose which filter
+    # stage shapes the error signal. Dropping them lost the filter setup
+    # on every save and logged a fault for it.
+    _CONFIG_NOT_STATE_KEYS = frozenset({"filter_1_enabled", "filter_2_enabled"})
 
     def _reject_state_keys(self, config, path=()):
         """Drop any output state from a config, and say so.
@@ -4105,8 +4379,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         """
         for key in list(config):
             value = config[key]
-            if key in self._CONFIG_STATE_KEYS or key.endswith(
-                self._CONFIG_STATE_SUFFIXES
+            if key not in self._CONFIG_NOT_STATE_KEYS and (
+                key in self._CONFIG_STATE_KEYS
+                or key.endswith(self._CONFIG_STATE_SUFFIXES)
             ):
                 del config[key]
                 self._event_log.fault(
@@ -4318,7 +4593,8 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
             self.psd_worker.start()
         self._psd_window.set_worker(self.psd_worker)
-        self._psd_window.set_locked(self.chip_text("lock") == "LOCKED")
+        self._refresh_lock_buttons()  # carries Modulation/Repump to Start
+        self._psd_window.set_locked(self._lock_engaged)
         # Push the window's current settings so the server matches the UI.
         self._psd_window._on_algorithm_changed(
             self._psd_window.algo_combo.currentIndex()
@@ -4475,7 +4751,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 f"{self.current_slider.value() / 100.0:.2f} mA",
                 backed_by=source("laser"),
             ))
-        if self.chip_text("lock") == "LOCKED":
+        if self._lock_engaged:
             outputs.append(LiveOutput(
                 "lock", "Lock", "engaged",
                 backed_by=source("lock"),
@@ -4486,7 +4762,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         # the slider alone reported a dither that was not running.
         if self.mod_enable_btn.isChecked() and self.mod_strength_slider.value() > 0:
             outputs.append(LiveOutput(
-                "modulation", "Dither",
+                "modulation", "Modulation",
                 f"{self.mod_strength_slider.value() / 1000.0:.3f} Vpp",
                 backed_by=source("modulation"),
             ))
@@ -4577,9 +4853,6 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             probe.wait(3000)
         event.accept()
 
-
-# Backward-compatible name for scripts/tests that imported the first version.
-MOTControlWindow = OpenQuantumControlsWindow
 
 
 def quiet_console():

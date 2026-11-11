@@ -558,6 +558,19 @@ class PsdWindow(QtWidgets.QMainWindow):
         """
         self._locked = bool(locked)
 
+    def set_lock_prerequisites(self, missing):
+        """What the host says must be on first (Modulation, Repump).
+
+        A lock PSD with either off measures the wrong thing, so Start is
+        refused like an unlocked one (operator, 2026-11-10).
+        """
+        self._missing = list(missing)
+        self.start_btn.setEnabled(not self._missing)
+        self.start_btn.setToolTip(
+            f"Switch on {' and '.join(self._missing)} first."
+            if self._missing else ""
+        )
+
     def on_status(self, status):
         """Swap the run controls, as linien does on psd_acquisition_running."""
         self._locked = bool(status.get("locked"))
@@ -590,6 +603,15 @@ class PsdWindow(QtWidgets.QMainWindow):
         self._data[curve_uuid] = data
 
     def start_psd(self):
+        missing = getattr(self, "_missing", [])
+        if missing:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Not ready",
+                f"Switch on {' and '.join(missing)} before measuring the "
+                "lock PSD.",
+            )
+            return
         if not self._locked:
             QtWidgets.QMessageBox.critical(
                 self,

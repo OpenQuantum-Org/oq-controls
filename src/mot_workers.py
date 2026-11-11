@@ -85,10 +85,11 @@ class SerialPresenceWorker(QtCore.QThread):
     def __init__(self, poll_ms=None):
         super().__init__()
         self.poll_ms = int(poll_ms or self.POLL_MS)
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that
+        # landed mid-connect used to be undone and wait() hung.
+        self.running = True
 
     def run(self):
-        self.running = True
         last = None
         while self.running:
             try:
@@ -345,7 +346,9 @@ class RidenDPSWorker(QtCore.QThread):
         self.max_current = spec["max_current"]
         self.disable_on_stop = bool(disable_on_stop)
         self.poll_ms = int(poll_ms)
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that
+        # landed mid-connect used to be undone and wait() hung.
+        self.running = True
 
         self._client = None
         self._mutex = QtCore.QMutex()
@@ -357,7 +360,6 @@ class RidenDPSWorker(QtCore.QThread):
             self.connection_status.emit("no_port")
             return
 
-        self.running = True
         try:
             self._client = RidenDPSClient(
                 self.port,
@@ -399,7 +401,7 @@ class RidenDPSWorker(QtCore.QThread):
 
         if self.disable_on_stop and self._client is not None:
             # The safety-critical write of the whole class: this is what
-            # makes CLAUDE.md invariant 7 true, so it is logged even
+            # leaves the output off when the app goes, so it is logged even
             # though nothing is left alive to react to a failure.
             try:
                 with self.event_log.command(
@@ -524,6 +526,10 @@ class DispenserWorker(RidenDPSWorker):
     DISPENSE_CURRENT_A = 7.5
     DISPENSE_VOLTAGE_V = 5.0
     MIN_FIRE_SECONDS = 1.0
+    # With the re-fire lockout gone, the fire time is the only limit on how
+    # long 7.5 A flows, so it is bounded here, where it is enforced, and not
+    # only by the slider (a hand-edited setting bypassed the slider).
+    MAX_FIRE_SECONDS = 120.0
 
     def __init__(
         self,
@@ -535,12 +541,18 @@ class DispenserWorker(RidenDPSWorker):
     ):
         kwargs.setdefault("model", "DPS5020")
         super().__init__(*args, **kwargs)
-        self.fire_seconds = self._clamp_seconds(fire_seconds or self.FIRE_SECONDS)
+        # "is None", not "or": an operator's 0 A must stay ~0 A, not
+        # become the 7.5 A default on the next connect.
+        self.fire_seconds = self._clamp_seconds(
+            self.FIRE_SECONDS if fire_seconds is None else fire_seconds
+        )
         self.dispense_current_a = self._clamp_current(
-            dispense_current_a or self.DISPENSE_CURRENT_A
+            self.DISPENSE_CURRENT_A if dispense_current_a is None
+            else dispense_current_a
         )
         self.dispense_voltage_v = self._clamp_voltage(
-            dispense_voltage_v or self.DISPENSE_VOLTAGE_V
+            self.DISPENSE_VOLTAGE_V if dispense_voltage_v is None
+            else dispense_voltage_v
         )
         self._phase = "idle"
         self._fire_end = 0.0
@@ -553,7 +565,9 @@ class DispenserWorker(RidenDPSWorker):
         return max(0.0, min(float(volts), self.max_voltage))
 
     def _clamp_seconds(self, seconds):
-        return max(self.MIN_FIRE_SECONDS, float(seconds))
+        return max(
+            self.MIN_FIRE_SECONDS, min(float(seconds), self.MAX_FIRE_SECONDS)
+        )
 
     # --- GUI-thread interface ---
 
@@ -860,7 +874,9 @@ class DacClickWorker(QtCore.QThread):
         self.max_voltage = float(max_voltage)
         self.username = username
         self.password = password
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that
+        # landed mid-connect used to be undone and wait() hung.
+        self.running = True
 
         self._client = None
         self._parameter = None
@@ -901,7 +917,6 @@ class DacClickWorker(QtCore.QThread):
             self.connection_status.emit(f"error:{e}")
             return
 
-        self.running = True
         ticks = 0
         while self.running:
             try:
@@ -983,7 +998,9 @@ class PsdWorker(QtCore.QThread):
         self.host = host
         self.username = username
         self.password = password
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that
+        # landed mid-connect used to be undone and wait() hung.
+        self.running = True
 
         self._client = None
         self._mutex = QtCore.QMutex()
@@ -1014,7 +1031,6 @@ class PsdWorker(QtCore.QThread):
             self.connection_status.emit(f"error:{e}")
             return
 
-        self.running = True
         while self.running:
             try:
                 drain_parameter_queue(self._client)
@@ -1172,7 +1188,9 @@ class LinienGpioWorker(QtCore.QThread):
         self.username = username
         self.password = password
         self.disable_on_stop = bool(disable_on_stop)
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that
+        # landed mid-connect used to be undone and wait() hung.
+        self.running = True
 
         self._client = None
         self._parameter = None
@@ -1214,7 +1232,6 @@ class LinienGpioWorker(QtCore.QThread):
             self.connection_status.emit(f"error:{e}")
             return
 
-        self.running = True
         while self.running:
             try:
                 drain_parameter_queue(self._client)
@@ -1236,10 +1253,15 @@ class LinienGpioWorker(QtCore.QThread):
             self.msleep(250)
 
         if self.disable_on_stop:
+            # Through command(), like the DPS stop write: a gate left on
+            # at exit has to show in the log, not vanish in a bare except.
             try:
-                self._write_state(False)
+                with self.event_log.command(
+                    "repump.gate", enabled=False, reason="worker_stop"
+                ):
+                    self._write_state(False)
             except Exception:
-                pass
+                pass  # recorded by command(); nothing left to react
 
     def stop(self):
         self.running = False
@@ -1297,6 +1319,9 @@ class LaserSetpointWorker(QtCore.QThread):
         # Cleared by the shutdown dialog when the operator chooses to
         # leave the laser running past the app.
         self.disable_on_stop = bool(disable_on_stop)
+        # Why the output is left as it is, for the log: a reconnect is
+        # not the operator choosing to leave the laser on.
+        self.left_on_reason = "operator_choice"
         self._port = port
         self._baudrate = baudrate
         self._ser = None
@@ -1375,7 +1400,7 @@ class LaserSetpointWorker(QtCore.QThread):
             except Exception:
                 pass
         else:
-            self.event_log.log("laser_left_on", reason="operator_choice")
+            self.event_log.log("laser_left_on", reason=self.left_on_reason)
         if self._ser and self._ser.is_open:
             self._ser.close()
         self.wait()
@@ -1397,7 +1422,7 @@ class LinienServerRestartWorker(QtCore.QThread):
     **Only ever calls ``start_remote_server``.** linien-gui's
     ``install_remote_server`` runs ``pip3 uninstall linien-server -y``,
     which would destroy the hand-applied dac_click_voltage patch on this
-    device (see CLAUDE.md).
+    device (README, section 1, "Red Pitaya").
 
     Signals:
         finished_ok(bool, str): success flag and a message for the log.

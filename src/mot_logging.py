@@ -429,7 +429,7 @@ class EventLog:
                     f.write(line)
         except Exception:
             # Nowhere left to report this: stdout is not a fault path
-            # (CLAUDE.md invariant 4) and raising would take down the
+            # (a windowed build has none) and raising would take down the
             # caller over a logging problem.
             pass
 

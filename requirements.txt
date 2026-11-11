@@ -1,9 +1,12 @@
-pyqtgraph>=0.13
-PyQt6>=6.5
-superqt>=0.6
-numpy
-scipy>=1.10
-pyserial>=3.5
+# Pinned to the versions the bench venv runs, so a release build is the app
+# that was tested. Bump deliberately, one at a time, and re-run the suites.
+pyqtgraph==0.14.0
+PyQt6==6.11.0
+superqt==0.8.2
+# linien-common 2.1.0 caps numpy<2; 1.26 has no wheels past Python 3.12.
+numpy==1.26.4
+scipy==1.17.1
+pyserial==3.5
 # Pinned, not floated: the Red Pitaya runs a hand-patched linien-server 2.1.0
 # and the client checks the server's version on connect. A newer client raises
 # InvalidServerVersionException, and the paths that respond to that reinstall

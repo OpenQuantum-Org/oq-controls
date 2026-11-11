@@ -51,7 +51,6 @@ APP_STYLESHEET = """
         font-size: 13px;
         font-weight: 600;
         letter-spacing: 1px;
-        text-transform: uppercase;
         padding: 6px 12px 4px 12px;
         border: none;
     }
@@ -166,48 +165,6 @@ APP_STYLESHEET = """
     }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
         height: 0px;
-    }
-"""
-
-# ---------------------------------------------------------------------------
-# Lock indicator
-# ---------------------------------------------------------------------------
-LOCK_INDICATOR_LOCKED = """
-    QFrame {
-        background-color: rgba(30, 200, 100, 15);
-        border: 1px solid rgba(30, 200, 100, 60);
-        border-radius: 0px;
-    }
-"""
-LOCK_INDICATOR_UNLOCKED = """
-    QFrame {
-        background-color: rgba(200, 60, 60, 12);
-        border: 1px solid rgba(200, 60, 60, 40);
-        border-radius: 0px;
-    }
-"""
-LOCK_LABEL_LOCKED = "color: #6f9e7c; font-size: 13px; font-weight: 700; border: none; letter-spacing: 1px;"
-LOCK_LABEL_UNLOCKED = "color: #b56a6a; font-size: 13px; font-weight: 700; border: none; letter-spacing: 1px;"
-
-PD_READOUT_STYLE = "color: white; font-size: 20px; font-weight: 700; border: none;"
-
-# ---------------------------------------------------------------------------
-# Big editable number fields
-# ---------------------------------------------------------------------------
-BIG_READOUT_STYLE = """
-    QLineEdit {
-        background: #111111;
-        color: white;
-        border: 1px solid #2e2e2e;
-        border-radius: 0px;
-        font-size: 20px;
-        font-weight: 700;
-        font-family: "Space Grotesk";
-        padding: 4px 8px;
-    }
-    QLineEdit:focus {
-        border-color: #5e5e5e;
-        background: #141414;
     }
 """
 

@@ -75,16 +75,20 @@ class LinienWidget(QtWidgets.QWidget):
     modulation_state = QtCore.pyqtSignal(object)
     # (paused, speed index) found on the server at connect -- see LinienWorker.
     sweep_state = QtCore.pyqtSignal(object)
+    # Mod Phase chosen by Optimise phase, already written to the server.
+    phase_applied = QtCore.pyqtSignal(int)
+    # True while a lock action runs, so the window can hold the controls
+    # that action reads and restores (speed, Mod Phase, Load Config).
+    action_running = QtCore.pyqtSignal(bool)
 
     def __init__(self, linien_host=None, show_lock_buttons=True,
-                 show_stop_button=False, sweep_range=(-1.0, 1.0),
+                 sweep_range=(-1.0, 1.0),
                  v_to_freq_ghz=None, v_to_mhz=None, event_log=None,
                  parent=None):
         super().__init__(parent)
         self._event_log = event_log
         self._linien_host = linien_host or DEFAULT_RP_HOST
         self._show_lock_buttons = show_lock_buttons
-        self._show_stop_button = show_stop_button
         self._sweep_min_v, self._sweep_max_v = sweep_range
         self._v_to_freq = v_to_freq_ghz  # GHz per Volt, or None
         self._v_to_mhz = v_to_mhz        # callable(v) → MHz, or None
@@ -144,8 +148,8 @@ class LinienWidget(QtWidgets.QWidget):
         self.pg_widget.addItem(slider_proxy, row=0, col=0)
         self.xrange_slider.valueChanged.connect(self._update_range)
 
-        # --- Sweep centre ---
-        # The range slider sets centre and span together, at its own 1 mV
+        # --- Sweep center ---
+        # The range slider sets center and span together, at its own 1 mV
         # granularity and only by dragging. This is linien's
         # sweepCenterSpinBox (main_window.ui:124), with 3 decimals -- but
         # stepping 0.001 V rather than linien's 0.1, so one arrow click is
@@ -193,7 +197,7 @@ class LinienWidget(QtWidgets.QWidget):
                looking like every other spin box in the app. */
         """)
         self.sweep_center_spin.setToolTip(
-            "Centre of the sweep, in output volts. The span stays as it is, "
+            "Center of the sweep, in output volts. The span stays as it is, "
             "so this slides the window along without rescaling it."
         )
         self.sweep_center_spin.valueChanged.connect(self._on_center_spin)
@@ -219,12 +223,21 @@ class LinienWidget(QtWidgets.QWidget):
             self.plot.setLabel("bottom", "Sweep Voltage (V)",
                                **plot_label_style())
             # Same reason as the left axis: no "(x0.001)" rescaling. Lock
-            # points differ by single mV, so the ticks carry the digits.
+            # points differ by single mV, so the ticks carry the digits --
+            # as many decimals as the tick spacing needs. A fixed "{:.2e}"
+            # kept three significant figures, so zoomed in near 0.5 V
+            # neighbouring ticks all read "5.01e-01".
             bottom = self.plot.getAxis("bottom")
             bottom.enableAutoSIPrefix(False)
-            bottom.tickStrings = lambda values, scale, spacing: [
-                f"{v:.2e}" for v in values
-            ]
+
+            def volt_ticks(values, scale, spacing):
+                places = (
+                    max(0, int(np.ceil(-np.log10(spacing) - 1e-9)))
+                    if spacing > 0 else 3
+                )
+                return [f"{v:.{places}f}" for v in values]
+
+            bottom.tickStrings = volt_ticks
 
         # pyqtgraph's own auto-range button: a small "A" that appears over
         # the plot on hover. Autozoom replaces it.
@@ -281,9 +294,9 @@ class LinienWidget(QtWidgets.QWidget):
         )
         self.plot.addItem(self.zero_line)
 
-        # Sweep centre, so the centre box has a place on the trace. Amber
+        # Sweep center, so the center box has a place on the trace. Amber
         # and dashed, clear of the blue/purple traces: it is where Lock at
-        # centre will lock, so it has to be findable at a glance.
+        # center will lock, so it has to be findable at a glance.
         self.center_line = pg.InfiniteLine(
             pos=self._v_to_display(self.sweep_center_spin.value()), angle=90,
             pen=pg.mkPen(color=(235, 180, 70, 200), style=QtCore.Qt.DashLine, width=2),
@@ -301,6 +314,7 @@ class LinienWidget(QtWidgets.QWidget):
         self._touch_start = None
         self._plot_paused = False
         self._last_error_signal = None
+        self._last_voltages = None
         # Display-coordinate copy of the most recent *sweeping* frame, and
         # the lock state of the frame before this one, so the transition
         # into lock can be spotted and the sweep frozen at that moment.
@@ -364,19 +378,20 @@ class LinienWidget(QtWidgets.QWidget):
         # asked for it. Cleared by the next request or a lock engaging.
         self.lock_message = QtWidgets.QLabel()
         self.lock_message.setWordWrap(True)
-        self.lock_message.setStyleSheet(
-            "color: #d9b26f; font-size: 12px; font-weight: 600;"
-            " border: none; border-left: 2px solid #b9924f;"
-            " padding: 2px 0px 2px 8px;"
-        )
+        self._lock_message_styles = {
+            # Something asked for did not happen.
+            True: "color: #d9b26f; border-left: 2px solid #b9924f;",
+            # A result worth reading, not a problem.
+            False: "color: #c4c4c4; border-left: 2px solid #5a5a5a;",
+        }
         self.lock_message.setVisible(False)
         lock_column.addWidget(self.lock_message)
-        # Set by Lock at centre: only then is the centre the lock target,
-        # so only then does "mV from centre" mean anything.
-        self._centre_locked = False
+        # Set by Lock at center: only then is the center the lock target,
+        # so only then does "mV from center" mean anything.
+        self._center_locked = False
         # Live control voltage while locked: the carrier's frequency proxy,
-        # read against the Sweep centre that gave a MOT with the sweep
-        # paused (pause zeroes the ramp, so output = centre).
+        # read against the Sweep center that gave a MOT with the sweep
+        # paused (pause zeroes the ramp, so output = center).
         self.control_label = QtWidgets.QLabel()
         self.control_label.setStyleSheet(
             "color: #e6e6e6; font-size: 13px; font-weight: 700;"
@@ -384,27 +399,39 @@ class LinienWidget(QtWidgets.QWidget):
         self.control_label.setVisible(False)
         self.control_label.setToolTip(
             "The voltage the lock is driving the laser with. After Lock at "
-            "centre, the bracket shows how far that is from Sweep Centre: a "
+            "center, the bracket shows how far that is from Sweep Center: a "
             "good lock stays within a few mV."
         )
         lock_row.addWidget(self.control_label)
         if self._show_lock_buttons:
+            # First: the operator's lock method (find the MOT, then lock).
+            self.center_lock_button = QtWidgets.QPushButton("Lock at center")
+            self.center_lock_button.setCursor(QtCore.Qt.PointingHandCursor)
+            self.center_lock_button.setToolTip(
+                "Set Sweep Speed to 0 Hz (hold) with the Sweep Center where "
+                "the MOT is, then press. Offsets the "
+                "error to zero at the Sweep Center and locks there, on "
+                "whatever slope the error has at that point."
+            )
+            self.center_lock_button.clicked.connect(self._run_center_lock)
+            lock_row.addWidget(self.center_lock_button)
+
             # linien's wording: you pick a line, the lock follows.
             self.lock_button = QtWidgets.QPushButton("Select target line")
             self.lock_button.setCursor(QtCore.Qt.PointingHandCursor)
             self.lock_button.clicked.connect(self._run_lock)
             lock_row.addWidget(self.lock_button)
 
-            self.centre_lock_button = QtWidgets.QPushButton("Lock at centre")
-            self.centre_lock_button.setCursor(QtCore.Qt.PointingHandCursor)
-            self.centre_lock_button.setToolTip(
-                "Set Sweep Speed to 0 Hz (hold) with the Sweep Centre where "
-                "the MOT is, then press. Offsets the "
-                "error to zero at the Sweep Centre and locks there, on "
-                "whatever slope the error has at that point."
+            self.phase_button = QtWidgets.QPushButton("Optimize phase")
+            self.phase_button.setCursor(QtCore.Qt.PointingHandCursor)
+            self.phase_button.setToolTip(
+                "With the sweep held at the MOT: measure the error signal\n"
+                "across ±20 mV of Sweep Center and set Mod Phase to give\n"
+                "the steepest slope there. About 3 s; the MOT blinks while\n"
+                "the laser steps. Then press Lock at center."
             )
-            self.centre_lock_button.clicked.connect(self._run_centre_lock)
-            lock_row.addWidget(self.centre_lock_button)
+            self.phase_button.clicked.connect(self._run_optimise_phase)
+            lock_row.addWidget(self.phase_button)
 
             # Shown only while a selection is in progress, as linien swaps
             # auto_mode_not_activated for auto_mode_activated.
@@ -421,12 +448,6 @@ class LinienWidget(QtWidgets.QWidget):
 
             self.selection_state_changed.connect(self._on_selection_state)
             self._set_locked_ui(False)
-
-        if self._show_stop_button:
-            self.stop_sweep_btn = QtWidgets.QPushButton("Stop Sweep")
-            self.stop_sweep_btn.setCursor(QtCore.Qt.PointingHandCursor)
-            self.stop_sweep_btn.clicked.connect(self._stop_sweep)
-            lock_row.addWidget(self.stop_sweep_btn)
 
     # --- Voltage ↔ display coordinate helpers ---
 
@@ -475,6 +496,11 @@ class LinienWidget(QtWidgets.QWidget):
         self.linien_thread.modulation_state.connect(self.modulation_state.emit)
         self.linien_thread.sweep_state.connect(self.sweep_state.emit)
         self.linien_thread.lock_feedback.connect(self.show_lock_message)
+        self.linien_thread.action_busy.connect(self._on_action_busy)
+        self.linien_thread.lock_note.connect(
+            lambda msg: self.show_lock_message(msg, problem=False)
+        )
+        self.linien_thread.phase_applied.connect(self.phase_applied.emit)
         self.linien_thread.start()
 
     def _on_connection_status(self, status):
@@ -518,6 +544,7 @@ class LinienWidget(QtWidgets.QWidget):
         self.frame.emit(data)
         # Keep the newest spectrum for the autolock even while paused.
         self._last_error_signal = err
+        self._last_voltages = voltages
         if self._plot_paused and self._touch_start is None:
             # Paused with no drag in progress: the release that should
             # have resumed it never arrived (the cursor left the widget,
@@ -567,9 +594,9 @@ class LinienWidget(QtWidgets.QWidget):
         control_mean = data.get("control_mean")
         if control_mean is not None:
             text = f"Control {control_mean:+.3f} V"
-            centre = data.get("center")
-            if self._centre_locked and centre is not None:
-                text += f"  ({(control_mean - centre) * 1000:+.1f} mV)"
+            center = data.get("center")
+            if self._center_locked and center is not None:
+                text += f"  ({(control_mean - center) * 1000:+.1f} mV)"
             self.control_label.setText(text)
             self.control_label.setVisible(True)
 
@@ -618,18 +645,18 @@ class LinienWidget(QtWidgets.QWidget):
         self._frozen_shown = False
 
     def _on_center_spin(self, center):
-        """Slide the sweep window to a new centre, keeping its span."""
+        """Slide the sweep window to a new center, keeping its span."""
         slider_min, slider_max = self.xrange_slider.value()
         amplitude = (slider_max - slider_min) / 2000.0
         # Keep the whole span inside the slider's bounds rather than
-        # letting one edge run off: a centre the sweep cannot reach would
+        # letting one edge run off: a center the sweep cannot reach would
         # show as a plot that stops following the box.
         center = max(self._sweep_min_v + amplitude,
                      min(self._sweep_max_v - amplitude, center))
         self._set_sweep_window(center, amplitude)
 
     def _set_sweep_window(self, center, amplitude):
-        """Push one sweep centre/span to the server and to both controls."""
+        """Push one sweep center/span to the server and to both controls."""
         x_min, x_max = center - amplitude, center + amplitude
         self.xrange_slider.blockSignals(True)
         self.xrange_slider.setValue((int(round(x_min * 1000)),
@@ -642,7 +669,7 @@ class LinienWidget(QtWidgets.QWidget):
         self.plot.setXRange(d_min, d_max, padding=0)
 
     def _sync_center_spin(self, center):
-        """Show a centre that came from somewhere else, without echoing it."""
+        """Show a center that came from somewhere else, without echoing it."""
         self.sweep_center_spin.blockSignals(True)
         self.sweep_center_spin.setValue(center)
         self.sweep_center_spin.blockSignals(False)
@@ -693,21 +720,77 @@ class LinienWidget(QtWidgets.QWidget):
         if self.linien_thread is None:
             return
         self.show_lock_message("")
-        self._centre_locked = False
+        self._center_locked = False
         self.start_selection()
 
-    def _run_centre_lock(self):
+    def _run_center_lock(self):
         if self.linien_thread is None:
             return
         self.abort_selection()
         self.show_lock_message("")
-        self._centre_locked = True
-        self.lock_requested.emit(("centre",))
-        self.linien_thread.lock_at_centre()
+        self._center_locked = True
+        self.lock_requested.emit(("center",))
+        self.linien_thread.lock_at_center()
 
-    def show_lock_message(self, message):
+    def show_lock_message(self, message, problem=True):
+        self.lock_message.setStyleSheet(
+            self._lock_message_styles[problem]
+            + " font-size: 12px; font-weight: 600; border-top: none;"
+            " border-right: none; border-bottom: none; padding: 2px 0px 2px 8px;"
+        )
         self.lock_message.setText(message)
         self.lock_message.setVisible(bool(message))
+
+    def _on_action_busy(self, label):
+        """Grey the lock buttons while a lock action runs on its thread.
+
+        The window stays live, so without this a second click would queue
+        an action on top of the first. Each button's enabled state is put
+        back afterwards, not forced on: Lock at center and Optimize phase
+        are only enabled with the sweep held.
+
+        The sweep controls are held too: the actions read center and speed
+        at the start and restore them in `finally`, so a nudge to Sweep
+        Center mid-probe was overwritten and the lock engaged at the old
+        center under a box showing the new one.
+        """
+        busy = bool(label)
+        for w in (self.xrange_slider, self.sweep_center_spin):
+            if busy:
+                w.setProperty("_enabled_before_action", w.isEnabled())
+                w.setEnabled(False)
+            else:
+                was = w.property("_enabled_before_action")
+                w.setEnabled(True if was is None else bool(was))
+        if self._show_lock_buttons:
+            buttons = (self.center_lock_button, self.lock_button,
+                       self.phase_button, self.unlock_button)
+            if busy:
+                self._enabled_before = {b: b.isEnabled() for b in buttons}
+                for b in buttons:
+                    b.setEnabled(False)
+                self._working_text = f"{label}…"
+                self.show_lock_message(self._working_text, problem=False)
+            else:
+                for b, was in getattr(self, "_enabled_before", {}).items():
+                    b.setEnabled(was)
+                self._enabled_before = {}
+                # A problem or result reported at the end replaced the
+                # working line; only clear it if nothing did.
+                if self.lock_message.text() == getattr(
+                    self, "_working_text", None
+                ):
+                    self.show_lock_message("")
+        # Last, so the window's own rules (modulation and repump on, sweep
+        # held) have the final say over the restored states above.
+        self.action_running.emit(busy)
+
+    def _run_optimise_phase(self):
+        if self.linien_thread is None:
+            return
+        self.abort_selection()
+        self.show_lock_message("")
+        self.linien_thread.optimise_phase()
 
     def _run_unlock(self):
         self.abort_selection()
@@ -846,13 +929,18 @@ class LinienWidget(QtWidgets.QWidget):
         itself in raw counts, which is what the autolock needs.
         """
         spectrum = self._last_error_signal
-        if self.linien_thread is None or spectrum is None:
+        voltages = self._last_voltages
+        if self.linien_thread is None or spectrum is None or voltages is None:
             return
         n = int(np.asarray(spectrum).size)
-        if n < 4:
+        if n < 4 or np.asarray(voltages).size != n:
             return
+        # Against the span this spectrum was swept over (center ±
+        # amplitude), not the slider's full ±1 V: with a 0.1 V sweep the
+        # old mapping handed the autolock a slice ~10x too narrow, in the
+        # wrong place.
         xmin, xmax = self._v_range_to_display(
-            self._sweep_min_v, self._sweep_max_v
+            float(voltages[0]), float(voltages[-1])
         )
         span = xmax - xmin
         if span == 0:
@@ -879,7 +967,8 @@ class LinienWidget(QtWidgets.QWidget):
         if not self._show_lock_buttons:
             return
         self.lock_button.setVisible(not selecting)
-        self.centre_lock_button.setVisible(not selecting)
+        self.center_lock_button.setVisible(not selecting)
+        self.phase_button.setVisible(not selecting)
         self.abort_button.setVisible(selecting)
 
     def _set_locked_ui(self, locked: bool):
@@ -889,13 +978,10 @@ class LinienWidget(QtWidgets.QWidget):
             # A lock engaging ends any selection still in progress.
             self.abort_selection()
         self.lock_button.setVisible(not locked and not self.selection_running)
-        self.centre_lock_button.setVisible(not locked and not self.selection_running)
+        self.center_lock_button.setVisible(not locked and not self.selection_running)
+        self.phase_button.setVisible(not locked and not self.selection_running)
         self.abort_button.setVisible(self.selection_running)
         self.unlock_button.setVisible(locked)
-
-    def _stop_sweep(self):
-        if self.linien_thread is not None:
-            self.linien_thread.stop_sweep()
 
     def set_host(self, host):
         """Change the Linien host and reconnect."""

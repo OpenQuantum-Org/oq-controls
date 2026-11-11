@@ -24,3 +24,6 @@ fonts/Aptos*
 
 # Local bench data: PSD exports, saved configs
 dev/
+
+# Per-user Claude Code permissions; only a global ignore covered it before
+.claude/settings.local.json

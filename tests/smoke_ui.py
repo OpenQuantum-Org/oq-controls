@@ -90,10 +90,9 @@ pg.setConfigOptions(
     useOpenGL=False, enableExperimental=False, foreground="#c8c8da"
 )
 
-# Both bundled families must register (byte-based loading â€” the
+# The bundled family must register (byte-based loading -- the
 # path-based Qt API silently fails on this Qt build).
 assert "Space Grotesk" in QtGui.QFontDatabase.families()
-assert "IBM Plex Sans" in QtGui.QFontDatabase.families()
 
 # Inputs are explicitly themed: spinboxes must not fall back to the
 # platform palette (black-on-dark). The outline is a muted grey rather
@@ -307,7 +306,9 @@ try:
         assert slider.singleStep() == 100, (edit.text(), slider.singleStep())
 
     # Typed entry: the value boxes now drive the sliders (with clamping,
-    # suffix tolerance, and garbage rejection).
+    # suffix tolerance, and garbage rejection). Unlocked first: a locked
+    # box commits nothing (it wrote to the Koheron on focus-out once).
+    window.laser_unlock_box.setChecked(True)
     window.current_slider.setValue(9000)
     window.current_edit.setText("95")
     window.current_edit.editingFinished.emit()
@@ -322,10 +323,13 @@ try:
     window.current_edit.editingFinished.emit()
     assert window.current_slider.value() == 10000  # clamped to slider max
     assert window.current_edit.text() == "100.00 mA"
+    window.laser_unlock_box.setChecked(False)
+    window._apply_mod_enabled(True)  # UI only: the boxes are editable
     window.mod_freq_edit.setText("17.5 MHz")
     window.mod_freq_edit.editingFinished.emit()
     assert window.mod_freq_slider.value() == 17500
     assert window.mod_freq_edit.text() == "17.500 MHz"
+    window._apply_mod_enabled(False)
     window.vtune_slider.setValue(28500)
     window.vtune_edit.setText("garbage")
     window.vtune_edit.editingFinished.emit()
@@ -396,7 +400,20 @@ try:
     window._on_lock_state(True)
     assert window.chip_text("lock") == "LOCKED"
     window._on_lock_state(False)
-    assert window.chip_text("lock") == "UNLOCKED"
+    # Unlocked, the chip names the modulation: it decides whether a lock
+    # can start. Only lock and modulation ever appear here.
+    assert window.chip_text("lock") == "UNLOCKED · MODULATION OFF"
+    window._apply_mod_enabled(True)
+    window.mod_enable_btn.blockSignals(True)
+    window.mod_enable_btn.setChecked(True)
+    window.mod_enable_btn.blockSignals(False)
+    window._show_lock_chip()
+    assert window.chip_text("lock") == "UNLOCKED · MODULATION ON"
+    window.mod_enable_btn.blockSignals(True)
+    window.mod_enable_btn.setChecked(False)
+    window.mod_enable_btn.blockSignals(False)
+    window._apply_mod_enabled(False)
+    assert window.chip_text("lock") == "UNLOCKED · MODULATION OFF"
 
     # The laser setpoint is a temperature; the ohms the Koheron wants are
     # derived from it and are what gets persisted.
@@ -440,11 +457,39 @@ try:
     # The clamp check above left the current slider pinned at its maximum,
     # where Up cannot move it.
     window.current_slider.setValue(8000)
+    # Locked setpoints ignore the keys: PageUp in the locked Current box
+    # once wrote 1 mA to a running diode (setValue works on a disabled
+    # slider).
+    assert not window.laser_unlock_box.isChecked()
+    # Clicking away from a locked box (editingFinished) must not write
+    # either: on the bench it sent current and 9077 ohm to the Koheron.
+    sent = []
+    window.laser_worker = types.SimpleNamespace(
+        set_current=lambda ma: sent.append(("current", ma)),
+        set_thermistor=lambda ohms: sent.append(("therm", ohms)),
+    )
+    window.current_edit.editingFinished.emit()
+    window.therm_edit.editingFinished.emit()
+    window.laser_worker = None
+    assert sent == [], sent
+    for key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_PageUp):
+        _key(window.current_edit, key)
+        _key(window.therm_edit, key)
+    assert window.current_slider.value() == 8000
+    therm_locked = window.therm_slider.value()
+    _key(window.therm_edit, QtCore.Qt.Key_PageUp)
+    assert window.therm_slider.value() == therm_locked
+    # Same for the dither boxes while Modulation is off: Up there pushed
+    # the amplitude to the RP.
+    assert not window.mod_enable_btn.isChecked()
+    strength = window.mod_strength_slider.value()
+    _key(window.mod_strength_edit, QtCore.Qt.Key_Up)
+    assert window.mod_strength_slider.value() == strength
+    window.laser_unlock_box.setChecked(True)
     for slider, edit in (
         (window.current_slider, window.current_edit),          # 0.01 mA
         (window.therm_slider, window.therm_edit),              # 0.01 C
         (window.mot_coil_current_slider, window.mot_coil_current_edit),  # 0.1 A
-        (window.mod_strength_slider, window.mod_strength_edit),  # 0.001 Vpp
     ):
         start = slider.value()
         _key(edit, QtCore.Qt.Key_Up)
@@ -465,6 +510,7 @@ try:
     _key(window.therm_edit, QtCore.Qt.Key_PageUp)
     assert window.therm_slider.value() == start + window.therm_slider.pageStep()
     window.therm_slider.setValue(start)
+    window.laser_unlock_box.setChecked(False)
 
     assert window.laser_card.toggle_btn.text() == "LASER", (
         window.laser_card.toggle_btn.text()
@@ -481,6 +527,10 @@ try:
     # Once the supply agrees, the readback drives the button again.
     window._on_mot_coil_readback(dict(stale, output_enabled=True, i_out=1.0))
     assert window.mot_coil_output_btn.isChecked()
+    # The card shows what the supply reports, not just the setpoints.
+    assert window.coil_readback_label.text().startswith(
+        "Supply: ON · 0.00 V · 1.00 A"
+    ), window.coil_readback_label.text()
     window._on_mot_coil_readback(stale)
     assert not window.mot_coil_output_btn.isChecked(), (
         "readback ignored after the write settled"
@@ -661,6 +711,77 @@ try:
     })
     assert not lw._plot_paused, "orphaned pause never cleared"
 
+    # A drag across the whole visible trace selects the whole spectrum,
+    # whatever the sweep span. It was mapped against the slider's fixed
+    # ±1 V, so at ±0.1 V it picked samples ~922-1125 of 2048.
+    locks = []
+    lw.linien_thread = types.SimpleNamespace(
+        lock_laser=lambda i0, i1, n: locks.append((i0, i1, n))
+    )
+    lw._update_plot({
+        "voltages": np.linspace(-0.1, 0.1, 2048),
+        "error_signal": np.zeros(2048),
+        "monitor_signal": np.zeros(2048),
+    })
+    lw._start_autolock(-0.1, 0.1)
+    lw.linien_thread = None
+    assert locks == [(0, 2047, 2048)], locks
+
+    # A running lock action holds the controls it reads and restores in
+    # its `finally`; a mid-probe Sweep Center nudge was silently undone.
+    held = (lw.sweep_center_spin, lw.xrange_slider,
+            window.sweep_speed_combo, window.load_config_btn)
+    assert all(w.isEnabled() for w in held)
+    phase_was_editable = not window.mod_phase_edit.isReadOnly()
+    lw._on_action_busy("Lock at center")
+    assert not any(w.isEnabled() for w in held)
+    assert window.mod_phase_edit.isReadOnly()
+    lw._on_action_busy("")
+    assert all(w.isEnabled() for w in held)
+    assert (not window.mod_phase_edit.isReadOnly()) == phase_was_editable
+
+    # No lock, phase optimisation or target line without Modulation and
+    # Repump both on: on the bench Optimize phase with the modulation off
+    # rewrote Mod Phase from noise.
+    def _set_ui_only(button, on, apply):
+        button.blockSignals(True)
+        button.setChecked(on)
+        button.blockSignals(False)
+        apply(on)
+
+    lock_starts = (lw.lock_button, lw.center_lock_button, lw.phase_button)
+    speed_was = window.sweep_speed_combo.currentIndex()
+    window.sweep_speed_combo.setCurrentIndex(16)  # held
+    _set_ui_only(window.mod_enable_btn, False, window._apply_mod_enabled)
+    _set_ui_only(window.repump_gpio_btn, False, window._set_repump_ui)
+    # Not connected comes first: a click could only be refused.
+    rp_status_was = window._rp_last_status
+    window._rp_last_status = "disconnected"
+    window._refresh_lock_buttons()
+    assert not any(b.isEnabled() for b in lock_starts)
+    assert lw.lock_message.text() == "Connect the Red Pitaya to lock."
+    window._rp_last_status = "connected:rp-test.local"
+    window._refresh_lock_buttons()
+    assert not any(b.isEnabled() for b in lock_starts)
+    assert lw.lock_message.text() == "Switch on Modulation and Repump to lock."
+    _set_ui_only(window.mod_enable_btn, True, window._apply_mod_enabled)
+    assert not any(b.isEnabled() for b in lock_starts)
+    assert lw.lock_message.text() == "Switch on Repump to lock."
+    _set_ui_only(window.repump_gpio_btn, True, window._set_repump_ui)
+    assert all(b.isEnabled() for b in lock_starts)
+    assert lw.lock_message.text() == ""
+    # ...and a running action still holds them, then hands back to the rule.
+    lw._on_action_busy("Optimizing phase")
+    assert not any(b.isEnabled() for b in lock_starts)
+    lw._on_action_busy("")
+    assert all(b.isEnabled() for b in lock_starts)
+    _set_ui_only(window.mod_enable_btn, False, window._apply_mod_enabled)
+    _set_ui_only(window.repump_gpio_btn, False, window._set_repump_ui)
+    assert not lw.center_lock_button.isEnabled()
+    window.sweep_speed_combo.setCurrentIndex(speed_was)
+    window._rp_last_status = rp_status_was
+    window._refresh_lock_buttons()
+
     # --- Lock snapshot ---
     # While locked the arrays are a time trace, so the last sweeping frame
     # is held behind them; the flat live traces crossing it are the lock
@@ -749,6 +870,12 @@ try:
     window._on_laser_init({"current": 62.5, "thermistor": 9999, "output_on": True})
     assert pushed == [], pushed
     assert window.current_slider.value() == 6250, window.current_slider.value()
+    # The button shows the lit diode (the fake has no laser_on, so a
+    # write-back would raise), and shutdown therefore offers it. It used
+    # to stay "Laser Off" and the close dialog left the laser on unasked.
+    assert window.laser_btn.isChecked()
+    assert window.chip_text("laser") == "LASER ON", window.chip_text("laser")
+    assert "laser" in [o.key for o in window.live_outputs()]
 
     # An unreadable output state counts as on, so silence is never taken
     # for permission to write.
@@ -758,13 +885,32 @@ try:
     assert pushed == [], pushed
     assert window.current_slider.value() == 7300, window.current_slider.value()
 
+    window._on_laser_init({"current": 73.0, "thermistor": 9999, "output_on": False})
+    assert not window.laser_btn.isChecked()
+    assert window.chip_text("laser") == "LASER OFF", window.chip_text("laser")
+    # Laser off means Modulation and Repump off: a modulation found on is
+    # switched off, and neither button can be switched on meanwhile.
+    window.mod_enable_btn.blockSignals(True)
+    window.mod_enable_btn.setChecked(True)
+    window.mod_enable_btn.blockSignals(False)
+    window._apply_laser_off_rule()
+    assert not window.mod_enable_btn.isChecked()
+    assert not window.mod_enable_btn.isEnabled()
+    assert not window.repump_gpio_btn.isEnabled()
+    assert any(r.get("event") == "modulation_auto_off" for r in _records())
+    # Back to "laser not reported", where nothing is enforced.
+    window._readback_seen.discard("laser")
+    window._apply_laser_off_rule()
+    assert window.mod_enable_btn.isEnabled()
+    assert window.repump_gpio_btn.isEnabled()
+
     window.laser_worker = None
     window.current_slider.setValue(8700)
     window.laser_unlock_box.setChecked(False)
 
-    # --- Sweep centre: slide the window without rescaling it ---
-    # The range slider sets centre and span together; this box moves only
-    # the centre, to 3 decimals, as linien's sweepCenterSpinBox does.
+    # --- Sweep center: slide the window without rescaling it ---
+    # The range slider sets center and span together; this box moves only
+    # the center, to 3 decimals, as linien's sweepCenterSpinBox does.
     spin = lw.sweep_center_spin
     assert spin.decimals() == 3, spin.decimals()
     assert (spin.minimum(), spin.maximum()) == (-1.0, 1.0)
@@ -774,14 +920,14 @@ try:
     lw.linien_thread = types.SimpleNamespace(
         request_sweep_change=lambda c, a: moved.append((round(c, 4), round(a, 4)))
     )
-    lw.xrange_slider.setValue((-400, 200))   # centre -0.1, amplitude 0.3
+    lw.xrange_slider.setValue((-400, 200))   # center -0.1, amplitude 0.3
     assert abs(spin.value() - (-0.1)) < 1e-9, spin.value()
     moved.clear()
     spin.setValue(0.25)
-    # Span preserved, centre moved: that is the whole point of the box.
+    # Span preserved, center moved: that is the whole point of the box.
     assert moved == [(0.25, 0.3)], moved
     assert lw.xrange_slider.value() == (-50, 550), lw.xrange_slider.value()
-    # A centre that would push an edge past the sweep bounds is clamped, so
+    # A center that would push an edge past the sweep bounds is clamped, so
     # the plot cannot be asked to follow somewhere the sweep never goes.
     moved.clear()
     spin.setValue(0.95)
@@ -940,7 +1086,7 @@ try:
     assert found["kind"] == "fault"
     assert "repump" in found["outputs"], found
     assert "Repump on" in found["detail"], found
-    assert "WERE ON" in window.chip_text("lock")
+    assert window.chip_text("lock").startswith("UNLOCKED")  # log only
     window.repump_gpio_btn.setChecked(False)
     window.repump_gpio_worker = None
 
@@ -978,14 +1124,22 @@ try:
     window.mod_enable_btn.setChecked(False)
     window.mot_coil_output_btn.setChecked(False)
     window.laser_btn.setChecked(False)
-    window._set_chip("lock", "UNLOCKED", "#b56a6a")
+    window._on_lock_state(False)
     assert window.live_outputs() == [], [
         (o.key, o.detail) for o in window.live_outputs()
     ]
     before = len(_records())
     window._report_startup_outputs()
     assert len(_records()) == before
-    assert window.chip_text("lock") == "UNLOCKED"
+    assert window.chip_text("lock").startswith("UNLOCKED")
+
+    # A locked RP at startup is reported (log) and offered at shutdown;
+    # the chip keeps saying LOCKED rather than "N OUTPUTS WERE ON".
+    window._on_lock_state(True)
+    window._report_startup_outputs()
+    assert window.chip_text("lock") == "LOCKED"
+    assert "lock" in [o.key for o in window.live_outputs()]
+    window._on_lock_state(False)
 
     # A worker fault drops the device out of the count too. It used to
     # write "Fault" straight onto the label, so the row went red while the
@@ -1095,14 +1249,15 @@ try:
     # just stops. Reconnecting does not help; only a restart does, and
     # the UI has to say which failure this is.
     window._on_server_stalled(True)
-    # The chip carries the word; the row is Error with the reason on hover.
+    # The row is Error with the reason on hover; the lock chip keeps the
+    # lock state ("RP STALLED" there was removed at the operator's request).
     assert window.rp_usb_status.text() == "Error"
     assert "wedged" in window.rp_usb_status.toolTip()
     assert not window._device_connected["rp"]
-    assert window.chip_text("lock") == "RP STALLED"
+    assert window.chip_text("lock").startswith("UNLOCKED")
     window._on_server_stalled(False)
     assert "wedged" not in window.rp_usb_status.toolTip()
-    assert window.chip_text("lock") == "UNLOCKED"
+    assert window.chip_text("lock").startswith("UNLOCKED")
 
     # The restart action guards against a double press.
     assert window.restart_server_btn.isEnabled()
@@ -1142,15 +1297,15 @@ try:
     # The PSD worker's first status arrives after the window opens, so
     # the lock state has to be seeded from what the host already knows --
     # otherwise the first Start click refuses and the second works.
-    window._set_chip("lock", "LOCKED", "#6f9e7c")
+    window._on_lock_state(True)
     window._open_psd_window()  # rp host empty -> worker exits with no_host
     psd = window._psd_window
     assert psd is not None and psd.isVisible()
     assert psd._locked, "PSD opened believing the laser was unlocked"
-    window._set_chip("lock", "UNLOCKED", "#b56a6a")
+    window._on_lock_state(False)
     window._open_psd_window()
     assert not psd._locked
-    window._set_chip("lock", "LOCKED", "#6f9e7c")
+    window._on_lock_state(True)
     window._open_psd_window()
 
     # Run controls swap on acquisition state, as linien's containers do.
@@ -1546,6 +1701,11 @@ try:
         finally:
             window._collect_config = orig_collect
         assert "mot_coil_output" not in planted["coils"], planted["coils"]
+        # Filter enables end in "_enabled" but are settings, not outputs;
+        # the suffix rule used to strip them from every saved config.
+        assert {"filter_1_enabled", "filter_2_enabled"} <= set(
+            planted["linien"]["filters"]
+        ), planted["linien"]["filters"]
         dropped = next(
             r for r in _records()[before:]
             if r["event"] == "config_state_key_dropped"
@@ -1594,7 +1754,15 @@ try:
     assert not window.usb_card.content.isVisibleTo(window.usb_card)
     assert hasattr(window, "laser_worker")  # serial workers were started
 
+    # A reconnect keeps the laser and coils running (Auto-connect used to
+    # send "lason 0" and switch the coils off); the dispenser still goes
+    # off, because its auto-off timer dies with its worker.
+    old = {a: getattr(window, a) for a in
+           ("laser_worker", "mot_coil_worker", "dispenser_worker")}
     window._stop_serial_workers()
+    assert old["laser_worker"].disable_on_stop is False
+    assert old["mot_coil_worker"].disable_on_stop is False
+    assert old["dispenser_worker"].disable_on_stop is True
     window._on_probe_result(
         {
             "ok": False,
@@ -1672,7 +1840,7 @@ try:
     window.mot_coil_output_btn.setChecked(False)
     window.repump_gpio_btn.setChecked(False)
     window.laser_btn.setChecked(False)
-    window._set_chip("lock", "UNLOCKED", "#b56a6a")
+    window._on_lock_state(False)
     assert window.live_outputs() == [], [
         (o.key, o.detail) for o in window.live_outputs()
     ]

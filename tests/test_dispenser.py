@@ -164,20 +164,31 @@ w5._client.writes.clear()
 w5._service({"output_enabled": True, "v_set": 5.0, "i_set": 10.0})
 assert w5._client.writes == [(I, 2000)], w5._client.writes  # 20.00 A
 
-# 16) constructor falls back to defaults for None/0 values
-w6 = DispenserWorker(port=None, fire_seconds=None, dispense_current_a=0)
+# 16) constructor falls back to defaults for None only. An operator's 0 A
+# once became the 7.5 A default on every connect (an `or` fallback), and
+# a hand-edited 600 s fire ran 600 s: the fire time had no upper bound.
+w6 = DispenserWorker(port=None, fire_seconds=None, dispense_current_a=None)
 assert w6.fire_seconds == 30.0
 assert w6.dispense_current_a == 7.5
+w7 = DispenserWorker(port=None, fire_seconds=600.0, dispense_current_a=0)
+assert w7.dispense_current_a == 0.01, w7.dispense_current_a  # floor, not 7.5
+assert w7.fire_seconds == DispenserWorker.MAX_FIRE_SECONDS
 
-# --- VCO tuning range: 0-5 V spans 2800-2970 MHz, linear, clamped ---
-from mot_control import thermistor_ohms_to_c, vtune_to_vco_mhz  # noqa: E402
+# --- VCO tuning: ROS-3000-619+ datasheet +25 C curve, clamped to 0-5 V ---
+from mot_control import (  # noqa: E402
+    thermistor_ohms_to_c, vco_mhz_to_vtune, vtune_to_vco_mhz,
+)
 
-assert vtune_to_vco_mhz(-1.0) == 2800.0        # clamped low
-assert vtune_to_vco_mhz(0.0) == 2800.0
-assert vtune_to_vco_mhz(5.0) == 2970.0         # DAC full scale
-assert vtune_to_vco_mhz(20.0) == 2970.0        # clamped high
-assert abs(vtune_to_vco_mhz(2.5) - 2885.0) < 1e-9   # midpoint
-assert abs(vtune_to_vco_mhz(1.0) - 2834.0) < 1e-9   # 2800 + 0.2 * 170
+assert vtune_to_vco_mhz(-1.0) == 2720.4        # clamped low
+assert vtune_to_vco_mhz(0.0) == 2720.4
+assert vtune_to_vco_mhz(5.0) == 3032.6         # DAC full scale
+assert vtune_to_vco_mhz(20.0) == 3032.6        # clamped high
+assert abs(vtune_to_vco_mhz(3.25) - 2920.5) < 1e-9   # a table row
+# Between rows: 3.6765 V is the bench operating point the old linear map
+# called 2925 MHz.
+assert abs(vtune_to_vco_mhz(3.6765) - 2949.4) < 0.1
+for v in (0.0, 1.3, 2.9, 3.6765, 4.8, 5.0):
+    assert abs(vco_mhz_to_vtune(vtune_to_vco_mhz(v)) - v) < 1e-9
 
 # --- Thermistor Steinhart-Hart conversion ---
 assert abs(thermistor_ohms_to_c(10000) - 25.0) < 1.5   # 10 k NTC ~ 25 C

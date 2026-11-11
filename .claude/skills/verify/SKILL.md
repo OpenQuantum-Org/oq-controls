@@ -31,8 +31,8 @@ SMOKE OK
 Benign noise in the smoke run — **not** failures:
 
 - `QFontDatabase: Cannot find font directory` — Qt ships no fonts of its own.
-  The test separately asserts that the bundled Space Grotesk and IBM Plex Sans
-  registered; if those assertions pass, fonts are fine.
+  The test separately asserts that the bundled Space Grotesk registered; if
+  that assertion passes, fonts are fine.
 - `could not open port '/dev/cu.fakeA'` (and `fakeB`, `fakeC`) — the test's
   deliberate fake ports.
 - `psd: no_host`, `error filter read skipped: not connected` — expected

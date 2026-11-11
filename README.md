@@ -5,8 +5,9 @@ Linien/Red Pitaya spectroscopy lock, two Riden DPS supplies, and the repump
 tune/gate. The repo is self-contained — the Linien spectroscopy widget and
 worker, the shared styles, and the Koheron worker are vendored here.
 
-Architectural rules live in `CLAUDE.md`; what is left to do and what was
-decided against live in `ROADMAP.md`.
+Architectural rules (`dev/CLAUDE.md`) and the roadmap of what is left and what
+was decided against (`dev/ROADMAP.md`) are kept locally in `dev/`, which is not
+part of the repository.
 
 ## Hardware covered
 
@@ -17,7 +18,8 @@ decided against live in `ROADMAP.md`.
 - **Repump VCO tune voltage** (V_tune) through the MikroE DAC Click (MCP4921)
   on the Red Pitaya Click Shield, socket 1, driven via the patched server's
   `dac_click_voltage` parameter. The UI shows the resulting VCO frequency
-  (measured: 0–5 V spans 2800–2970 MHz, linear)
+  (ROS-3000-619+ datasheet +25 °C curve: 0–5 V spans 2720–3033 MHz;
+  a typical part, not a measurement of ours)
 - **Repump RF gate** on a Red Pitaya GPIO bit — fixed at `DIO1_N` (bank `n`,
   bit 1), **active-low** (RF amp enable on Click Shield socket 2)
 - **MOT coil DPS5005**: voltage, current, output
@@ -164,7 +166,9 @@ the devices that are OK (`DEVICES 3/4`).
 **Auto-connect** connects whatever is not connected: it brings up the Red
 Pitaya, then re-runs the USB probe and restarts the serial workers. A Red Pitaya
 that is already connected is left alone, because restarting the acquisition
-client sweeps and that drops a lock. **Manual setup** holds the host/port fields,
+client sweeps and that drops a lock. Restarting the serial workers leaves the
+laser and the coils as they are; a dispenser fire in progress is aborted, since
+its auto-off timer lives in the worker. **Manual setup** holds the host/port fields,
 a **Connect** button that always does the full restart (it *will* drop a lock),
 and **Restart Linien Server**, which restarts a wedged server without an SSH
 session.
@@ -238,16 +242,17 @@ server.
 ## Config snapshots
 
 `Save Config As...` writes a timestamped JSON snapshot of every **setpoint**:
-connections, modulation, sweep speed, error-signal filters, laser current and
-temperature, repump V_tune/VCO frequency, coil setpoints, the dispenser
-operating point and fire history, and the PSD settings.
+connections, modulation, sweep speed, error-signal filters (including which
+stages are enabled), PID gains, laser current and temperature, repump
+V_tune/VCO frequency, coil setpoints, the dispenser operating point and fire
+history, and the PSD settings.
 
 A config records what you *set*, never what the hardware is *doing*. It cannot
 carry an output, enable, lock or fire state — those keys are stripped on the way
 out and on the way in, and the removal is logged — so **loading a config can
-never switch the laser, coils, repump, dither or dispenser on or off**. The PID
-is not saved either: it lives only on the server, so recording it would mean
-recording hardware state.
+never switch the laser, coils, repump, modulation or dispenser on or off**. The PID
+gains saved are the ones last set from this app, never read off the server, and
+loading a config writes them to the server, locked or not.
 
 `Load Config...` applies a snapshot: setpoints go to their connected devices
 immediately, including to a running laser or an engaged lock. Partial files are
@@ -312,7 +317,7 @@ the message, coloured by severity. linien's DEBUG detail stays in the file.
 
 | file | what lives there |
 | --- | --- |
-| `src/mot_control.py` | The window and every card, plus the app entry point. ~3,900 lines, most of it `OpenQuantumControlsWindow`; navigate it by card (`_add_*_card`). |
+| `src/mot_control.py` | The window and every card, plus the app entry point. ~4,700 lines, most of it `OpenQuantumControlsWindow`; navigate it by card (`_add_*_card`). |
 | `src/mot_workers.py` | One QThread per device: both DPS supplies, the Koheron setpoints, the DAC Click (V_tune), the repump GPIO gate, the PSD client, the USB probe and the serial-port watcher. |
 | `src/linien_worker.py` | The linien acquisition/lock client — connect with retries, the spectrum poll, autolock, the server heartbeat. |
 | `src/linien_widget.py` | The spectroscopy plot: trace drawing, sweep range, line selection, lock buttons, the Red Pitaya banner. |
@@ -320,8 +325,7 @@ the message, coloured by severity. linien's DEBUG detail stays in the file.
 | `src/mot_logging.py` | `EventLog`: the JSONL record, correlated transactions, fault-repeat collapsing, and the bridge that captures third-party logging. |
 | `src/styles.py` | Colours, fonts, and the shared widget builders (sliders, readouts, cards). |
 | `tests/` | Five hardware-free suites; `smoke_ui.py` is the big one and writes the screenshot. |
-| `CLAUDE.md` | The rules: invariants, state ownership, what was tried and reverted. Read before changing behaviour. |
-| `ROADMAP.md` | What is left, and what was decided against. |
+| `dev/` | Local only (gitignored): `CLAUDE.md` (the rules: invariants, state ownership, what was tried and reverted), `ROADMAP.md` (design brief, decisions, open work), bench data. |
 
 ## Red Pitaya client notes
 
@@ -368,8 +372,8 @@ are an implementation detail of how the controller holds the setpoint.
 
 ## Fonts
 
-Body text is **IBM Plex Sans**, titles are **Space Grotesk**, both bundled in
-`fonts/` under the SIL Open Font License. Extra font files dropped into `fonts/`
+The app uses **Space Grotesk** (Regular and Bold), bundled in `fonts/` under
+the SIL Open Font License. Extra font files dropped into `fonts/`
 are registered but stay local (licensed `PP*`/`Aptos*` files are gitignored). A
 missing family falls back to Helvetica Neue and logs a `font` fault. Fonts are
 registered from bytes, because the path-based Qt API silently fails on Qt 6.11.

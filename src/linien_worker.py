@@ -11,6 +11,7 @@ from linien_client.connection import LinienClient
 from pyqtgraph.Qt import QtCore
 from linien_client.device import Device
 import pickle
+import threading
 import numpy as np
 from time import monotonic, sleep
 from linien_common.common import MHz, AutolockMode, Vpp
@@ -26,7 +27,9 @@ class LinienWorker(QtCore.QThread):
     new_data = QtCore.pyqtSignal(object)
     initial = QtCore.pyqtSignal(object)
     lock_state = QtCore.pyqtSignal(bool)  # True if locked, False otherwise
-    connection_status = QtCore.pyqtSignal(str)  # "connected:<host>" or "disconnected"
+    # "connected:<host>", "connecting:<host> ...", "error:<why>" or
+    # "disconnected"
+    connection_status = QtCore.pyqtSignal(str)
     fault = QtCore.pyqtSignal(str)  # anything that would otherwise be silent
     # True when the server's heartbeat has stopped, False when it resumes.
     server_stalled = QtCore.pyqtSignal(bool)
@@ -36,8 +39,14 @@ class LinienWorker(QtCore.QThread):
     # Why a lock the operator asked for did not happen, for display by the
     # lock buttons. Also sent as a fault, so the log keeps it.
     lock_feedback = QtCore.pyqtSignal(str)
+    # Name of the lock action now running on its own thread; "" when done.
+    action_busy = QtCore.pyqtSignal(str)
     # (paused, speed index) as the server holds them, read once at connect.
     sweep_state = QtCore.pyqtSignal(object)
+    # A lock-row result that is news, not a problem (Optimise phase).
+    lock_note = QtCore.pyqtSignal(str)
+    # The demod phase Optimise phase settled on, in degrees, for the UI.
+    phase_applied = QtCore.pyqtSignal(int)
 
     # linien-server increments ``ping`` once a second from a thread of its
     # own (linien_server/server.py:181). If it stops advancing the server's
@@ -55,7 +64,7 @@ class LinienWorker(QtCore.QThread):
     def __init__(self, host=DEFAULT_RP_HOST, username="root", password="root",
                  event_log=None, unlock_on_stop=True):
         super().__init__()
-        # Faults go to the log, never to stdout (CLAUDE.md invariant 4).
+        # Faults go to the log, never to stdout: a windowed build has none.
         self.event_log = event_log or NULL_LOG
         # Cleared by the shutdown dialog when the operator chooses to
         # leave the laser locked past the app.
@@ -63,7 +72,10 @@ class LinienWorker(QtCore.QThread):
         self.host = host
         self.username = username
         self.password = password
-        self.running = False
+        # Cleared only by stop(), never set by run(): a stop that landed
+        # during a connect (which can take 20 s) was undone when the
+        # connect finished, and stop()'s wait() hung the window for good.
+        self.running = True
         self.current_center = 0.0
         self.current_amplitude = 1.0
         self.to_plot = {}
@@ -77,6 +89,8 @@ class LinienWorker(QtCore.QThread):
         self._stalled = False
         self._last_lock_read_error = None
         self._link = LinkHealth()
+        self._action = None
+        self._action_label = ""
 
     def _check_server_alive(self):
         """Watch the server's heartbeat; report the edges, not every poll."""
@@ -148,7 +162,7 @@ class LinienWorker(QtCore.QThread):
                     f"connect failed ({self.host}) "
                     f"attempt {attempt}/{self.CONNECT_ATTEMPTS}: {detail}"
                 )
-                if attempt < self.CONNECT_ATTEMPTS:
+                if attempt < self.CONNECT_ATTEMPTS and self.running:
                     self.connection_status.emit(
                         f"connecting:{self.host} — attempt {attempt + 1} of "
                         f"{self.CONNECT_ATTEMPTS}"
@@ -198,7 +212,7 @@ class LinienWorker(QtCore.QThread):
 
         # Same reason for the sweep: the speed box restores its last
         # setting, which after a restart can say "hold" while the server
-        # sweeps -- and Lock at centre then refuses with no visible cause.
+        # sweeps -- and Lock at center then refuses with no visible cause.
         try:
             p = self.client.parameters
             self.sweep_state.emit(
@@ -214,7 +228,6 @@ class LinienWorker(QtCore.QThread):
         self._emit_lock_state_best_effort()
 
     def _acquire(self):
-        self.running = True
         while self.running:
             # Refreshes the local parameter cache and, just as
             # importantly, empties this client's queue on the server.
@@ -324,8 +337,24 @@ class LinienWorker(QtCore.QThread):
 
         self.event_log.log("linien_loop_ended", host=self.host)
 
+    # Long enough for an in-flight start_lock RPC to return, so the sweep
+    # below lands after it; short enough not to stall closing the window.
+    ACTION_STOP_WAIT_S = 3.0
+
     def stop(self):
         self.running = False
+        # A lock action still probing would otherwise carry on into
+        # start_lock after the start_sweep below, leaving the laser locked
+        # against the operator's choice. Actions check `running` before
+        # they engage; this waits out one that is already engaging.
+        action = self._action
+        if action is not None and action.is_alive():
+            action.join(timeout=self.ACTION_STOP_WAIT_S)
+            if action.is_alive():
+                self._log(
+                    f"{self._action_label} still running at stop; "
+                    "it will not engage a lock"
+                )
         # Sweeping rather than held at a lock point: an unattended lock
         # drifts off the line with nothing watching it. Skipped when the
         # operator chose to leave it engaged.
@@ -380,16 +409,6 @@ class LinienWorker(QtCore.QThread):
         self._log(f"{what} failed: not connected")
         return False
 
-    def stop_sweep(self):
-        """Stop the sweep and hold the output at the current center voltage."""
-        if not self._require_connection("stop sweep"):
-            return
-        try:
-            self.client.parameters.sweep_amplitude.value = 0
-            self.client.connection.root.write_registers()
-        except Exception as e:
-            self._log(f"stop sweep failed: {e}")
-
     def set_modulation_amplitude(self, amplitude_mV: float):
         """Set the modulation amplitude in mV (0-1000).
 
@@ -438,9 +457,9 @@ class LinienWorker(QtCore.QThread):
         """Hold the sweep at ``sweep_center``, or let it run again.
 
         linien's own Start/Pause button, which is the only thing that
-        writes this parameter (linien_gui/ui/sweep_control.py:86). Unlike
-        stop_sweep() it leaves sweep_amplitude alone, so resuming returns
-        to the same span rather than needing it set again.
+        writes this parameter (linien_gui/ui/sweep_control.py:86). It leaves
+        sweep_amplitude alone, so resuming returns to the same span
+        rather than needing it set again.
         """
         if not self._require_connection("sweep pause update"):
             return
@@ -540,14 +559,78 @@ class LinienWorker(QtCore.QThread):
         except Exception as e:
             self._log("sweep update failed: " + str(e))
 
+    # --- Lock actions, off the GUI thread ---
+    #
+    # Each one waits on the Red Pitaya for seconds (unlock up to 10 s, a
+    # centre lock ~10 s, phase optimisation 3-5 s, Select target line up to
+    # 30 s), and run from the button's slot they froze the window that long
+    # (operator, 2026-11-03). They run on one short-lived thread instead;
+    # results already reach the UI as signals, which Qt queues across
+    # threads. One at a time: a second request while one runs is refused.
+
+    def _run_action(self, label, work):
+        if self._action is not None and self._action.is_alive():
+            self.lock_feedback.emit(
+                "Still busy."
+            )
+            return
+        self._action_label = label
+
+        def body():
+            try:
+                work()
+            except Exception as e:
+                self._lock_problem(
+                    f"{label} failed. See log.", detail=f"{label} failed: {e}"
+                )
+            finally:
+                self.action_busy.emit("")
+
+        self.action_busy.emit(label)
+        self._action = threading.Thread(
+            target=body, name=f"linien-{label}", daemon=True
+        )
+        self._action.start()
+
+    def lock_laser(self, x0, x1, n_points):
+        self._run_action(
+            "Locking",
+            lambda: self._lock_laser(x0, x1, n_points),
+        )
+
+    def lock_at_center(self):
+        self._run_action("Locking", self._lock_at_center)
+
+    def optimise_phase(self):
+        self._run_action("Optimizing phase", self._optimise_phase)
+
+    def unlock_laser(self):
+        self._run_action("Unlocking", self._unlock_laser)
+
+    def _stopping_before(self, what):
+        """True, and logged, when stop() came in before a lock engages."""
+        if self.running:
+            return False
+        self.event_log.log("lock_action_cancelled", action=what,
+                           reason="worker_stopping")
+        return True
+
     def _wait_for_lock(self, should_be_locked: bool, timeout_s: int = 30):
         failures = 0
         for _ in range(timeout_s):
+            if not self.running:  # stop() is unlocking; don't outwait it
+                return False
             try:
-                t = pickle.loads(self.client.parameters.to_plot.value)
-                has_locked_key = "error_signal" in t
                 param_lock = bool(self.client.parameters.lock.value)
-                status = has_locked_key or param_lock
+                if should_be_locked:
+                    t = pickle.loads(self.client.parameters.to_plot.value)
+                    status = "error_signal" in t or param_lock
+                else:
+                    # The server's flag only. A locked trace stays in
+                    # to_plot until the next one, and with the sweep held
+                    # at a slow speed that is 8.6 s or more: unlocks read
+                    # as "not confirmed" and the header stayed LOCKED.
+                    status = param_lock
                 if status == should_be_locked:
                     return True
                 failures = 0
@@ -563,7 +646,7 @@ class LinienWorker(QtCore.QThread):
             sleep(1)
         return False
 
-    def lock_laser(self, x0, x1, n_points):
+    def _lock_laser(self, x0, x1, n_points):
         """Start the autolock over a selected index range.
 
         ``x0``/``x1`` are indices into the plotted trace and ``n_points``
@@ -574,7 +657,7 @@ class LinienWorker(QtCore.QThread):
         the unscaled signal and divides only when drawing.
         """
         if not self.connected:
-            self._lock_problem("Not connected to the Red Pitaya.")
+            self._lock_problem("Not connected.")
             return
         params = self.client.parameters
         try:
@@ -589,20 +672,27 @@ class LinienWorker(QtCore.QThread):
         try:
             to_plot = pickle.loads(params.to_plot.value)
         except Exception as e:
-            self._lock_problem(f"Could not read the spectrum: {e}")
+            self._lock_problem(
+                "Lock failed. See log.",
+                detail=f"could not read the spectrum: {e}",
+            )
             return
         key = next(
             (k for k in ("error_signal_1", "error_signal") if k in to_plot),
             None,
         )
         if key is None:
-            self._lock_problem("No spectrum available to lock on.")
+            self._lock_problem(
+                "Lock failed. See log.", detail="no spectrum to lock on"
+            )
             return
 
         raw = np.asarray(to_plot[key], dtype=np.int16)
         n = raw.size
         if n < 4:
-            self._lock_problem("The spectrum is too small to lock on.")
+            self._lock_problem(
+                "Lock failed. See log.", detail=f"spectrum too small ({n} points)"
+            )
             return
 
         # The selection was made against a trace of n_points samples; map
@@ -615,7 +705,7 @@ class LinienWorker(QtCore.QThread):
         i0 = max(0, min(n - 1, i0))
         i1 = max(0, min(n - 1, i1))
         if i1 - i0 < 2:
-            self._lock_problem("The selected range is too narrow; drag across the whole slope.")
+            self._lock_problem("Drag across the whole slope.")
             return
 
         try:
@@ -631,47 +721,58 @@ class LinienWorker(QtCore.QThread):
         except Exception as e:
             self.fault.emit(f"autolock parameter set failed: {e}")
 
+        if self._stopping_before("autolock"):
+            return
         try:
             self.client.connection.root.start_autolock(
                 i0, i1, pickle.dumps(raw)
             )
         except Exception as e:
-            self._lock_problem(f"The autolock could not start: {e}")
+            self._lock_problem(
+                "Lock failed. See log.", detail=f"autolock could not start: {e}"
+            )
             return
 
         if self._wait_for_lock(True, timeout_s=30):
             self._emit_lock_state_best_effort(force_value=True)
         else:
-            self._lock_problem("The lock did not engage within 30 s.")
+            self._lock_problem(
+                "Lock did not engage.",
+                detail="autolock did not engage within 30 s",
+            )
             self._emit_lock_state_best_effort()
 
-    # Half-width of the slope probe around the paused centre. Small against
+    # Half-width of the slope probe around the paused center. Small against
     # the few-mV-wide MOT window seen on the bench, large enough that the
     # error moves clear of the frame-to-frame scatter.
-    CENTRE_PROBE_V = 0.005
+    CENTER_PROBE_V = 0.005
     # A held sweep still delivers traces at the held speed's rate: 8.6 s
     # each at index 15, which timed every probe out. Index 8 (14.8 Hz) is
-    # ~70 ms per trace; the output stays at the centre either way, since
+    # ~70 ms per trace; the output stays at the center either way, since
     # pause zeroes the ramp whatever its speed.
     PROBE_SWEEP_SPEED = 8
-    # Good centre locks sat 2-4 mV from the centre; the one runaway seen
+    # Good center locks sat 2-4 mV from the center; the one runaway seen
     # landed 190 mV away. 10 mV keeps clear of both.
     RUNAWAY_V = 0.010
 
-    def _lock_problem(self, message):
+    def _lock_problem(self, message, detail=None):
         """A lock action that did not happen: log it and say it by the button.
 
         The log pane alone was not enough -- a refused click looked like
-        a click that did nothing.
+        a click that did nothing. The button gets a short line saying what
+        to do; full sentences and raw exception text were too much there
+        (operator, 2026-11-10). The log gets ``detail`` when given.
         """
-        self.fault.emit(message)
+        self.fault.emit(detail or message)
         self.lock_feedback.emit(message)
 
-    def _fresh_error_mean(self, prev, timeout_s=5.0):
+    def _fresh_error_mean(self, prev, timeout_s=5.0, quadrature=False):
         """Mean raw error (counts) of a frame taken after the last write.
 
         The first changed frame may straddle the register write, so the one
         after it is used. Returns (mean, frame) or (None, prev) on timeout.
+        With ``quadrature`` the mean is an (I, Q) pair; Q needs
+        fetch_additional_signals on (acquisition.py:165).
         """
         changes = 0
         deadline = monotonic() + timeout_s
@@ -684,64 +785,193 @@ class LinienWorker(QtCore.QThread):
                     changes += 1
                     prev = err
                     if changes == 2:
-                        return float(np.mean(err)), err
+                        if not quadrature:
+                            return float(np.mean(err)), err
+                        quad = t.get("error_signal_1_quadrature")
+                        if quad is None:
+                            changes = 1  # flag not applied yet; wait on
+                            continue
+                        return (float(np.mean(err)),
+                                float(np.mean(quad))), err
             sleep(0.1)
         return None, prev
 
-    def lock_at_centre(self):
+    # Optimise phase measures across +/-20 mV: wider than the runaway seen on
+    # 2026-11-03 (a steep dip only ~+/-5 mV wide on a flat offset), so a
+    # window-wide fit scores such a dip low.
+    PHASE_WINDOW_V = (-0.020, -0.015, -0.010, -0.005, 0.0,
+                      0.005, 0.010, 0.015, 0.020)
+
+    def _optimise_phase(self):
+        """Pick the demod phase with the steepest error slope at the center.
+
+        linien's method (optimization/utils.py, optimize_phase_from_iq):
+        one I/Q measurement, then every phase by rotation, e(phi) =
+        I cos(phi) + Q sin(phi). Here the measurement is the held output
+        stepped across PHASE_WINDOW_V, not a sweep (the plotted sweep axis
+        is ~0.2 V out), and the score is the least-squares slope over the
+        whole window, whose maximum is closed-form: phi = atan2(sQ, sI).
+        The new phase is then measured, because the rotation's sign
+        convention is linien's (engine.py:226, new = old - phi) and has not
+        been checked on this server, so both signs are measured and the
+        steeper kept; if neither beats the old phase, the old phase goes
+        back.
+        """
+        if not self.connected:
+            self._lock_problem("Not connected.")
+            return
+        params = self.client.parameters
+        root = self.client.connection.root
+        if not bool(params.sweep_pause.value):
+            self._lock_problem("Hold the sweep first.")
+            return
+        center = float(params.sweep_center.value)
+        speed = int(params.sweep_speed.value)
+        old_phase = float(params.demodulation_phase_a.value)
+        xs = np.array(self.PHASE_WINDOW_V)
+
+        def measure(quadrature):
+            """Mean error (or (I, Q)) at each window point, counts."""
+            frame, out = None, []
+            for dx in xs:
+                params.sweep_center.value = center + dx
+                root.write_registers()
+                value, frame = self._fresh_error_mean(
+                    frame, quadrature=quadrature
+                )
+                if value is None:
+                    raise TimeoutError("no fresh error signal within 5 s")
+                out.append(value)
+            return np.array(out)
+
+        def window_slope(values):
+            return float(np.polyfit(xs, values, 1)[0]) / 8192.0
+
+        result = None
+        failed = False
+        try:
+            params.sweep_speed.value = min(speed, self.PROBE_SWEEP_SPEED)
+            params.fetch_additional_signals.value = True
+            root.write_registers()
+            iq = measure(quadrature=True)
+            s_i, s_q = window_slope(iq[:, 0]), window_slope(iq[:, 1])
+            phi = float(np.degrees(np.arctan2(s_q, s_i)))
+            predicted = float(np.hypot(s_i, s_q))
+            before = abs(s_i)
+            params.fetch_additional_signals.value = False
+
+            # Both signs are measured and the steeper kept. Stopping at the
+            # first that came close to the prediction was tried and is
+            # wrong: in simulation the wrong sign reached 59% of it.
+            tried = []
+            for candidate in (old_phase - phi, old_phase + phi):
+                phase = int(round(candidate)) % 360
+                params.demodulation_phase_a.value = phase
+                root.write_registers()
+                measured = abs(window_slope(measure(quadrature=False)))
+                tried.append((measured, phase))
+            measured, phase = max(tried)
+            self.event_log.log(
+                "phase_optimised", center_v=round(center, 4),
+                old_deg=round(old_phase, 1), predicted_v_per_v=round(predicted, 3),
+                before_v_per_v=round(before, 3),
+                tried=[{"deg": p, "v_per_v": round(m, 3)} for m, p in tried],
+            )
+            if measured > before:
+                params.demodulation_phase_a.value = phase
+                result = (phase, before, measured)
+            else:
+                params.demodulation_phase_a.value = int(round(old_phase)) % 360
+        except Exception as e:
+            failed = True
+            self._lock_problem(
+                "Optimizing phase failed. See log.",
+                detail=f"phase optimization failed: {e}",
+            )
+            try:
+                params.demodulation_phase_a.value = int(round(old_phase)) % 360
+            except Exception as restore_error:
+                # Mod Phase may now be left at a trial value; say so.
+                self._log(f"could not restore Mod Phase: {restore_error}")
+        finally:
+            try:
+                params.fetch_additional_signals.value = False
+                params.sweep_center.value = center
+                params.sweep_speed.value = speed
+                root.write_registers()
+            except Exception as e:
+                self._lock_problem(
+                    f"Could not restore the sweep center and speed: {e}"
+                )
+
+        if result is None:
+            if not failed:
+                # Not a failure, so a note; the slopes are in the
+                # phase_optimised record above.
+                self.lock_note.emit("Mod Phase unchanged.")
+            return
+        phase, before, after = result
+        self.phase_applied.emit(phase)
+        self.lock_note.emit(f"Mod Phase {old_phase:.0f}° → {phase}°")
+
+    def _lock_at_center(self):
         """Lock where the paused sweep sits, rather than on a zero crossing.
 
-        Reads the error at the paused centre, sets combined_offset so the
+        Reads the error at the paused center, sets combined_offset so the
         PID sees zero there, takes the slope sign from a +/- probe of the
-        centre itself (the plotted x axis is ~0.2 V out, so it cannot be
+        center itself (the plotted x axis is ~0.2 V out, so it cannot be
         trusted for this), then starts linien's manual lock
         (locking_panel.py:158). The lock engages at once because a paused
         sweep outputs 0, which is the SIMPLE autolock's target.
         """
         if not self.connected:
-            self._lock_problem("Not connected to the Red Pitaya.")
+            self._lock_problem("Not connected.")
             return
         params = self.client.parameters
         root = self.client.connection.root
         if not bool(params.sweep_pause.value):
-            self._lock_problem("Set Sweep Speed to 0 Hz (hold) first.")
+            self._lock_problem("Hold the sweep first.")
             return
-        centre = float(params.sweep_center.value)
+        center = float(params.sweep_center.value)
         speed = int(params.sweep_speed.value)
-        d = self.CENTRE_PROBE_V
+        d = self.CENTER_PROBE_V
         reads = {}
         frame = None
         try:
             params.sweep_speed.value = min(speed, self.PROBE_SWEEP_SPEED)
-            for name, v in (("c1", centre), ("hi", centre + d),
-                            ("lo", centre - d), ("c2", centre)):
+            for name, v in (("c1", center), ("hi", center + d),
+                            ("lo", center - d), ("c2", center)):
                 params.sweep_center.value = v
                 root.write_registers()
                 reads[name], frame = self._fresh_error_mean(frame)
                 if reads[name] is None:
                     self._lock_problem(
-                        "No fresh error signal from the Red Pitaya within 5 s."
+                        "Lock failed. See log.",
+                        detail="no fresh error signal within 5 s",
                     )
                     return
         except Exception as e:
-            self._lock_problem(f"Could not measure the error signal: {e}")
+            self._lock_problem(
+                "Lock failed. See log.",
+                detail=f"could not measure the error signal: {e}",
+            )
             return
         finally:
             try:
-                params.sweep_center.value = centre
+                params.sweep_center.value = center
                 params.sweep_speed.value = speed
                 root.write_registers()
             except Exception as e:
                 self._lock_problem(
-                    f"Could not restore the sweep centre and speed: {e}"
+                    f"Could not restore the sweep center and speed: {e}"
                 )
 
         step = reads["hi"] - reads["lo"]
         scatter = abs(reads["c1"] - reads["c2"])
         e0 = reads["c2"]
         self.event_log.log(
-            "centre_lock_probe",
-            centre_v=round(centre, 4),
+            "center_lock_probe",
+            center_v=round(center, 4),
             error_v=round(e0 / 8192.0, 5),
             slope_v_per_v=round(step / (2 * d) / 8192.0, 3),
             scatter_v=round(scatter / 8192.0, 5),
@@ -749,17 +979,20 @@ class LinienWorker(QtCore.QThread):
         # 14-bit signed adder (registers.py:125).
         if abs(e0) > 8191:
             self._lock_problem(
-                "The error signal at the centre is beyond the offset range."
+                "Lock failed. See log.",
+                detail="error at the center is beyond the offset range",
             )
             return
         if abs(step) < 3 * scatter + 1:
             self._lock_problem(
-                "The error signal is too flat here to hold a lock "
-                f"({step / 8192:+.4f} V over ±{d * 1000:.0f} mV). "
-                "Move Sweep Centre 1–2 mV and try again."
+                "Too flat here. Move Sweep Center 1–2 mV.",
+                detail="error signal too flat to hold a lock "
+                f"({step / 8192:+.4f} V over ±{d * 1000:.0f} mV)",
             )
             return
 
+        if self._stopping_before("center_lock"):
+            return
         try:
             params.combined_offset.value = -int(round(e0))
             params.target_slope_rising.value = bool(step > 0)
@@ -769,42 +1002,46 @@ class LinienWorker(QtCore.QThread):
             root.write_registers()
             root.start_lock()
         except Exception as e:
-            self._lock_problem(f"Lock at centre failed: {e}")
+            self._lock_problem(
+                "Lock failed. See log.", detail=f"lock at center failed: {e}"
+            )
             self._emit_lock_state_best_effort()
             return
 
         if not self._wait_for_lock(True, timeout_s=10):
-            self._lock_problem("The lock did not engage within 10 s.")
+            self._lock_problem(
+                "Lock did not engage.",
+                detail="center lock did not engage within 10 s",
+            )
             self._emit_lock_state_best_effort()
             return
 
-        drift = self._control_drift(centre)
+        drift = self._control_drift(center)
         if drift is not None and drift > self.RUNAWAY_V:
             # Seen on the bench: a probe on a small dip riding a flat error
             # offset engaged, then slid ~190 mV along the flat stretch while
             # the header said LOCKED. The sweep stays held, so unlocking
-            # parks the laser back at the centre.
+            # parks the laser back at the center.
             try:
                 root.start_sweep()
             except Exception as e:
                 self._log(f"unlock after runaway failed: {e}")
             self.event_log.fault(
-                "centre_lock_runaway", centre_v=round(centre, 4),
+                "center_lock_runaway", center_v=round(center, 4),
                 drift_v=round(drift, 4),
             )
             self._lock_problem(
-                f"The lock ran {drift * 1000:.0f} mV away from the centre, "
-                "so it was released. Adjust Mod Phase until the error signal "
-                "has a clear slope here, then try again."
+                f"Lock ran {drift * 1000:.0f} mV off and was released. "
+                "Adjust Mod Phase."
             )
             self._emit_lock_state_best_effort(force_value=False)
             return
         self._emit_lock_state_best_effort(force_value=True)
 
-    def _control_drift(self, centre, settle_s=1.5):
-        """Largest |control - centre| (V) over the first moments of a lock.
+    def _control_drift(self, center, settle_s=1.5):
+        """Largest |control - center| (V) over the first moments of a lock.
 
-        A good centre lock holds the output within a few mV of the centre
+        A good center lock holds the output within a few mV of the center
         (2-4 mV across the bench locks of 2026-11-02); a runaway settles
         tens to hundreds of mV away within about a second. None if no
         locked frame arrived.
@@ -818,7 +1055,7 @@ class LinienWorker(QtCore.QThread):
                 return worst
             ctrl = t.get("control_signal")
             if "error_signal" in t and ctrl is not None and len(ctrl):
-                gap = abs(float(np.mean(ctrl)) / 8192.0 - centre)
+                gap = abs(float(np.mean(ctrl)) / 8192.0 - center)
                 worst = gap if worst is None else max(worst, gap)
             sleep(0.1)
         return worst
@@ -838,19 +1075,23 @@ class LinienWorker(QtCore.QThread):
         except Exception as e:
             self.fault.emit(f"determine-offset update failed: {e}")
 
-    def unlock_laser(self):
+    def _unlock_laser(self):
         if not self._require_connection("unlock"):
             return
         try:
             self.client.connection.root.start_sweep()
             if self._wait_for_lock(False, timeout_s=10):
-                pass
                 self._emit_lock_state_best_effort(force_value=False)
             else:
-                self._log("unlock not confirmed, but sweep was requested")
+                self._lock_problem(
+                    "Unlock not confirmed.",
+                    detail="the Red Pitaya did not confirm the unlock in 10 s",
+                )
                 self._emit_lock_state_best_effort()
         except Exception as e:
-            self._log(f"unlock failed: {e}")
+            self._lock_problem(
+                "Unlock failed. See log.", detail=f"unlock failed: {e}"
+            )
             self._emit_lock_state_best_effort()
 
     def _emit_lock_state_best_effort(self, force_value=None):
@@ -858,19 +1099,12 @@ class LinienWorker(QtCore.QThread):
             return
         try:
             if force_value is None:
-                # Reuse the dict the acquisition pass just unpickled.
-                # to_plot is a 2048-point array over RPyC and the only
-                # uncached read in the loop; fetching it again here made
-                # every poll carry it twice. linien names the signal
-                # "error_signal" only while locked and "error_signal_1"
-                # while sweeping (linien_server/acquisition.py:163-177).
-                t = self.to_plot
-                if not t:
-                    t = pickle.loads(self.client.parameters.to_plot.value)
-                locked = (
-                    "error_signal" in t
-                    or bool(self.client.parameters.lock.value)
-                )
+                # The server's lock flag decides (cached, refreshed every
+                # poll). OR-ing in the trace's key, as this did, kept the
+                # header on LOCKED after an unlock until a fresh trace came:
+                # 8.6 s or more with the sweep held at a slow speed. A failed
+                # read reaches the handler below and is logged.
+                locked = bool(self.client.parameters.lock.value)
             else:
                 locked = bool(force_value)
 

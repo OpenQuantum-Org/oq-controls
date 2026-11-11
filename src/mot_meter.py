@@ -13,7 +13,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-# The plot's sweep-centre line uses the same amber: both mark "where you
+# The plot's sweep-center line uses the same amber: both mark "where you
 # are looking", and neither is a trace.
 ROI_COLOR = QtGui.QColor(235, 180, 70)
 
