@@ -46,7 +46,8 @@ factory default (or recalibrate). If the card predates OS 2.x, reflash it before
 anything else.
 
 **The server on this RP is hand-patched and must not be reinstalled.**
-`rp-f0f2b5.local` runs linien-server **2.1.0** with an MCP4921 SPI driver added
+`rp-f0f2b5.local` (our board; yours has its own `rp-xxxxxx.local` hostname,
+printed on a sticker on the board) runs linien-server **2.1.0** with an MCP4921 SPI driver added
 to `write_registers()`, which is what exposes `dac_click_voltage` and drives the
 repump VCO. `DIO3_N` is its chip select. The patch and its walkthrough live in
 the `qmot-linien-controls` repo.
@@ -114,7 +115,8 @@ unzip it anywhere, and run:
 No Python needed. The builds are unsigned: Windows SmartScreen needs
 "More info → Run anyway"; macOS needs right-click → Open the first time (or
 `xattr -dr com.apple.quarantine OpenQuantumControls.app`). Flags work the same
-as from source, e.g. from a terminal:
+as from source, e.g. from a terminal, with your Red Pitaya's hostname in place
+of ours:
 
 ```powershell
 OpenQuantumControls.exe --rp-host rp-f0f2b5.local
@@ -166,13 +168,17 @@ Three things that bite:
 python src/mot_control.py --rp-host rp-f0f2b5.local
 ```
 
+**`rp-f0f2b5.local` is our Red Pitaya; use yours.** Every board has its own
+hostname, `rp-` plus the last six characters of its MAC address, printed on a
+sticker on the board. The same goes for every `rp-f0f2b5.local` in this README.
+
 Serial ports are optional — the startup probe finds and verifies them. Every
 setting is remembered in `QSettings`, so later launches need no arguments at
 all.
 
 | flag | default | purpose |
 | --- | --- | --- |
-| `--rp-host` | saved, else `rp-f0f2b5.local` | Red Pitaya running linien-server |
+| `--rp-host` | saved, else `rp-f0f2b5.local` (ours) | Red Pitaya running linien-server; give yours once, it is then saved |
 | `--laser-port`, `--mot-coil-port`, `--dispenser-port` | auto-probed | serial ports |
 | `--mot-coil-address`, `--dispenser-address` | saved, else `1` | Modbus addresses |
 | `--vtune-min`, `--vtune-max` | saved, else `0.0`, `5.0` | V_tune slider range; 5 V is the DAC's hardware full scale, set by the Click board's Vref |
