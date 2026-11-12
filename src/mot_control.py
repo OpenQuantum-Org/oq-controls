@@ -2376,7 +2376,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             worker.set_modulation_amplitude(
                 self.mod_strength_slider.value() if on else 0
             )
-        self._note_mod_touched(pushed=worker is not None)
+        self._note_mod_touched(pushed=self._lock_worker_connected(worker))
 
     def _note_mod_touched(self, pushed):
         """Record that the operator set the dither, or that we reconciled.
@@ -3337,6 +3337,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
     def _get_lock_worker(self):
         return getattr(self.linien_widget, "linien_thread", None)
 
+    @staticmethod
+    def _lock_worker_connected(worker):
+        # The worker exists from start() to stop(), including while it is
+        # still connecting or has given up; a write then is refused. So
+        # "a worker exists" did not mean "the write landed", and the
+        # modulation touched flag cleared on a write that never happened.
+        return worker is not None and bool(getattr(worker, "connected", False))
+
     def _on_mod_freq(self, value):
         self.mod_freq_edit.setText(f"{value / 1000.0:.3f} MHz")
         self._settings.setValue("linien/mod_freq_khz", value)
@@ -3380,7 +3388,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         worker = self._get_lock_worker()
         if worker is not None:
             worker.set_modulation_amplitude(value)
-        self._note_mod_touched(pushed=worker is not None)
+        self._note_mod_touched(pushed=self._lock_worker_connected(worker))
 
     def _on_sweep_speed(self, combo_index):
         self._settings.setValue("linien/sweep_speed_index", combo_index)
@@ -4273,15 +4281,16 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         p_value, i_value, d_value = dialog.values()
-        if worker is None:
+        if worker is None or not worker.set_pid(p_value, i_value, d_value):
+            # Not remembered either: Save Config would otherwise record
+            # gains the Red Pitaya never had.
             QtWidgets.QMessageBox.warning(
                 self,
-                "Linien not connected",
-                "The PID could not be written: no Linien connection.\n"
-                "Set the Red Pitaya host and press Connect / Reconnect.",
+                "PID not written",
+                "The PID could not be written to the Red Pitaya; the\n"
+                "Event Log has the reason. Connect it and try again.",
             )
             return
-        worker.set_pid(p_value, i_value, d_value)
         self._remember_pid(p_value, i_value, d_value)
         self._event_log.log("pid_set", p=p_value, i=i_value, d=d_value)
 
@@ -4504,14 +4513,18 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         pid = linien.get("pid")
         if pid:
             worker = self._get_lock_worker()
-            if worker is not None:
-                p_value = int(pid.get("p", 50))
-                i_value = int(pid.get("i", 5))
-                d_value = int(pid.get("d", 0))
-                worker.set_pid(p_value, i_value, d_value)
+            p_value = int(pid.get("p", 50))
+            i_value = int(pid.get("i", 5))
+            d_value = int(pid.get("d", 0))
+            if worker is not None and worker.set_pid(p_value, i_value, d_value):
                 self._remember_pid(p_value, i_value, d_value)
                 self._event_log.log(
                     "pid_set", p=p_value, i=i_value, d=d_value, source="config"
+                )
+            else:
+                # It used to be skipped in silence with no Red Pitaya.
+                self._log_fault(
+                    "linien", "config PID not written: Red Pitaya not connected"
                 )
         filters = linien.get("filters")
         if filters:

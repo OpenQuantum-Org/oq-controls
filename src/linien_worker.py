@@ -511,9 +511,13 @@ class LinienWorker(QtCore.QThread):
             return None
 
     def set_pid(self, p_value: int, i_value: int, d_value: int):
-        """Write the lock PID gains (each 0–8191)."""
+        """Write the lock PID gains (each 0–8191). True once written.
+
+        The window remembers gains for Save Config only on True: it used
+        to remember gains that a refused or failed write never set.
+        """
         if not self._require_connection("PID update"):
-            return
+            return False
         try:
             params = self.client.parameters
             params.p.value = int(p_value)
@@ -522,6 +526,8 @@ class LinienWorker(QtCore.QThread):
             self.client.connection.root.write_registers()
         except Exception as e:
             self._log(f"PID update failed: {e}")
+            return False
+        return True
 
     def get_filters(self):
         """Read the channel-A error-signal filter settings, or None."""

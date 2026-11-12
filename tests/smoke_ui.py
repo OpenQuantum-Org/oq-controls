@@ -1900,6 +1900,15 @@ try:
     assert divergence["device_mv"] == 900.0 and divergence["ui_mv"] == 250
     # ...and nothing may report the displayed dither as the device's state.
     assert "modulation" not in window._readback_seen
+    # A worker that exists but is not connected refuses the write, so the
+    # operator's choice stays "touched" and survives the next readback.
+    # It used to clear, and reconnecting flipped Modulation back on.
+    window.linien_widget.linien_thread = types.SimpleNamespace(
+        set_modulation_amplitude=lambda mv: None, connected=False,
+    )
+    window._mod_touched = False
+    window.mod_enable_btn.setChecked(not window.mod_enable_btn.isChecked())
+    assert window._mod_touched, "a refused write cleared the touched flag"
     window.linien_widget.linien_thread = None
     window._mod_touched = False
     window.mod_enable_btn.setChecked(True)
