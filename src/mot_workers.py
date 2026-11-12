@@ -108,6 +108,22 @@ class SerialPresenceWorker(QtCore.QThread):
         self.wait()
 
 
+def close_linien_client(client):
+    """Close a linien client's connection, quietly if it is already gone.
+
+    The server drops a client's parameter-change queue only when it
+    disconnects (server.py on_disconnect), so a client that is never
+    closed leaves a queue growing on the Red Pitaya until garbage
+    collection happens to close the socket.
+    """
+    if client is None:
+        return
+    try:
+        client.disconnect()
+    except Exception:
+        pass  # closing a dead connection: nothing to report
+
+
 def drain_parameter_queue(client):
     """Drain this client's parameter-change queue on the server.
 
@@ -962,6 +978,12 @@ class DacClickWorker(QtCore.QThread):
         self._link = LinkHealth()
 
     def run(self):
+        try:
+            self._run()
+        finally:
+            close_linien_client(self._client)
+
+    def _run(self):
         if not self.host:
             self.connection_status.emit("no_host")
             return
@@ -1022,7 +1044,8 @@ class DacClickWorker(QtCore.QThread):
             self.msleep(100)
 
         # The linien server holds the DAC at its last value after we
-        # disconnect, so there is nothing to reset here.
+        # disconnect, so there is nothing to reset here; run()
+        # closes the connection.
 
     def stop(self):
         self.running = False
@@ -1276,6 +1299,12 @@ class LinienGpioWorker(QtCore.QThread):
         self._link = LinkHealth()
 
     def run(self):
+        try:
+            self._run()
+        finally:
+            close_linien_client(self._client)
+
+    def _run(self):
         if not self.host:
             self.connection_status.emit("no_host")
             return

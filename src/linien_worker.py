@@ -17,7 +17,7 @@ from time import monotonic, sleep
 from linien_common.common import MHz, AutolockMode, Vpp
 
 from mot_logging import NULL_LOG
-from mot_workers import LinkHealth, drain_parameter_queue
+from mot_workers import LinkHealth, close_linien_client, drain_parameter_queue
 
 # See linien_widget: rp-F0C6AD was a different Red Pitaya.
 DEFAULT_RP_HOST = "rp-f0f2b5.local"
@@ -180,6 +180,9 @@ class LinienWorker(QtCore.QThread):
 
     def _connect_once(self):
         dev = Device(host=self.host, username=self.username, password=self.password)
+        # A failed attempt's connection is closed before the next one
+        # opens; each left open is a parameter queue held on the server.
+        close_linien_client(getattr(self, "client", None))
         self.client = LinienClient(dev)
         self.client.connect(autostart_server=True, use_parameter_cache=True)
 
@@ -368,11 +371,17 @@ class LinienWorker(QtCore.QThread):
         try:
             if self.unlock_on_stop and self.connected:
                 self.client.connection.root.start_sweep()
-            elif not self.unlock_on_stop:
+            elif not self.unlock_on_stop and self._last_ui_lock_state:
+                # Only when there was a lock to leave: this was logged on
+                # every close, locked or not.
                 self.event_log.log("lock_left_engaged", reason="operator_choice")
         except Exception as e:
             self._log("could not start sweep on stop: " + str(e))
         self.wait()
+        # Closed here, after the sweep above, not at the end of run(): the
+        # loop can finish while stop() is still waiting out an action, and
+        # closing first would turn the unlock into "stream closed".
+        close_linien_client(getattr(self, "client", None))
 
     def _log(self, message):
         """Record what would otherwise have gone to stdout."""
