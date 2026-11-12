@@ -244,6 +244,36 @@ def test_a_heartbeat_that_never_ticks_is_not_reported_as_a_stall():
     assert seen == [], seen
 
 
+def test_a_dropped_connection_is_not_a_stall():
+    """Bench, 2026-11-10: "server heartbeat stopped -- it is wedged" five
+    seconds after the Red Pitaya was power-cycled. The ping is a cached
+    parameter, so over a dead connection it reads its last value forever;
+    the check now runs only after a poll that reached the server.
+    """
+    from time import monotonic
+
+    w = worker()
+    w.STALL_AFTER_S = 0.0
+    # A heartbeat already trusted and long quiet: one check would cry stall.
+    w._ping_ever_moved = True
+    w._last_ping = 7
+    w._ping_changed_at = monotonic() - 100
+    w.client.parameters.ping.value = 7
+
+    class Dead:
+        @property
+        def value(self):
+            raise EOFError("stream has been closed")
+
+    w.client.parameters._params["to_plot"] = Dead()
+    seen = []
+    w.server_stalled.connect(seen.append)
+    w.msleep = lambda ms: setattr(w, "running", False)  # one poll only
+    w._acquire()
+    assert seen == [], seen
+    assert not w._stalled
+
+
 def test_the_parameter_queue_is_drained():
     """Nothing drained it, so it grew on the server for every client.
 

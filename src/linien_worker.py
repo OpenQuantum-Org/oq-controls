@@ -327,12 +327,19 @@ class LinienWorker(QtCore.QThread):
                     # the row must stop saying OK. Once, not per poll.
                     self.connection_status.emit(f"error:{type(e).__name__}: {e}")
                 self._log("acquisition failed: " + str(e))
+                # Restart the heartbeat's quiet clock once reads work again.
+                self._ping_changed_at = None
             else:
                 if self._link.ok():
                     self.connection_status.emit(f"connected:{self.host}")
+                # Only after a poll that reached the server: the ping is a
+                # cached parameter, so over a dead connection it reads the
+                # last value forever and looked like a wedged server (bench,
+                # 2026-11-10: "wedged" 5 s after the link dropped). A
+                # wedged server still answers reads, so it is still caught.
+                self._check_server_alive()
 
             self._emit_lock_state_best_effort()
-            self._check_server_alive()
             self.msleep(200)
 
         self.event_log.log("linien_loop_ended", host=self.host)
