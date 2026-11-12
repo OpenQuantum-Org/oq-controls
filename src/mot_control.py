@@ -3681,6 +3681,15 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._apply_laser_off_rule)
 
     def _follow_laser_off(self):
+        # A lock goes too (operator, 2026-11-11): with the laser dark it
+        # holds nothing. First, before the modulation it locks on goes.
+        # Skipped while a lock action runs -- this can be reached twice
+        # for one laser-off, and a second request only says "Still busy."
+        if (self._lock_engaged
+                and self._lock_worker_connected(self._get_lock_worker())
+                and not getattr(self, "_lock_action_running", False)):
+            self._event_log.log("lock_auto_off", reason="laser_off")
+            self.linien_widget._run_unlock()
         for attr, reason_key in (
             ("repump_gpio_btn", "repump_gate_auto_off"),
             ("mod_enable_btn", "modulation_auto_off"),

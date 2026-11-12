@@ -911,6 +911,19 @@ try:
     assert not window.mod_enable_btn.isEnabled()
     assert not window.repump_gpio_btn.isEnabled()
     assert any(r.get("event") == "modulation_auto_off" for r in _records())
+    # ...and a lock is released with them: dark, it holds nothing.
+    unlocks = []
+    window.linien_widget.linien_thread = types.SimpleNamespace(
+        connected=True, unlock_laser=lambda: unlocks.append(1),
+        set_modulation_amplitude=lambda mv: None,
+    )
+    window._on_lock_state(True)
+    window._apply_laser_off_rule()
+    assert unlocks == [1], unlocks
+    window._on_lock_state(False)
+    window._apply_laser_off_rule()
+    assert unlocks == [1], "unlocked again with nothing locked"
+    window.linien_widget.linien_thread = None
     # Back to "laser not reported", where nothing is enforced.
     window._readback_seen.discard("laser")
     window._apply_laser_off_rule()
