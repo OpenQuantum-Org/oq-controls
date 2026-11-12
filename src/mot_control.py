@@ -4366,6 +4366,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             "dispenser": {
                 "fire_current_a": self._dispenser_fire_current,
                 "fire_seconds": self._dispenser_fire_seconds,
+                "fire_voltage_v": self._dispenser_fire_voltage,
                 "total_fires": self._int_setting("dispenser/total_fires", 0),
                 "total_fire_s": self._float_setting(
                     "dispenser/total_fire_s", 0.0
@@ -4651,6 +4652,13 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._psd_window.apply_settings()
 
         dispenser = config.get("dispenser", {})
+        if "fire_voltage_v" in dispenser:
+            # Headroom only -- the dispenser runs current-limited -- so it
+            # loads like any setpoint; current and time keep the prompt.
+            # It was neither saved nor loaded before.
+            self.dispenser_voltage_slider.setValue(
+                int(round(float(dispenser["fire_voltage_v"]) * 1000))
+            )
         new_current = float(
             dispenser.get("fire_current_a", self._dispenser_fire_current)
         )
