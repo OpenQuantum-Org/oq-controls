@@ -151,6 +151,7 @@ class MotMeter(QtWidgets.QWidget):
             "Brightness inside the amber box, above the frame's background\n"
             "(grey levels). Higher is a bigger or denser MOT."
         )
+        self._value_tip = self.value_label.toolTip()
         row.addWidget(self.value_label)
 
         self.spark = pg.PlotWidget()
@@ -169,6 +170,9 @@ class MotMeter(QtWidgets.QWidget):
         self._failed = False
 
     def add(self, value):
+        if self._failed:  # a good frame after a bad one: running again
+            self._failed = False
+            self.value_label.setToolTip(self._value_tip)
         now = time.monotonic()
         self._history.append((now, value))
         while self._history and now - self._history[0][0] > HISTORY_S:

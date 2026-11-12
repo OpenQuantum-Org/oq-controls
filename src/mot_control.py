@@ -924,10 +924,16 @@ class CameraViewWidget(QtWidgets.QWidget):
                 return
             value = roi_brightness(qimage_to_gray(image), self._roi_norm)
         except Exception as e:
-            self.video_item.videoSink().videoFrameChanged.disconnect(self._on_frame)
+            # Keep listening: one bad frame (a camera switch, say) used to
+            # disconnect the meter for the rest of the session. The next
+            # good frame clears the error; each distinct failure is
+            # reported once, not at 5 Hz.
             self.meter.show_error(str(e))
-            self.fault.emit(f"brightness meter stopped: {e}")
+            if str(e) != getattr(self, "_meter_error", None):
+                self._meter_error = str(e)
+                self.fault.emit(f"brightness meter failed: {e}")
             return
+        self._meter_error = None
         self.meter.add(value)
 
     def _on_camera_selected(self, index):
