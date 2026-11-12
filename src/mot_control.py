@@ -12,6 +12,7 @@ timed fire (30 s default, 120 s at most).
 
 import html
 import json
+import math
 import os
 import sys
 import time
@@ -4466,6 +4467,66 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return
         self._apply_config(config, path=path)
 
+    # What _apply_config reads, and the conversion it applies to each.
+    _CONFIG_SCHEMA = {
+        "connection": {
+            "rp_host": str, "laser_port": str, "mot_coil_port": str,
+            "dispenser_port": str, "mot_coil_address": int,
+            "dispenser_address": int,
+        },
+        "linien": {
+            "mod_freq_khz": int, "mod_phase_deg": int, "mod_strength_mv": int,
+            "sweep_speed_index": int, "pid": dict, "filters": dict,
+        },
+        "laser": {"current_ma": float, "thermistor_ohm": float},
+        "repump": {"vtune_v": float},
+        "coils": {"voltage_v": float, "current_a": float},
+        "psd": {"algorithm": int, "max_decimation": int},
+        "dispenser": {
+            "fire_current_a": float, "fire_seconds": float,
+            "fire_voltage_v": float,
+        },
+    }
+
+    @classmethod
+    def _config_problems(cls, config):
+        """Every value _apply_config would choke on, as readable lines."""
+        problems = []
+
+        def check(where, value, kind):
+            try:
+                if kind is dict:
+                    if not isinstance(value, dict):
+                        raise ValueError("not a section")
+                    return
+                converted = kind(value)
+                if kind is float and not math.isfinite(converted):
+                    raise ValueError("not a finite number")
+            except (TypeError, ValueError) as e:
+                problems.append(f"{where} = {value!r}: {e}")
+
+        for section, keys in cls._CONFIG_SCHEMA.items():
+            block = config.get(section, {})
+            if not isinstance(block, dict):
+                problems.append(f"{section}: not a section")
+                continue
+            for key, kind in keys.items():
+                if key in block:
+                    check(f"{section}.{key}", block[key], kind)
+        linien = config.get("linien", {})
+        if isinstance(linien, dict):
+            pid = linien.get("pid")
+            if isinstance(pid, dict):
+                for key in ("p", "i", "d"):
+                    if key in pid:
+                        check(f"linien.pid.{key}", pid[key], int)
+            filters = linien.get("filters")
+            if isinstance(filters, dict):
+                for key, value in filters.items():
+                    if key.endswith(("_type", "_frequency")):
+                        check(f"linien.filters.{key}", value, int)
+        return problems
+
     def _apply_config(self, config, path=None):
         """Apply a config snapshot to the UI (handlers push to hardware).
 
@@ -4481,6 +4542,23 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         use them. Dispenser settings are confirmation-gated. The fire
         history is device truth and is never loaded.
         """
+        # Everything is checked before anything is written: a bad value
+        # used to raise halfway through, after the modulation, PID and
+        # filters had already gone to the Red Pitaya -- the worst outcome
+        # for a load that pushes without asking.
+        problems = self._config_problems(config)
+        if problems:
+            self._event_log.fault(
+                "config_rejected", path=str(path) if path else None,
+                problems=problems,
+            )
+            if path:
+                QtWidgets.QMessageBox.warning(
+                    self, "Config not loaded",
+                    "Nothing was changed. The file has values this app "
+                    "cannot use:\n\n" + "\n".join(problems[:10]),
+                )
+            return
         # A hand-edited or older file could carry one; nothing below reads
         # it, but the record should say it was there and ignored.
         self._reject_state_keys(config)

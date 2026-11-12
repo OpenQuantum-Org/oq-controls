@@ -1622,6 +1622,21 @@ try:
     window._apply_config({"laser": {"current_ma": 92}})
     assert window.current_slider.value() == 9200
     assert window.mot_coil_current_slider.value() == 2200
+    # One bad value and nothing is applied, not even the good values that
+    # come before it: the load used to raise halfway through, after the
+    # modulation and filters had already reached the Red Pitaya.
+    phase_was = window.mod_phase_slider.value()
+    before = len(_records())
+    window._apply_config({
+        "linien": {"mod_phase_deg": (phase_was + 40) % 360},
+        "laser": {"current_ma": "88,6"},
+    })
+    assert window.mod_phase_slider.value() == phase_was
+    assert window.current_slider.value() == 9200
+    rejected = next(
+        r for r in _records()[before:] if r["event"] == "config_rejected"
+    )
+    assert "laser.current_ma" in rejected["problems"][0], rejected
 
     # --- A config is setpoints. It can never switch an output. ---
     # Nothing in _collect_config describes an output today, but that held
