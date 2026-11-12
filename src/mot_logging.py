@@ -187,7 +187,7 @@ class EventLog:
         # Repeat-collapse state for fault(). Its own lock: the file lock is
         # held during the write, and this has to be decided before it.
         self._fault_lock = threading.Lock()
-        # signature -> [suppressed_count, run_started_monotonic]
+        # signature -> [suppressed_count, first_seen, last_seen] (monotonic)
         self._fault_runs = {}
 
     def path_for_today(self):
@@ -235,16 +235,20 @@ class EventLog:
             suppress = run is not None and now - run[1] < self.FAULT_REPEAT_WINDOW_S
             if suppress:
                 run[0] += 1
+                run[2] = now
                 summaries = []
             else:
                 # Its own count first: a failure that outlasts the window
                 # starts a new run, and the old one's tally is due now.
                 summaries = (
-                    [self._summary_record(signature, run[0], now - run[1])]
+                    [self._summary_record(signature, run[0], run[2] - run[1])]
                     if run is not None and run[0]
                     else []
                 )
-                self._fault_runs[signature] = [0, now]
+                # [repeats, first seen, last seen]: over_s spans the
+                # repeats themselves. It measured to whenever the summary
+                # was written, so a flush at shutdown claimed 30 s extra.
+                self._fault_runs[signature] = [0, now, now]
             # Runs are per signature, not one "last fault": two devices
             # failing at once alternate, and a single slot would collapse
             # neither of them.
@@ -261,13 +265,13 @@ class EventLog:
         outside the lock.
         """
         records = []
-        for signature, (count, t0) in list(self._fault_runs.items()):
+        for signature, (count, t0, t_last) in list(self._fault_runs.items()):
             if signature == keep or now - t0 < self.FAULT_REPEAT_WINDOW_S:
                 continue
             del self._fault_runs[signature]
             if not count:
                 continue  # nothing repeated: the one record already stands
-            records.append(self._summary_record(signature, count, now - t0))
+            records.append(self._summary_record(signature, count, t_last - t0))
         return records
 
     def _summary_record(self, signature, count, over_s):

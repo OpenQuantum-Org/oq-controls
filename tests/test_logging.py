@@ -139,6 +139,15 @@ def main():
     assert linien["count"] == 19, linien
     log.FAULT_REPEAT_WINDOW_S = EventLog.FAULT_REPEAT_WINDOW_S
 
+    # The span is first to last repeat, not to whenever the summary was
+    # written: every summary flushed at shutdown claimed 30 s extra.
+    log.fault("span", message="twice in a row")
+    log.fault("span", message="twice in a row")
+    log.flush_repeats()
+    span = [r for r in read(log)
+            if r["event"] == "fault_repeated" and r["of"] == "span"][-1]
+    assert span["count"] == 1 and span["over_s"] < 1.0, span
+
     # ...and on the way out, for a run whose window is still open.
     before = len(read(log))
     for _ in range(5):
