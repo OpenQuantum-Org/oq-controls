@@ -1076,6 +1076,19 @@ try:
     assert window.laser_usb_status.text() == "Error"
     assert "Auto-connect" in window.laser_usb_status.toolTip()
     assert any(r["event"] == "port_returned" for r in _records()[before:])
+
+    # Back on a different port: gone from COM77, reconnected on COM78. A
+    # later USB change must not flip the connected row to Error (the old
+    # "missing" mark outlived the reconnect).
+    window._on_ports_present(others)  # COM77 gone again
+    window.laser_edit.setText("COM78")
+    window._set_usb_status_label(
+        window.laser_usb_status, "connected:COM78", "laser"
+    )
+    window._on_ports_present(others | {"COM78", "COM99"})  # any USB change
+    assert window.laser_usb_status.text() == "OK", (
+        window.laser_usb_status.toolTip()
+    )
     window.laser_edit.setText("")
 
     # Anything already energised when the app connects gets named. The

@@ -4783,6 +4783,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         )
         if key is not None:
             self._device_connected[key] = text == "OK"
+            if text == "OK":
+                # Connected, so whatever port went missing before is
+                # history. Kept, a device back on a different port (COM4
+                # -> COM5) flipped to Error at the next USB change while
+                # it was running fine.
+                self._port_missing.pop(key, None)
             if text != "OK":
                 # Its last readback is stale now, so nothing may keep
                 # reporting what is on screen as this device's own state.
