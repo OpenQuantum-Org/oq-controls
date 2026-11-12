@@ -880,6 +880,9 @@ try:
     window._on_laser_init({"current": 62.5, "thermistor": 9999, "output_on": True})
     assert pushed == [], pushed
     assert window.current_slider.value() == 6250, window.current_slider.value()
+    # Temperature is not adopted: the Koheron reports the measured value
+    # (rtact), not the setpoint, so the saved setpoint stays on screen.
+    assert window.therm_slider.value() == 2719, window.therm_slider.value()
     # The button shows the lit diode (the fake has no laser_on, so a
     # write-back would raise), and shutdown therefore offers it. It used
     # to stay "Laser Off" and the close dialog left the laser on unasked.

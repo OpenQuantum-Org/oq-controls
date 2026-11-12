@@ -3569,17 +3569,22 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self.current_slider.blockSignals(False)
         self.current_edit.setText(f"{float(values['current']):.2f} mA")
 
-        therm_c = thermistor_ohms_to_c(int(values["thermistor"]))
-        self.therm_slider.blockSignals(True)
-        self.therm_slider.setValue(int(round(therm_c * 100)))
-        self.therm_slider.blockSignals(False)
-        self.therm_edit.setText(f"{therm_c:.2f} \N{DEGREE SIGN}C")
+        # Temperature is not adopted (operator, 2026-11-11): what the
+        # Koheron reports here is rtact, the measured thermistor, not the
+        # setpoint, and adopting it put a still-settling reading into the
+        # slider and from there into saved configs. The slider keeps the
+        # saved setpoint and nothing is written to the running laser; the
+        # reading goes to the log.
         self._event_log.log(
             "laser_init",
             current_ma=round(float(values["current"]), 2),
-            thermistor_ohm=int(values["thermistor"]),
+            thermistor_ohm_measured=int(values["thermistor"]),
+            temp_c_measured=round(
+                thermistor_ohms_to_c(int(values["thermistor"])), 2
+            ),
+            temp_c_setpoint_ui=round(self.therm_slider.value() / 100.0, 2),
             output_on=bool(values.get("output_on", True)),
-            adopted=True,
+            adopted="current",
         )
 
     def _restore_laser_setpoints(self):
