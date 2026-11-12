@@ -97,25 +97,60 @@ two and press Auto-connect again before assuming anything is wrong.
 
 ## 2. Lab PC
 
-Python 3.12. Clone, make a virtualenv, install into it:
+Two ways to run it. They are the same app; pick one per machine.
+
+### Option A: the executable (operators)
+
+Download the zip for your OS from the
+[releases page](https://github.com/OpenQuantum-Org/oq-controls/releases),
+unzip it anywhere, and run:
+
+| OS | run |
+| --- | --- |
+| Windows | `OpenQuantumControls\OpenQuantumControls.exe` |
+| macOS | `OpenQuantumControls.app` |
+| Linux | `OpenQuantumControls/OpenQuantumControls` |
+
+No Python needed. The builds are unsigned: Windows SmartScreen needs
+"More info → Run anyway"; macOS needs right-click → Open the first time (or
+`xattr -dr com.apple.quarantine OpenQuantumControls.app`). Flags work the same
+as from source, e.g. from a terminal:
+
+```powershell
+OpenQuantumControls.exe --rp-host rp-f0f2b5.local
+```
+
+Logs go to the per-user app-data folder, not next to the executable:
+`%APPDATA%\OQ-Controls\OpenQuantumControls\logs` on Windows,
+`~/Library/Application Support/OQ-Controls/OpenQuantumControls/logs` on macOS,
+`~/.local/share/OQ-Controls/OpenQuantumControls/logs` on Linux.
+
+### Option B: from source (development)
+
+Python 3.12. Clone, make a virtualenv, activate it, install:
 
 ```powershell
 git clone https://github.com/OpenQuantum-Org/oq-controls.git
 cd oq-controls
 py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
 ```bash
 # macOS / Linux
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 Three things that bite:
 
-- **Always use the explicit `.venv\Scripts\python.exe -m pip` form.** A bare
-  `pip` hits the global interpreter and clobbers editable linien installs there.
+- **Activate the venv first, every new terminal.** Once it is active, `python`
+  and `pip` are the venv's. Without it they are the global interpreter: `pip`
+  then clobbers the editable linien installs there, and an older global PyQt6
+  stops at launch with a `QFontDatabase.families()` error. The prompt shows
+  `(.venv)` when it is active.
 - **linien-client is pinned to 2.1.0** in `requirements.txt`, matching the
   patched server — do not float it. A newer client raises
   `InvalidServerVersionException` on connect, and the paths that respond to that
@@ -127,8 +162,8 @@ Three things that bite:
 
 ## 3. First run
 
-```powershell
-.venv\Scripts\python.exe src\mot_control.py --rp-host rp-f0f2b5.local
+```bash
+python src/mot_control.py --rp-host rp-f0f2b5.local
 ```
 
 Serial ports are optional — the startup probe finds and verifies them. Every
@@ -383,31 +418,55 @@ registered from bytes, because the path-based Qt API silently fails on Qt 6.11.
 Five hardware-free suites, run directly. CI runs all five on every push to
 `main` or `v1` and on every pull request.
 
-```powershell
-.venv\Scripts\python.exe tests\test_logging.py     # event log: correlation, faults, retention
-.venv\Scripts\python.exe tests\test_workers.py     # linien unit conversions, link health, stalls
-.venv\Scripts\python.exe tests\test_dispenser.py   # fire state machine, VCO + thermistor
-.venv\Scripts\python.exe tests\test_probe.py       # USB port identification logic
-.venv\Scripts\python.exe tests\smoke_ui.py         # offscreen UI build + behaviour checks
+```bash
+python tests/test_logging.py     # event log: correlation, faults, retention
+python tests/test_workers.py     # linien unit conversions, link health, stalls
+python tests/test_dispenser.py   # fire state machine, VCO + thermistor
+python tests/test_probe.py       # USB port identification logic
+python tests/smoke_ui.py         # offscreen UI build + behaviour checks
 ```
 
 All five are hardware-free, so green says nothing about the devices. A green run
 says the UI *constructed* — read `mot-ui-smoke.png`, which the smoke test writes
 (gitignored; it is a build output, read once right after the run that made it).
 
-## Packaged builds
+## Releasing a new version
 
-`.github/workflows/build.yml` runs the suites on every push and pull request,
-and builds standalone executables for macOS, Linux and Windows on a version tag
-(`v*`) or a manual run. A tag also attaches them to a GitHub release.
+Executables are built by CI and published on the
+[releases page](https://github.com/OpenQuantum-Org/oq-controls/releases), never
+committed: one build is ~250 MB, over GitHub's 100 MB file limit, and every
+rebuild would stay in the history for good.
+
+`.github/workflows/build.yml` runs the five suites on every push and pull
+request. Pushing a version tag (`v*`) also builds macOS, Linux and Windows
+executables and attaches them to a GitHub release for that tag.
+
+Day to day, work on `v1` and commit as usual; nothing is built. To release:
+
+1. Run the five suites and read the screenshot (above).
+2. Check the change at the bench. The suites cannot.
+3. Merge `v1` into `main` (pull request), so the release is what `main` holds.
+4. Tag `main` and push the tag:
+
+   ```bash
+   git checkout main
+   git pull
+   git tag v0.3.0
+   git push origin v0.3.0
+   ```
+
+5. Watch the run under the repo's **Actions** tab (about 15 minutes for all
+   three platforms). The release appears with three zips attached; add a line
+   saying what changed.
+
+Version numbers: bump the last digit for fixes, the middle one for new
+features or behaviour an operator would notice.
+
+To try a build locally before tagging (Windows output shown; it lands in
+`dist/`, which is gitignored):
 
 ```bash
-pip install pyinstaller
-pyinstaller OpenQuantumControls.spec --noconfirm   # -> dist/
+pip install pyinstaller==6.22.3
+pyinstaller OpenQuantumControls.spec --noconfirm
+dist/OpenQuantumControls/OpenQuantumControls.exe --rp-host rp-f0f2b5.local
 ```
-
-- The binaries are unsigned: macOS needs right-click → Open (or
-  `xattr -dr com.apple.quarantine <app>`), Windows SmartScreen needs
-  "More info → Run anyway".
-- Packaged builds write logs and data to the OS per-user app-data directory
-  (macOS: `~/Library/Application Support/OQ-Controls/OpenQuantumControls/logs`).
