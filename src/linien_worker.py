@@ -808,6 +808,13 @@ class LinienWorker(QtCore.QThread):
     # window-wide fit scores such a dip low.
     PHASE_WINDOW_V = (-0.020, -0.015, -0.010, -0.005, 0.0,
                       0.005, 0.010, 0.015, 0.020)
+    # A new phase must beat the old by this factor and reach this slope
+    # (V/V) before Mod Phase is changed. Bench, 2026-11-10: good results
+    # were 0.18-0.9 V/V, and with the modulation off every slope read
+    # 0.000 yet Mod Phase still moved 167 -> 69 deg on noise. The floor is
+    # a judgement from those numbers, not a measured noise level.
+    PHASE_GAIN_MIN = 1.2
+    PHASE_SLOPE_MIN_V_PER_V = 0.02
 
     def _optimise_phase(self):
         """Pick the demod phase with the steepest error slope at the center.
@@ -837,9 +844,17 @@ class LinienWorker(QtCore.QThread):
         old_phase = float(params.demodulation_phase_a.value)
         xs = np.array(self.PHASE_WINDOW_V)
 
+        def frame_now():
+            err = pickle.loads(params.to_plot.value).get("error_signal_1")
+            return None if err is None else np.asarray(err, dtype=float)
+
         def measure(quadrature):
             """Mean error (or (I, Q)) at each window point, counts."""
-            frame, out = None, []
+            # Start from the frame already there, so the first one counted
+            # as new is really after the write. Starting from None took
+            # the stale frame as change one and a frame that may straddle
+            # the write as change two.
+            frame, out = frame_now(), []
             for dx in xs:
                 params.sweep_center.value = center + dx
                 root.write_registers()
@@ -884,7 +899,8 @@ class LinienWorker(QtCore.QThread):
                 before_v_per_v=round(before, 3),
                 tried=[{"deg": p, "v_per_v": round(m, 3)} for m, p in tried],
             )
-            if measured > before:
+            if (measured > before * self.PHASE_GAIN_MIN
+                    and measured >= self.PHASE_SLOPE_MIN_V_PER_V):
                 params.demodulation_phase_a.value = phase
                 result = (phase, before, measured)
             else:
