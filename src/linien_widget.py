@@ -1005,6 +1005,12 @@ class LinienWidget(QtWidgets.QWidget):
     def _on_lock_state(self, locked: bool):
         if locked:
             self.show_lock_message("")
+        else:
+            # Hidden here, not only by the next unlocked frame: after a
+            # laser-off unlock with the sweep held none arrived, and the
+            # readout stayed beside the returning lock buttons, widening
+            # the whole side panel.
+            self.control_label.setVisible(False)
         self._set_locked_ui(locked)
         self.lock_state_changed.emit(locked)
 

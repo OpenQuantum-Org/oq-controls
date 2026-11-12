@@ -396,6 +396,16 @@ try:
     QtWidgets.QApplication.sendEvent(scroll_area.viewport(), wheel_down)
     assert vbar.value() > 0
 
+    # An unlock hides the Control readout itself. It used to wait for the
+    # next unlocked frame; with the sweep held after a laser-off unlock
+    # none came, and the readout sat beside the returning lock buttons,
+    # widening the side panel into a horizontal scroll.
+    lw = window.linien_widget
+    lw._on_lock_state(True)
+    lw.control_label.setVisible(True)  # as a locked frame would
+    lw._on_lock_state(False)
+    assert not lw.control_label.isVisibleTo(lw)
+
     # Health chips: lock, USB, coils, dispenser.
     window._on_lock_state(True)
     assert window.chip_text("lock") == "LOCKED"
