@@ -45,6 +45,9 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    # Windows only: on macOS PyInstaller would try to convert the .ico to
+    # .icns, which needs Pillow and fails the build without it.
+    icon="assets/icon.ico" if sys.platform == "win32" else None,
 )
 
 coll = COLLECT(

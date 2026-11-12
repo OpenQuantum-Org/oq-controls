@@ -5085,6 +5085,8 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setOrganizationName("OQ-Controls")
     app.setApplicationName("OpenQuantumControls")
+    # Title bar and taskbar; the .exe's own file icon comes from the spec.
+    app.setWindowIcon(QtGui.QIcon(resource_path("assets", "icon.png")))
 
     load_app_fonts()
     # setFont covers non-stylesheet text (e.g. pyqtgraph axis labels).
