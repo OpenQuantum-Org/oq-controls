@@ -9,6 +9,13 @@ import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
+# A 3.12.0 bundle builds cleanly but dies on first connect: scipy.stats
+# raises NameError: name 'obj' is not defined at import, frozen only.
+# 3.12.10 builds a working one.
+if sys.version_info[:3] == (3, 12, 0):
+    raise SystemExit("Python 3.12.0 builds a broken bundle (scipy.stats "
+                     "fails to import). Build with a later 3.12.")
+
 a = Analysis(
     ["src/mot_control.py"],
     pathex=["src"],

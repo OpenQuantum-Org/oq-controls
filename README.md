@@ -463,7 +463,8 @@ Version numbers: bump the last digit for fixes, the middle one for new
 features or behaviour an operator would notice.
 
 To try a build locally before tagging (Windows output shown; it lands in
-`dist/`, which is gitignored):
+`dist/`, which is gitignored). Build with Python 3.12.1 or later: a 3.12.0
+build crashes on connect, so the spec refuses it.
 
 ```bash
 pip install pyinstaller==6.22.3
