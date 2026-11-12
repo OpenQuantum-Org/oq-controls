@@ -1866,7 +1866,12 @@ try:
     # The wheel-guard check above leaves the column scrolled; put it back
     # so the reference screenshot is not clipped at the top.
     window.findChild(QtWidgets.QScrollArea).verticalScrollBar().setValue(0)
-    app.processEvents()
+    # Several passes: a collapse re-lays out one nesting level per pass
+    # (Manual setup -> Devices -> the column). After one, the screenshot
+    # caught the Devices card at its old expanded height and showed a
+    # gap under Auto-connect that the running app never has.
+    for _ in range(5):
+        app.processEvents()
 
     pixmap = window.grab()
     out = os.path.join(ROOT, "mot-ui-smoke.png")
