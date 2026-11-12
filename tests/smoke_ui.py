@@ -2022,7 +2022,7 @@ try:
     w1.mod_freq_slider.setValue(23456)
     w1.current_slider.setValue(9550)   # 95.50 mA
     w1.therm_slider.setValue(2050)  # 20.50 C
-    w1.mot_coil_voltage_slider.setValue(12000)
+    w1.mot_coil_voltage_slider.setValue(7000)
     w1.mot_coil_current_slider.setValue(2500)
     w1.vtune_slider.setValue(29000)
     w1.sweep_speed_combo.setCurrentIndex(4)
@@ -2065,7 +2065,7 @@ try:
     # Temperature persists as ohms, so the restored slider count can land
     # one 0.01 C step away from where it was set.
     assert abs(w2.therm_slider.value() - 2050) <= 1, w2.therm_slider.value()
-    assert w2.mot_coil_voltage_slider.value() == 12000
+    assert w2.mot_coil_voltage_slider.value() == 7000
     assert w2.mot_coil_current_slider.value() == 2500
     assert w2.vtune_slider.value() == 29000
     assert w2.sweep_speed_combo.currentIndex() == 4

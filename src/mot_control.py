@@ -51,6 +51,7 @@ from mot_meter import (
     METER_INTERVAL_S, MotMeter, RoiItem, VideoView, qimage_to_gray, roi_brightness,
 )
 from mot_workers import (
+    MAX_COIL_VOLTAGE_V,
     DacClickWorker,
     DispenserWorker,
     LaserSetpointWorker,
@@ -2581,8 +2582,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             layout,
             "Voltage:",
             0,
-            50000,
-            self._int_setting("coil/voltage_mv", 5000, 0, 50000),
+            int(MAX_COIL_VOLTAGE_V * 1000),
+            self._int_setting(
+                "coil/voltage_mv", 5000, 0, int(MAX_COIL_VOLTAGE_V * 1000)
+            ),
             # Stored in mV, shown to 0.1 V, so the step matches the display.
             single=100,
             page=1000,
@@ -3242,6 +3245,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             model="DPS5005",
             event_log=self._event_log,
             log_name="coil",
+            max_voltage=MAX_COIL_VOLTAGE_V,
         )
         self.mot_coil_worker.connection_status.connect(
             lambda status: self._set_usb_status_label(

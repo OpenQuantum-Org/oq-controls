@@ -246,13 +246,19 @@ assert w6.dispense_current_a == 7.5
 w7 = DispenserWorker(port=None, fire_seconds=600.0, dispense_current_a=0)
 assert w7.dispense_current_a == 0.01, w7.dispense_current_a  # floor, not 7.5
 assert w7.fire_seconds == DispenserWorker.MAX_FIRE_SECONDS
-# ...and the voltage is capped at 5 V wherever it comes from (operator,
-# 2026-11-11): constructor, or a runtime override from the card.
+# ...and the voltage is capped at 10 V wherever it comes from (operator,
+# 2026-11-12): constructor, or a runtime override from the card.
 w12 = DispenserWorker(port=None, dispense_voltage_v=12.0)
-assert w12.dispense_voltage_v == 5.0, w12.dispense_voltage_v
-w12.set_fire_parameters(7.5, 30.0, voltage_v=9.0)
+assert w12.dispense_voltage_v == 10.0, w12.dispense_voltage_v
+w12.set_fire_parameters(7.5, 30.0, voltage_v=15.0)
 w12._process_pending()
-assert w12.dispense_voltage_v == 5.0, w12.dispense_voltage_v
+assert w12.dispense_voltage_v == 10.0, w12.dispense_voltage_v
+# The coil supply takes the same 10 V cap at the worker, so a value that
+# gets past the slider (a config file, a scroll) still cannot reach it.
+from mot_workers import MAX_COIL_VOLTAGE_V, RidenDPSWorker  # noqa: E402
+coil = RidenDPSWorker(port=None, max_voltage=MAX_COIL_VOLTAGE_V)
+coil.set_voltage(43.976)
+assert coil._pending == [("voltage", 10.0)], coil._pending
 
 # --- VCO tuning: ROS-3000-619+ datasheet +25 C curve, clamped to 0-5 V ---
 from mot_control import (  # noqa: E402

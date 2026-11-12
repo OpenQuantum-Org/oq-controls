@@ -290,6 +290,11 @@ DPS_MODELS = {
     },
 }
 
+# Operator, 2026-11-12: the coils never need more than 10 V of headroom
+# (they run current-limited). Passed as the coil worker's max_voltage so it
+# is enforced where it is written, not only by the slider.
+MAX_COIL_VOLTAGE_V = 10.0
+
 
 class LinkHealth:
     """Turns a stream of per-poll failures into two edges: down, and back.
@@ -344,6 +349,7 @@ class RidenDPSWorker(QtCore.QThread):
         poll_ms=500,
         event_log=None,
         log_name="dps",
+        max_voltage=None,
     ):
         super().__init__()
         spec = DPS_MODELS[model]
@@ -359,6 +365,8 @@ class RidenDPSWorker(QtCore.QThread):
         self.current_scale = spec["current_scale"]
         self.power_scale = spec["power_scale"]
         self.max_voltage = spec["max_voltage"]
+        if max_voltage is not None:
+            self.max_voltage = min(self.max_voltage, float(max_voltage))
         self.max_current = spec["max_current"]
         self.disable_on_stop = bool(disable_on_stop)
         self.poll_ms = int(poll_ms)
@@ -580,10 +588,11 @@ class DispenserWorker(RidenDPSWorker):
     FIRE_SECONDS = 30.0
     DISPENSE_CURRENT_A = 7.5
     DISPENSE_VOLTAGE_V = 5.0
-    # Operator, 2026-11-11: the dispenser never needs more than 5 V of
-    # headroom (it runs current-limited), so nothing may program more --
-    # enforced here, where it is written, not only by the slider.
-    MAX_DISPENSE_VOLTAGE_V = 5.0
+    # Operator, 2026-11-12 (was 5 V from 2026-11-11): the dispenser never
+    # needs more than 10 V of headroom (it runs current-limited), so nothing
+    # may program more -- enforced here, where it is written, not only by
+    # the slider.
+    MAX_DISPENSE_VOLTAGE_V = 10.0
     MIN_FIRE_SECONDS = 1.0
     # With the re-fire lockout gone, the fire time is the only limit on how
     # long 7.5 A flows, so it is bounded here, where it is enforced, and not
