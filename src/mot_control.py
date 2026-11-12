@@ -1198,9 +1198,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 DispenserWorker.MAX_FIRE_SECONDS,
             ),
         )
-        self._dispenser_fire_voltage = self._float_setting(
-            "dispenser/fire_voltage_v", DispenserWorker.DISPENSE_VOLTAGE_V
-        )
+        # Clamped like the fire time: a stored value above the slider's
+        # 5 V would otherwise reach the worker unchanged.
+        self._dispenser_fire_voltage = max(0.0, min(
+            self._float_setting(
+                "dispenser/fire_voltage_v", DispenserWorker.DISPENSE_VOLTAGE_V
+            ),
+            DispenserWorker.MAX_DISPENSE_VOLTAGE_V,
+        ))
         self._dispenser_phase = "idle"
         self._vtune_slider_synced = False
         self._psd_window = None
@@ -2633,7 +2638,7 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
                 layout,
                 "Voltage:",
                 0,
-                50000,
+                int(DispenserWorker.MAX_DISPENSE_VOLTAGE_V * 1000),
                 int(round(self._dispenser_fire_voltage * 1000)),
                 single=100,
                 page=1000,

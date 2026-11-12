@@ -580,6 +580,10 @@ class DispenserWorker(RidenDPSWorker):
     FIRE_SECONDS = 30.0
     DISPENSE_CURRENT_A = 7.5
     DISPENSE_VOLTAGE_V = 5.0
+    # Operator, 2026-11-11: the dispenser never needs more than 5 V of
+    # headroom (it runs current-limited), so nothing may program more --
+    # enforced here, where it is written, not only by the slider.
+    MAX_DISPENSE_VOLTAGE_V = 5.0
     MIN_FIRE_SECONDS = 1.0
     # With the re-fire lockout gone, the fire time is the only limit on how
     # long 7.5 A flows, so it is bounded here, where it is enforced, and not
@@ -621,7 +625,10 @@ class DispenserWorker(RidenDPSWorker):
         return max(0.01, min(float(amps), self.max_current))
 
     def _clamp_voltage(self, volts):
-        return max(0.0, min(float(volts), self.max_voltage))
+        return max(
+            0.0,
+            min(float(volts), self.max_voltage, self.MAX_DISPENSE_VOLTAGE_V),
+        )
 
     def _clamp_seconds(self, seconds):
         return max(
