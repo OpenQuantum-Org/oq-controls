@@ -3712,7 +3712,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
 
     def _fire_dispenser_clicked(self):
         worker = getattr(self, "dispenser_worker", None)
-        if worker is None:
+        if worker is None or not worker.isRunning():
+            # Said, not silent: a press that did nothing read as a fire
+            # that had not started yet.
+            self._log_fault(
+                "dispenser",
+                "not connected — the press did not reach the supply; "
+                "press Auto-connect",
+            )
             return
         if self._dispenser_phase == "firing":
             worker.abort_fire()
@@ -3868,7 +3875,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             elif phase == "idle" and self._dispenser_phase == "firing":
                 self._event_log.log("dispenser_ready")
         self._dispenser_phase = phase
-        self._update_dispenser_progress(phase, remaining)
+        self._update_dispenser_progress(
+            phase, remaining, state.get("planned_s")
+        )
         if phase == "firing":
             self.dispenser_fire_btn.setEnabled(True)
             self.dispenser_fire_btn.setText(f"Abort Fire ({remaining:.0f} s)")
@@ -3880,9 +3889,12 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             )
             self._set_chip("disp", "DISPENSER IDLE", "#ababab")
 
-    def _update_dispenser_progress(self, phase, remaining):
+    def _update_dispenser_progress(self, phase, remaining, planned=None):
         if phase == "firing":
-            total = max(1.0, self._dispenser_fire_seconds)
+            # The length this fire started with, from the worker: the
+            # slider's current value made the bar jump when Fire Time was
+            # moved mid-fire.
+            total = max(1.0, planned or self._dispenser_fire_seconds)
             color = "#b9924f"
         else:
             self.dispenser_progress.setVisible(False)
