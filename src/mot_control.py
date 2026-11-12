@@ -3058,11 +3058,14 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self.linien_widget.stop()
         self._connect_lock_signal()
 
-        for attr in ("vtune_worker", "repump_gpio_worker"):
+        # PSD too: it kept its client to the old host after a host change.
+        for attr in ("vtune_worker", "repump_gpio_worker", "psd_worker"):
             worker = getattr(self, attr, None)
             if worker is not None:
                 worker.stop()
                 setattr(self, attr, None)
+        if self._psd_window is not None:
+            self._psd_window.set_worker(None)
         # Not started here: set_host() above restarts the acquisition
         # client, and these follow it once the server has answered.
 
@@ -4230,9 +4233,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             return
         self._event_log.log("linien_server_restarted", message=message)
         self._server_stalled = False
+        # An open PSD window gets its new worker from _on_linien_connection,
+        # once the restarted server has answered.
         self.linien_widget.start()
-        if self._psd_window is not None and self._psd_window.isVisible():
-            self._open_psd_window()  # a fresh PSD client for the new server
 
     def _on_linien_connection(self, status):
         self._rp_last_status = status
@@ -4243,6 +4246,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             # somewhere to connect. Guarded against the repeat emissions
             # LinkHealth makes on recovery.
             self._start_repump_workers()
+            # An open PSD window lost its worker to Connect or a restart;
+            # give it one for the server that just answered.
+            if (self._psd_window is not None and self._psd_window.isVisible()
+                    and getattr(self, "psd_worker", None) is None):
+                self._open_psd_window()
             # Give the worker a moment to finish its own connect-time setup.
             QtCore.QTimer.singleShot(1500, self._sync_filters_from_device)
             # Push the saved offset preference; the server default is True
@@ -4594,7 +4602,9 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             self._psd_window.setStyleSheet(self.styleSheet())
 
         worker = getattr(self, "psd_worker", None)
-        if worker is None:
+        # A worker whose connect failed has exited; reusing it queued every
+        # Start into a dead thread and nothing happened.
+        if worker is None or not worker.isRunning():
             self._psd_prev_status = {}
             self.psd_worker = PsdWorker(host=self.rp_edit.text().strip())
             self.psd_worker.connection_status.connect(self._on_psd_connection)
