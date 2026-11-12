@@ -95,9 +95,11 @@ assert output_writes(w._client)[-1] == 0
 assert len(events["summaries"]) == 2
 assert events["summaries"][1]["aborted"] is True
 
-# 6) external/front-panel enable while idle: setpoints enforced + time-limited
+# 6) external/front-panel enable while idle (connected, so not the first
+#    read): setpoints enforced + time-limited
 w2 = DispenserWorker(port=None)
 w2._client = FakeClient()
+w2._service({"output_enabled": False, **GOOD})  # connect: found off
 w2._service({"output_enabled": True, "v_set": 30.0, "i_set": 20.0})
 assert w2._phase == "firing"
 assert w2._client.writes == [(V, 500), (I, 750)], w2._client.writes
@@ -163,6 +165,77 @@ assert w5.fire_seconds == 1.0
 w5._client.writes.clear()
 w5._service({"output_enabled": True, "v_set": 5.0, "i_set": 10.0})
 assert w5._client.writes == [(I, 2000)], w5._client.writes  # 20.00 A
+
+# 13) an output found ON at connect is switched off at once. It used to
+#     start a fresh full fire window: a link dropped mid-fire ran the
+#     dispenser for the outage plus up to 120 s more.
+w8 = DispenserWorker(port=None)
+w8._client = FakeClient()
+w8._service({"output_enabled": True, **GOOD})
+assert w8._phase == "idle", w8._phase
+assert output_writes(w8._client) == [0], w8._client.writes
+
+
+class FlakyClient(FakeClient):
+    """Fails the next `fail` writes, as a CRC error on the bus does."""
+
+    def __init__(self, fail):
+        super().__init__()
+        self.fail = fail
+
+    def write_register(self, reg, value):
+        if self.fail:
+            self.fail -= 1
+            raise IOError("CRC mismatch")
+        super().write_register(reg, value)
+
+
+def poll(worker):
+    try:
+        worker._process_pending()
+    except IOError:
+        pass  # the run loop reports it; the test looks at what happens next
+
+
+# 14) a failed Abort is retried on the next poll. One bad write used to
+#     drop it, and the dispenser ran on until its timer.
+w9 = DispenserWorker(port=None)
+w9._client = FakeClient()
+w9.fire()
+w9._process_pending()
+w9._client = FlakyClient(fail=1)
+w9.abort_fire()
+poll(w9)
+assert w9._phase == "firing"  # the off write failed: still the truth
+poll(w9)
+assert w9._phase == "idle", w9._phase
+assert output_writes(w9._client) == [0], w9._client.writes
+
+# 15) ...but a failed Fire is not: a link that recovers later must not
+#     start a fire nobody is watching for.
+w10 = DispenserWorker(port=None)
+w10._client = FlakyClient(fail=1)
+w10.fire()
+poll(w10)
+poll(w10)
+assert w10._phase == "idle", w10._phase
+assert output_writes(w10._client) == [], w10._client.writes
+
+# 17) stopping the worker mid-fire ends the fire properly: output off, an
+#     aborted summary, and an idle state for the card (it froze on
+#     "firing" when the stop path wrote the register directly).
+stop_events = {"states": [], "summaries": []}
+w11 = DispenserWorker(port=None)
+w11._client = FakeClient()
+w11.fire_state.connect(lambda st: stop_events["states"].append(dict(st)))
+w11.fire_summary.connect(lambda st: stop_events["summaries"].append(dict(st)))
+w11.fire()
+w11._process_pending()
+assert stop_events["states"][-1]["planned_s"] == 30.0  # the bar's length
+w11._drive_safe_on_stop()
+assert output_writes(w11._client)[-1] == 0
+assert stop_events["states"][-1]["phase"] == "idle"
+assert stop_events["summaries"] and stop_events["summaries"][-1]["aborted"]
 
 # 16) constructor falls back to defaults for None only. An operator's 0 A
 # once became the 7.5 A default on every connect (an `or` fallback), and

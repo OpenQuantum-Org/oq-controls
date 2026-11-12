@@ -400,18 +400,21 @@ class RidenDPSWorker(QtCore.QThread):
             self.msleep(self.poll_ms)
 
         if self.disable_on_stop and self._client is not None:
-            # The safety-critical write of the whole class: this is what
-            # leaves the output off when the app goes, so it is logged even
-            # though nothing is left alive to react to a failure.
-            try:
-                with self.event_log.command(
-                    f"{self.log_name}.output", value=False, reason="worker_stop"
-                ):
-                    self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
-            except Exception:
-                pass
+            self._drive_safe_on_stop()
         if self._client is not None:
             self._client.close()
+
+    def _drive_safe_on_stop(self):
+        # The safety-critical write of the whole class: this is what
+        # leaves the output off when the app goes, so it is logged even
+        # though nothing is left alive to react to a failure.
+        try:
+            with self.event_log.command(
+                f"{self.log_name}.output", value=False, reason="worker_stop"
+            ):
+                self._client.write_register(RidenDPSClient.REG_OUTPUT, 0)
+        except Exception:
+            pass  # recorded by command(); nothing left to react
 
     def stop(self):
         self.running = False
@@ -450,8 +453,44 @@ class RidenDPSWorker(QtCore.QThread):
         return items
 
     def _process_pending(self):
-        for kind, value in self._pop_pending():
-            self._apply(kind, value)
+        items = self._pop_pending()
+        for i, (kind, value) in enumerate(items):
+            try:
+                self._apply(kind, value)
+            except Exception:
+                self._requeue_after_failure(items[i:])
+                raise
+
+    def _retry_on_failure(self, kind, value):
+        """Whether a write that failed is tried again next poll.
+
+        Setpoints and anything that switches an output off are: one CRC
+        error used to drop the whole batch behind it, an Abort included,
+        leaving the dispenser on until its timer. Anything that switches
+        an output on is not: a link that recovers a minute later must not
+        start a fire nobody is watching for.
+        """
+        if kind in ("voltage", "current", "params", "abort"):
+            return True
+        if kind == "output":
+            return not value
+        return False
+
+    def _requeue_after_failure(self, items):
+        with QtCore.QMutexLocker(self._mutex):
+            newer = {p[0] for p in self._pending if p[0] in self.COALESCE_KINDS}
+            keep = []
+            for kind, value in items:
+                if kind in newer:
+                    continue  # superseded by a newer setpoint of that kind
+                if self._retry_on_failure(kind, value):
+                    keep.append((kind, value))
+                else:
+                    self.event_log.fault(
+                        f"{self.log_name}.dropped", command=kind,
+                        reason="write failed; not retried (would switch on)",
+                    )
+            self._pending = keep + self._pending
 
     def _apply(self, kind, value):
         with self.event_log.command(
@@ -557,6 +596,10 @@ class DispenserWorker(RidenDPSWorker):
         self._phase = "idle"
         self._fire_end = 0.0
         self._fire_started = 0.0
+        self._fire_planned = 0.0
+        # The first state read after connecting decides what an output
+        # already on means; see _service.
+        self._first_read = True
 
     def _clamp_current(self, amps):
         return max(0.01, min(float(amps), self.max_current))
@@ -640,6 +683,7 @@ class DispenserWorker(RidenDPSWorker):
         super()._apply("output", True)
         self._phase = "firing"
         self._fire_started = now
+        self._fire_planned = self.fire_seconds
         self._fire_end = now + self.fire_seconds
         self._emit_fire_state()
 
@@ -657,8 +701,35 @@ class DispenserWorker(RidenDPSWorker):
             )
         self._emit_fire_state()
 
+    def _drive_safe_on_stop(self):
+        # Through _end_fire, not a bare register write: stopping mid-fire
+        # left the card on "firing" with a frozen countdown and the fire
+        # uncounted. If the write fails, the phase stays "firing", which
+        # is the truth as far as anyone knows.
+        try:
+            self._end_fire(aborted=True)
+        except Exception:
+            pass  # recorded by command(); nothing left to react
+
     def _service(self, state):
         now = time.monotonic()
+        if self._first_read:
+            if self._phase == "idle" and state.get("output_enabled"):
+                # On at connect means nothing here started it -- a link
+                # that dropped mid-fire, most likely. Off at once
+                # (operator, 2026-11-10); it used to start a fresh full
+                # fire window, so the dispenser ran for the outage plus up
+                # to 120 s more. A failed write raises before the flag
+                # clears, so the next poll tries again rather than
+                # adopting the output as a front-panel fire.
+                self.event_log.fault(
+                    f"{self.log_name}.found_on", action="switching off",
+                    i_out=state.get("i_out"),
+                )
+                self._end_fire(aborted=True)
+                self._first_read = False
+                return
+            self._first_read = False
         if self._phase == "firing":
             if now >= self._fire_end:
                 self._end_fire(aborted=False)
@@ -671,6 +742,7 @@ class DispenserWorker(RidenDPSWorker):
             self._enforce_setpoints(state)
             self._phase = "firing"
             self._fire_started = now
+            self._fire_planned = self.fire_seconds
             self._fire_end = now + self.fire_seconds
         self._emit_fire_state()
 
@@ -686,7 +758,12 @@ class DispenserWorker(RidenDPSWorker):
             remaining = max(0.0, self._fire_end - now)
         else:
             remaining = 0.0
-        self.fire_state.emit({"phase": self._phase, "remaining_s": remaining})
+        # planned_s: the bar is drawn against the length this fire was
+        # started with, not whatever the Fire Time slider says now.
+        self.fire_state.emit({
+            "phase": self._phase, "remaining_s": remaining,
+            "planned_s": self._fire_planned,
+        })
 
 
 # ---------------------------------------------------------------------------
