@@ -1144,10 +1144,10 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         laser_port=None,
         mot_coil_port=None,
         dispenser_port=None,
-        mot_coil_address=1,
-        dispenser_address=1,
-        vtune_min=0.0,
-        vtune_max=5.0,
+        mot_coil_address=None,
+        dispenser_address=None,
+        vtune_min=None,
+        vtune_max=None,
     ):
         super().__init__()
         self._settings = QtCore.QSettings("OQ-Controls", "OpenQuantumControls")
@@ -1160,15 +1160,28 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
         self._dispenser_port = dispenser_port or self._settings.value(
             "dps/dispenser_port", ""
         )
-        self._mot_coil_address = int(
-            self._settings.value("dps/mot_coil_address", mot_coil_address)
+        # A flag given on the command line wins; otherwise the saved value,
+        # otherwise the default. The saved value used to win outright, and
+        # every connect saves it, so these four flags did nothing after the
+        # first run. Read through the guarded readers: a corrupt saved value
+        # crashed startup.
+        self._mot_coil_address = (
+            int(mot_coil_address) if mot_coil_address is not None
+            else self._int_setting("dps/mot_coil_address", 1, 1, 247)
         )
-        self._dispenser_address = int(
-            self._settings.value("dps/dispenser_address", dispenser_address)
+        self._dispenser_address = (
+            int(dispenser_address) if dispenser_address is not None
+            else self._int_setting("dps/dispenser_address", 1, 1, 247)
         )
         # DAC Click full scale is 0-5 V (hardware Vref on the Click board).
-        self._vtune_min = float(self._settings.value("dac/vtune_min", vtune_min))
-        self._vtune_max = float(self._settings.value("dac/vtune_max", vtune_max))
+        self._vtune_min = (
+            float(vtune_min) if vtune_min is not None
+            else self._float_setting("dac/vtune_min", 0.0)
+        )
+        self._vtune_max = (
+            float(vtune_max) if vtune_max is not None
+            else self._float_setting("dac/vtune_max", 5.0)
+        )
         if self._vtune_min > self._vtune_max:
             self._vtune_min, self._vtune_max = self._vtune_max, self._vtune_min
         self._dispenser_fire_current = self._float_setting(
@@ -1234,8 +1247,11 @@ class OpenQuantumControlsWindow(QtWidgets.QMainWindow):
             laser_port=laser_port,
             mot_coil_port=mot_coil_port,
             dispenser_port=dispenser_port,
-            mot_coil_address=mot_coil_address,
-            dispenser_address=dispenser_address,
+            # The values in use, not the flags: a flag left out falls back
+            # to the saved value, and the log must say which one ran.
+            mot_coil_address=self._mot_coil_address,
+            dispenser_address=self._dispenser_address,
+            vtune_range=[self._vtune_min, self._vtune_max],
         )
         for problem in _FONT_PROBLEMS:
             self._event_log.fault("font", message=problem)
@@ -5030,19 +5046,21 @@ def main():
     parser.add_argument("--laser-port", default=None, help="Koheron serial port")
     parser.add_argument("--mot-coil-port", default=None)
     parser.add_argument("--dispenser-port", default=None)
-    parser.add_argument("--mot-coil-address", type=int, default=1)
-    parser.add_argument("--dispenser-address", type=int, default=1)
+    # None means "not given": the saved value (or the default) applies.
+    parser.add_argument("--mot-coil-address", type=int, default=None)
+    parser.add_argument("--dispenser-address", type=int, default=None)
     parser.add_argument(
         "--vtune-min",
         type=float,
-        default=0.0,
-        help="DAC Click V_tune slider minimum (V)",
+        default=None,
+        help="DAC Click V_tune slider minimum (V); default 0",
     )
     parser.add_argument(
         "--vtune-max",
         type=float,
-        default=5.0,
-        help="DAC Click V_tune slider maximum (V, hardware full scale is 5)",
+        default=None,
+        help="DAC Click V_tune slider maximum (V); default and hardware "
+        "full scale 5",
     )
     args = parser.parse_args()
 

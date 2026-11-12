@@ -174,8 +174,8 @@ all.
 | --- | --- | --- |
 | `--rp-host` | saved, else `rp-f0f2b5.local` | Red Pitaya running linien-server |
 | `--laser-port`, `--mot-coil-port`, `--dispenser-port` | auto-probed | serial ports |
-| `--mot-coil-address`, `--dispenser-address` | `1` | Modbus addresses |
-| `--vtune-min`, `--vtune-max` | `0.0`, `5.0` | V_tune slider range; 5 V is the DAC's hardware full scale, set by the Click board's Vref |
+| `--mot-coil-address`, `--dispenser-address` | saved, else `1` | Modbus addresses |
+| `--vtune-min`, `--vtune-max` | saved, else `0.0`, `5.0` | V_tune slider range; 5 V is the DAC's hardware full scale, set by the Click board's Vref |
 
 Expect on a good start: `DEVICES 4/4` on the Devices card, all four rows **OK**,
 and a sweeping trace. If the Red Pitaya is not up, a banner over the plot says

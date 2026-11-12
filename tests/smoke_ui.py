@@ -2031,7 +2031,17 @@ try:
     assert zeroed == [0], zeroed
     app.processEvents()
 
+    # A saved Modbus address applies when no flag is given, and a flag
+    # given on the command line beats it (the saved value used to win
+    # outright, so --mot-coil-address did nothing after the first run).
+    w1._settings.setValue("dps/mot_coil_address", 3)
+    w1._settings.sync()
     w2 = mot_control.OpenQuantumControlsWindow()
+    assert w2._mot_coil_address == 3, w2._mot_coil_address
+    w2.close()
+    app.processEvents()
+    w2 = mot_control.OpenQuantumControlsWindow(mot_coil_address=5)
+    assert w2._mot_coil_address == 5, w2._mot_coil_address
     assert w2.mod_freq_slider.value() == 23456
     assert w2.current_slider.value() == 9550
     # Temperature persists as ohms, so the restored slider count can land
