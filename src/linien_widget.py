@@ -306,6 +306,27 @@ class LinienWidget(QtWidgets.QWidget):
         self.view_box = self.plot.getViewBox()
         self.view_box.sigRangeChanged.connect(self._limit_xrange)
 
+        # One click back to the whole sweep after a mouse zoom or pan
+        # (operator, 2026-11-11); re-ticking Autozoom did it, but nobody
+        # would guess that. Sits in the plot's top-right corner, clear of
+        # the legend (bottom right).
+        self.reset_view_btn = QtWidgets.QToolButton(self.pg_widget)
+        self.reset_view_btn.setText("Reset view")
+        self.reset_view_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.reset_view_btn.setToolTip(
+            "Show the whole sweep and fit the signal vertically."
+        )
+        self.reset_view_btn.setStyleSheet(
+            # Quiet until wanted: no border or fill, dim text that only
+            # brightens under the cursor (the boxed version was too loud).
+            "QToolButton { color: #6e6e6e; background: transparent;"
+            " border: none; font-size: 11px; font-weight: 600;"
+            " padding: 2px 4px; }"
+            "QToolButton:hover { color: #d0d0d0; }"
+        )
+        self.reset_view_btn.clicked.connect(self.reset_view)
+        self.view_box.sigResized.connect(self._place_reset_view_btn)
+
         # --- Autolock line selection (linien's PlotWidget overlays) ---
         # Created once and shown/hidden. Adding items per selection is what
         # previously left marker lines on the plot forever.
@@ -697,13 +718,38 @@ class LinienWidget(QtWidgets.QWidget):
         if current_xrange[0] < d_min or current_xrange[1] > d_max:
             vb.setXRange(d_min, d_max, padding=0)
 
+    def _place_reset_view_btn(self, *_):
+        area = self.pg_widget.mapFromScene(
+            self.view_box.sceneBoundingRect()
+        ).boundingRect()
+        btn = self.reset_view_btn
+        btn.adjustSize()
+        btn.move(area.right() - btn.width() - 6, area.top() + 6)
+        btn.raise_()
+
+    def reset_view(self):
+        """Whole sweep on X, Y fitted to the traces, Autozoom left as set.
+
+        autoRange() switches auto-ranging off as it fits, so Y tracking is
+        put back afterwards if Autozoom is on.
+        """
+        self.view_box.autoRange(padding=0.05)
+        slider_min, slider_max = self.xrange_slider.value()
+        d_min, d_max = self._v_range_to_display(
+            slider_min / 1000, slider_max / 1000
+        )
+        self.plot.setXRange(d_min, d_max, padding=0)
+        self.plot.enableAutoRange(
+            axis="y", enable=self.autozoom_check.isChecked()
+        )
+
     def _set_autozoom(self, on):
         """Track the signal on Y, or hold whatever range is showing.
 
-        Switching it back on also resets X to the full sweep range, so a
-        tick-off/tick-on undoes a zoom -- this is the Reset Zoom button
-        the checkbox replaced. X is not auto-ranged continuously, since
-        that would fight _limit_xrange.
+        Switching it back on also resets X to the full sweep range (the
+        Reset view button does that without changing this setting). X is
+        not auto-ranged continuously, since that would fight
+        _limit_xrange.
         """
         self.plot.enableAutoRange(axis="y", enable=bool(on))
         if on:

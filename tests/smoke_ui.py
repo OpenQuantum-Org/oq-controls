@@ -727,6 +727,16 @@ try:
     lw.linien_thread = None
     assert locks == [(0, 2047, 2048)], locks
 
+    # Reset view: a mouse zoom goes back to the whole sweep in one click,
+    # without changing the Autozoom setting.
+    lw.plot.setXRange(-0.2, 0.1, padding=0)
+    autozoom_was = lw.autozoom_check.isChecked()
+    lw.reset_view_btn.click()
+    lo, hi = lw.xrange_slider.value()
+    x0, x1 = lw.plot.viewRange()[0]
+    assert abs(x0 - lo / 1000) < 1e-6 and abs(x1 - hi / 1000) < 1e-6, (x0, x1)
+    assert lw.autozoom_check.isChecked() == autozoom_was
+
     # A running lock action holds the controls it reads and restores in
     # its `finally`; a mid-probe Sweep Center nudge was silently undone.
     held = (lw.sweep_center_spin, lw.xrange_slider,
