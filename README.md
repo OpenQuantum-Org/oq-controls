@@ -35,7 +35,7 @@ part of the repository.
 (Linien 1.x ran on OS 1.x and is unmaintained). The image this experiment runs
 is kept here:
 
-> **[Red Pitaya SD card image](https://drive.google.com/file/d/1fvGqLEU4Z0ARxMitc8ChkZGRuVNWU0dQ/view?usp=drive_link)**
+> **[Red Pitaya SD card image](https://drive.google.com/file/d/1MeA-5p24I17UWWBJZgCF1BPtkCxQM__l/view?usp=sharing)**
 
 Write it to the card with Balena Etcher or the equivalent — Red Pitaya's
 [Prepare SD card](https://redpitaya.readthedocs.io/en/latest/quickStart/SDcard/SDcard.html)
