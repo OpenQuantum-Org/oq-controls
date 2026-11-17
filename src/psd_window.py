@@ -2,7 +2,7 @@
 
 A port of linien 2.1.0's noise-analysis window
 (``linien-gui/linien_gui/ui/psd_window.py``, ``psd_plot_widget.py`` and
-``psd_table_widget.py``, reference tree ``C:\\Users\\kostu\\Desktop\\linien``).
+``psd_table_widget.py``, reference tree ``C:\\Users\\kostu\\Desktop\\linien\\2.1-upstream``).
 The plotting, stitching and table logic are linien's; only the app plumbing
 differs -- linien reads RPyC parameters directly through its own app
 singleton, we drive the same server through ``PsdWorker`` signals, and the
